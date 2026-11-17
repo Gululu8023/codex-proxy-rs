@@ -23,7 +23,7 @@ use gateway_admin::{
     ports::{
         backup::{
             BackupObjectStorePort, BackupRepository, DatabaseDumpPort, DumpArtifact, DumpRequest,
-            StagedArtifact, StatusTransitionUpdate, UploadObjectRequest,
+            PrivacyStoreSnapshotPort, StagedArtifact, StatusTransitionUpdate, UploadObjectRequest,
         },
         store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult, AuthStore},
     },
@@ -79,6 +79,7 @@ pub(crate) fn queued_record(seed: &BackupRecordSeed) -> BackupRecord {
         object_key: seed.object_key.clone(),
         size_bytes: None,
         sha256: None,
+        privacy_store: None,
         attempt_count: 0,
         error_code: None,
         error_message: None,
@@ -397,6 +398,9 @@ impl BackupRepository for FakeBackupRepository {
         if let Some(sha256) = update.sha256 {
             record.sha256 = Some(sha256);
         }
+        if update.privacy_store.is_some() && record.privacy_store.is_none() {
+            record.privacy_store = update.privacy_store;
+        }
         if let Some(code) = update.error_code {
             record.error_code = Some(code);
         }
@@ -580,6 +584,90 @@ impl DatabaseDumpPort for FakeDumpPort {
 }
 
 /// 内存版对象存储：把上传内容按 key 保存并支持 Head/Delete/预签名
+/// 假隐私存储快照内容
+pub(crate) const PRIVACY_CONTENT: &[u8] = b"veil-snapshot-tar-gz-bytes";
+
+/// 内存版隐私存储快照：可模拟映射卷未初始化与快照失败
+pub(crate) struct FakePrivacyStore {
+    dir: TempDir,
+    initialized: bool,
+    fail_snapshot: bool,
+    pub(crate) snapshots: Mutex<Vec<String>>,
+}
+
+impl FakePrivacyStore {
+    pub(crate) fn new() -> Self {
+        Self {
+            dir: tempfile::tempdir().expect("temp dir"),
+            initialized: true,
+            fail_snapshot: false,
+            snapshots: Mutex::new(Vec::new()),
+        }
+    }
+
+    /// 映射卷从未初始化
+    pub(crate) fn uninitialized(mut self) -> Self {
+        self.initialized = false;
+        self
+    }
+
+    /// 映射卷已初始化但无法快照
+    pub(crate) fn failing(mut self) -> Self {
+        self.fail_snapshot = true;
+        self
+    }
+
+    pub(crate) fn staged_path(&self, backup_id: &str) -> std::path::PathBuf {
+        self.dir.path().join(format!("{backup_id}.veil.tar.gz"))
+    }
+}
+
+#[async_trait]
+impl PrivacyStoreSnapshotPort for FakePrivacyStore {
+    async fn snapshot(&self, request: DumpRequest) -> Result<Option<DumpArtifact>, BackupError> {
+        self.snapshots
+            .lock()
+            .expect("snapshots")
+            .push(request.backup_id.clone());
+        if self.fail_snapshot {
+            return Err(BackupError::new(
+                gateway_admin::model::backup::code::PRIVACY_STORE_FAILED,
+                "veil unavailable".to_owned(),
+            ));
+        }
+        if !self.initialized {
+            return Ok(None);
+        }
+        let path = self.staged_path(&request.backup_id);
+        std::fs::write(&path, PRIVACY_CONTENT).expect("write privacy snapshot");
+        Ok(Some(DumpArtifact {
+            path,
+            size_bytes: PRIVACY_CONTENT.len() as u64,
+            sha256: sha256_hex(PRIVACY_CONTENT),
+        }))
+    }
+
+    async fn inspect_staging(
+        &self,
+        backup_id: &str,
+    ) -> Result<Option<StagedArtifact>, BackupError> {
+        let path = self.staged_path(backup_id);
+        if !path.exists() {
+            return Ok(None);
+        }
+        Ok(Some(StagedArtifact {
+            path,
+            size_bytes: PRIVACY_CONTENT.len() as u64,
+            sha256: sha256_hex(PRIVACY_CONTENT),
+        }))
+    }
+
+    async fn cleanup_staging(&self, backup_id: &str) -> Result<(), BackupError> {
+        let _ = std::fs::remove_file(self.staged_path(backup_id));
+        Ok(())
+    }
+}
+
 pub(crate) struct FakeObjectStore {
     pub(crate) objects: Mutex<std::collections::HashMap<String, Vec<u8>>>,
     upload_error: Option<BackupError>,

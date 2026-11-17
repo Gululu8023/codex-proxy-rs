@@ -3,7 +3,7 @@
 use std::cmp::Reverse;
 use std::collections::{BTreeSet, HashMap};
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::{Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use futures::FutureExt;
@@ -12,7 +12,8 @@ use crate::concurrency::{CapacityWait, ConcurrencyQueuePolicy, QueueRejection};
 use crate::identity::ProviderKind;
 
 use super::{
-    AccountConcurrency, AccountStatus, ProviderAccount, ProviderAccountId, SmartSchedulingConfig,
+    AccountConcurrency, AccountStatus, ProviderAccount, ProviderAccountId, ResetWindowWeights,
+    SmartSchedulingConfig,
 };
 
 /// `runtime_settings.rotation_strategy` 的稳定值
@@ -54,7 +55,13 @@ pub const MAX_ACCOUNT_ROTATIONS: u32 = 31;
 /// 会话绑定与轮次关联共用的保留时长上限，单位小时
 pub const MAX_SESSION_AFFINITY_TTL_HOURS: u32 = 720;
 
-/// OpenAI 会话账号亲和；请求身份和模式行为由 Provider 解释
+/// Claude 原有绑定保留 30 天；新设置和旧配置反序列化共用这一默认值
+#[must_use]
+pub const fn default_anthropic_session_affinity_ttl_hours() -> u32 {
+    720
+}
+
+/// 会话账号亲和；请求身份和模式行为由 Provider 解释
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AccountAffinity {
@@ -90,13 +97,16 @@ impl AccountAffinity {
 pub struct AccountSelectionPolicy {
     strategy: RotationStrategy,
     smart_scheduling: SmartSchedulingConfig,
+    quota_reset_window_weights: ResetWindowWeights,
     max_concurrent_per_account: AccountConcurrency,
     queue_policy: ConcurrencyQueuePolicy,
     openai_guardian_reserved_concurrency: u32,
     openai_account_affinity: AccountAffinity,
+    anthropic_account_affinity: AccountAffinity,
     switch_account_on_queue_failure: bool,
     max_account_rotations: u32,
     openai_session_affinity_ttl: Duration,
+    anthropic_session_affinity_ttl: Duration,
 }
 
 impl AccountSelectionPolicy {
@@ -108,17 +118,33 @@ impl AccountSelectionPolicy {
         Self {
             strategy,
             smart_scheduling: SmartSchedulingConfig::default(),
+            quota_reset_window_weights: ResetWindowWeights::default(),
             max_concurrent_per_account: max_concurrent_per_account.into(),
             openai_guardian_reserved_concurrency: 0,
             openai_account_affinity: AccountAffinity::default(),
+            anthropic_account_affinity: AccountAffinity::default(),
             switch_account_on_queue_failure: false,
             max_account_rotations: 3,
             openai_session_affinity_ttl: Duration::from_secs(24 * 3600),
+            anthropic_session_affinity_ttl: Duration::from_secs(
+                u64::from(default_anthropic_session_affinity_ttl_hours()) * 3600,
+            ),
             queue_policy: ConcurrencyQueuePolicy {
                 max_waiting: 0,
                 timeout: Duration::ZERO,
             },
         }
+    }
+
+    #[must_use]
+    pub const fn with_quota_reset_window_weights(mut self, weights: ResetWindowWeights) -> Self {
+        self.quota_reset_window_weights = weights;
+        self
+    }
+
+    #[must_use]
+    pub const fn quota_reset_window_weights(self) -> ResetWindowWeights {
+        self.quota_reset_window_weights
     }
 
     #[must_use]
@@ -130,6 +156,28 @@ impl AccountSelectionPolicy {
     #[must_use]
     pub const fn openai_account_affinity(self) -> AccountAffinity {
         self.openai_account_affinity
+    }
+
+    #[must_use]
+    pub const fn with_anthropic_account_affinity(mut self, affinity: AccountAffinity) -> Self {
+        self.anthropic_account_affinity = affinity;
+        self
+    }
+
+    #[must_use]
+    pub const fn anthropic_account_affinity(self) -> AccountAffinity {
+        self.anthropic_account_affinity
+    }
+
+    #[must_use]
+    pub const fn with_anthropic_session_affinity_ttl(mut self, ttl: Duration) -> Self {
+        self.anthropic_session_affinity_ttl = ttl;
+        self
+    }
+
+    #[must_use]
+    pub const fn anthropic_session_affinity_ttl(self) -> Duration {
+        self.anthropic_session_affinity_ttl
     }
 
     #[must_use]
@@ -245,6 +293,7 @@ pub struct AccountRuntimeSignals {
     pub in_flight: u32,
     pub last_started_at: Option<SystemTime>,
     pub quota_reset_at: Option<SystemTime>,
+    pub quota_reset_windows: Option<Arc<[AccountQuotaResetWindow]>>,
     /// Provider 归一化的剩余额度基点：0 耗尽，10_000 全部可用
     pub quota_remaining_rank: Option<u64>,
     pub cooldown: Option<super::AccountCooldown>,
@@ -459,6 +508,7 @@ impl AccountRuntimeSignals {
     pub fn with_provider_quota(mut self, quota: Option<AccountQuotaSignals>) -> Self {
         if let Some(quota) = quota {
             self.quota_reset_at = quota.reset_at;
+            self.quota_reset_windows = quota.reset_windows;
             self.quota_remaining_rank = quota.remaining_rank;
         }
         self
@@ -482,9 +532,17 @@ impl AccountRuntimeSignals {
     }
 }
 
+/// Provider 确认为账号通用且属于受支持周期的重置观测
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountQuotaResetWindow {
+    pub period: super::QuotaResetPeriod,
+    pub reset_at: SystemTime,
+}
+
 /// Provider 从私有 quota JSON 投影出的中立调度事实
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountQuotaSignals {
+    reset_windows: Option<Arc<[AccountQuotaResetWindow]>>,
     reset_at: Option<SystemTime>,
     remaining_rank: Option<u64>,
 }
@@ -496,16 +554,23 @@ impl AccountQuotaSignals {
         Self {
             reset_at,
             remaining_rank,
+            reset_windows: None,
         }
     }
 
     #[must_use]
-    pub const fn reset_at(self) -> Option<SystemTime> {
+    pub fn with_reset_windows(mut self, windows: Vec<AccountQuotaResetWindow>) -> Self {
+        self.reset_windows = (!windows.is_empty()).then(|| windows.into());
+        self
+    }
+
+    #[must_use]
+    pub const fn reset_at(&self) -> Option<SystemTime> {
         self.reset_at
     }
 
     #[must_use]
-    pub const fn remaining_rank(self) -> Option<u64> {
+    pub const fn remaining_rank(&self) -> Option<u64> {
         self.remaining_rank
     }
 }
@@ -594,7 +659,6 @@ pub enum AccountEligibilityPolicy {
     #[default]
     Enforce,
     BypassForDiagnostic,
-    FreezeRecovery,
 }
 
 impl AccountEligibilityPolicy {
@@ -603,13 +667,11 @@ impl AccountEligibilityPolicy {
         !matches!(self, Self::Enforce)
     }
 
-    /// 恢复探测只验证上游结果，不能通过回写 Cookie 或刷新凭据提前解除冻结
     #[must_use]
     pub const fn allows_account_state_mutation(self, enabled: bool) -> bool {
         match self {
             Self::Enforce => true,
             Self::BypassForDiagnostic => enabled,
-            Self::FreezeRecovery => false,
         }
     }
 }
@@ -629,7 +691,6 @@ pub enum AccountSchedulingBlocker {
 pub enum PreferredAccountSelection {
     NotRequested,
     Hit,
-    OverriddenByPolicy,
     Missing,
     Blocked(AccountSchedulingBlocker),
 }
@@ -639,7 +700,6 @@ pub enum PreferredAccountSelection {
 pub struct AccountSelection<'a> {
     candidate: &'a AccountCandidate,
     preferred: PreferredAccountSelection,
-    policy_choice: bool,
 }
 
 impl<'a> AccountSelection<'a> {
@@ -652,12 +712,6 @@ impl<'a> AccountSelection<'a> {
     pub const fn preferred(self) -> PreferredAccountSelection {
         self.preferred
     }
-
-    /// 显式策略选号不受 Provider 的软亲和等待覆盖；委托内置选号不属于显式选择
-    #[must_use]
-    pub const fn is_policy_choice(self) -> bool {
-        self.policy_choice
-    }
 }
 
 /// 同一 target 内唯一的账号排序器
@@ -665,53 +719,6 @@ impl<'a> AccountSelection<'a> {
 pub struct AccountSelector;
 
 impl AccountSelector {
-    /// 策略同时约束立即选号与等待，候选保留仅因本地容量受阻的账号
-    #[must_use]
-    pub(crate) fn policy_candidates<'a>(
-        &self,
-        candidates: &'a [AccountCandidate],
-        context: &AccountSelectionContext,
-    ) -> Vec<&'a AccountCandidate> {
-        candidates
-            .iter()
-            .filter(|candidate| {
-                matches!(
-                    self.scheduling_blocker(candidate, context),
-                    None | Some(AccountSchedulingBlocker::ConcurrencyLimit)
-                )
-            })
-            .collect()
-    }
-
-    /// 对插件返回的 ID 再执行同一资格判断，并保留原有亲和遥测结果
-    #[must_use]
-    pub(crate) fn select_policy_candidate<'a>(
-        &self,
-        candidates: &'a [AccountCandidate],
-        context: &AccountSelectionContext,
-        account_id: &ProviderAccountId,
-    ) -> Option<AccountSelection<'a>> {
-        let candidate = candidates
-            .iter()
-            .find(|candidate| candidate.account.id() == account_id)?;
-        if self.scheduling_blocker(candidate, context).is_some() {
-            return None;
-        }
-        let (preferred, _) = self.preferred_decision(candidates, context);
-        let preferred = if preferred == PreferredAccountSelection::Hit
-            && context.preferred_account.as_ref() != Some(account_id)
-        {
-            PreferredAccountSelection::OverriddenByPolicy
-        } else {
-            preferred
-        };
-        Some(AccountSelection {
-            candidate,
-            preferred,
-            policy_choice: true,
-        })
-    }
-
     /// 汇总与本次调度约束一致的并发容量，供请求级观测使用
     #[must_use]
     pub fn capacity_snapshot(
@@ -773,7 +780,6 @@ impl AccountSelector {
                 return Some(AccountSelection {
                     candidate,
                     preferred: PreferredAccountSelection::Hit,
-                    policy_choice: false,
                 });
             }
         }
@@ -782,24 +788,31 @@ impl AccountSelector {
         let candidate = match context.policy.strategy() {
             RotationStrategy::QuotaResetPriority => {
                 eligible.sort_by(|left, right| {
-                    (
-                        left.signals.quota_reset_at.is_none(),
-                        left.signals.quota_reset_at,
-                    )
-                        .cmp(&(
-                            right.signals.quota_reset_at.is_none(),
-                            right.signals.quota_reset_at,
-                        ))
-                        .then_with(|| {
-                            capacity_utilization(left, context)
-                                .total_cmp(&capacity_utilization(right, context))
-                        })
-                        .then_with(|| {
-                            left.signals
-                                .last_started_at
-                                .cmp(&right.signals.last_started_at)
-                        })
-                        .then_with(|| left.account.id().cmp(right.account.id()))
+                    let windows = context.policy.quota_reset_window_weights();
+                    if windows.enabled() {
+                        windows
+                            .score(&right.signals, context.now)
+                            .total_cmp(&windows.score(&left.signals, context.now))
+                    } else {
+                        (
+                            left.signals.quota_reset_at.is_none(),
+                            left.signals.quota_reset_at,
+                        )
+                            .cmp(&(
+                                right.signals.quota_reset_at.is_none(),
+                                right.signals.quota_reset_at,
+                            ))
+                    }
+                    .then_with(|| {
+                        capacity_utilization(left, context)
+                            .total_cmp(&capacity_utilization(right, context))
+                    })
+                    .then_with(|| {
+                        left.signals
+                            .last_started_at
+                            .cmp(&right.signals.last_started_at)
+                    })
+                    .then_with(|| left.account.id().cmp(right.account.id()))
                 });
                 eligible.first().copied()?
             }
@@ -822,7 +835,6 @@ impl AccountSelector {
         Some(AccountSelection {
             candidate,
             preferred,
-            policy_choice: false,
         })
     }
 
@@ -908,7 +920,7 @@ impl AccountSelector {
         if context
             .account_scope
             .as_ref()
-            .is_some_and(|scope| !scope.allows_current_account(&candidate.account))
+            .is_some_and(|scope| !scope.allows(candidate.account.id()))
         {
             return Some(AccountSchedulingBlocker::OutsideClientScope);
         }
@@ -940,8 +952,6 @@ impl AccountSelector {
 
 // 首输出 10 秒时延迟得分减半；固定尺度不随其他候选账号变化
 const SMART_LATENCY_HALF_SCORE_MS: f64 = 10_000.0;
-// 距重置一小时时得分减半；未知和已过期时间不提供重置奖励
-const SMART_RESET_HALF_SCORE_SECONDS: f64 = 3_600.0;
 
 fn capacity_utilization(candidate: &AccountCandidate, context: &AccountSelectionContext) -> f64 {
     context
@@ -997,15 +1007,6 @@ pub(crate) fn smart_score(candidate: &AccountCandidate, context: &AccountSelecti
             SMART_LATENCY_HALF_SCORE_MS / (SMART_LATENCY_HALF_SCORE_MS + latency as f64)
         });
 
-    let reset = candidate
-        .signals
-        .quota_reset_at
-        .and_then(|reset| reset.duration_since(now).ok())
-        .filter(|remaining| !remaining.is_zero())
-        .map_or(0.0, |remaining| {
-            SMART_RESET_HALF_SCORE_SECONDS
-                / (SMART_RESET_HALF_SCORE_SECONDS + remaining.as_secs_f64())
-        });
     let [
         load_weight,
         quota_weight,
@@ -1018,5 +1019,5 @@ pub(crate) fn smart_score(candidate: &AccountCandidate, context: &AccountSelecti
         + quota_weight * quota
         + health_weight * failure
         + latency_weight * latency
-        + reset_weight * reset
+        + reset_weight * config.reset_score(&candidate.signals, now)
 }

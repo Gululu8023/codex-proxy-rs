@@ -1,4 +1,4 @@
-//! Provider 冷却与账号错误保护的运行状态端口
+//! Provider 冷却的运行状态端口
 
 use super::ProviderStoreError;
 /// 账号级 cooldown 的来源类别；调度状态统一按 `rate_limited` 处理
@@ -10,7 +10,7 @@ use crate::{
 use futures::future::BoxFuture;
 use std::time::SystemTime;
 
-/// 可丢失的账号冷却事实，不进入持久状态；探测冻结到期后仍需确认恢复
+/// 可丢失的账号冷却事实，不进入持久状态
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderCooldown {
     account_id: ProviderAccountId,
@@ -152,63 +152,7 @@ impl ProviderScopedCooldown {
     }
 }
 
-/// 单次实际上游尝试开始时捕获的反馈栅栏
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountProtectionGuard {
-    pub account_id: ProviderAccountId,
-    pub credential_revision: CredentialRevision,
-    pub policy_generation: String,
-    pub reset_generation: String,
-    pub evidence_version: u64,
-}
-
 pub trait ProviderCooldownPort: Send + Sync {
-    /// 由配置发布边界调用，只有保护配置变化才推进策略代次
-    fn publish_protection_policy<'a>(
-        &'a self,
-        _policy: &'a crate::account::AccountErrorProtection,
-        _revision: crate::routing::ConfigRevision,
-    ) -> BoxFuture<'a, Result<(), ProviderStoreError>> {
-        Box::pin(async { Ok(()) })
-    }
-
-    fn begin_protection<'a>(
-        &'a self,
-        _account_id: &'a ProviderAccountId,
-        _revision: CredentialRevision,
-        _fingerprint: &'a str,
-        _snapshot_revision: crate::routing::ConfigRevision,
-    ) -> BoxFuture<'a, Result<Option<AccountProtectionGuard>, ProviderStoreError>> {
-        Box::pin(async { Ok(None) })
-    }
-
-    /// 凭据提交后只使旧凭据保护反馈失效，保留账号与模型限流
-    fn advance_protection_revision<'a>(
-        &'a self,
-        _account_id: &'a ProviderAccountId,
-        _revision: CredentialRevision,
-    ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
-    }
-
-    /// 同一原子操作内递增窗口计数并冻结，活动冻结不被迟到反馈顺延
-    fn record_protection_failure<'a>(
-        &'a self,
-        _guard: &'a AccountProtectionGuard,
-        _policy: &'a crate::account::AccountErrorProtection,
-        _matched: &'a [crate::account::AccountProtectionMatch],
-    ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
-    }
-
-    /// 只清除开始时所见的未冻结证据，不解除冻结或清除较新的失败
-    fn record_protection_success<'a>(
-        &'a self,
-        _guard: &'a AccountProtectionGuard,
-    ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
-        Box::pin(async { Ok(false) })
-    }
-
     fn put_if_later(
         &self,
         cooldown: ProviderCooldown,

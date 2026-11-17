@@ -3,7 +3,7 @@ body:
     attributes:
       value: |
         这里适合交流尚在探索的想法、方案取舍和使用场景，不要求先给出完整实现。
-        已有明确场景与预期行为时，可以直接提交[功能建议 Issue](https://github.com/zyycn/codex-proxy-rs/issues/new?template=feature-request.yml)，无需先开讨论。
+        已有明确场景与预期行为时，可以直接提交[功能建议 Issue](https://github.com/Gululu8023/codex-proxy-rs/issues/new?template=feature-request.yml)，无需先开讨论。
         请先搜索相关讨论，每个主题围绕一个问题展开。
 
   - type: textarea

@@ -53,12 +53,16 @@ export function useUsageInsights(scopedParams: () => UsageRange) {
 function useUsageQuery<T>(fetch: (params: UsageRange, options: RequestOptions) => Promise<T>, options: { keepPreviousData?: boolean } = {}) {
   const data = shallowRef<T | null>(null)
   const request = useRequestState()
+  let previousScope = ''
   const state = computed<UsageQueryState<T>>(() => ({ data: data.value, loading: request.loading.value, error: request.error.value }))
 
   async function load(params: UsageRange) {
     const id = request.start()
-    if (!options.keepPreviousData)
+    const scope = JSON.stringify(params)
+    // 仅同一筛选范围的刷新可保留旧汇总，不能把 Codex 数据标成 Claude。
+    if (!options.keepPreviousData || scope !== previousScope)
       data.value = null
+    previousScope = scope
     try {
       const result = await fetch(params, { signal: request.signal })
       if (request.isCurrent(id))

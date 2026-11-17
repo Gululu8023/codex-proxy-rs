@@ -428,13 +428,7 @@ fn lite_context(control: ResponseControl) -> AttemptContext {
             ModelRequestId::new("req_lite").unwrap(),
             ClientApiKeyId::new("key_openai_contract").unwrap(),
         )
-        .with_response_control(Some(control))
-        .with_middleware(
-            None,
-            Arc::from([]),
-            "/v1/responses".to_owned(),
-            ClientTransport::WebSocket,
-        ),
+        .with_response_control(Some(control)),
         NonZeroU32::new(1).unwrap(),
         SystemTime::now() + Duration::from_secs(30),
         account_policy(),

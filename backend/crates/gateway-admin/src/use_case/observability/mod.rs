@@ -43,6 +43,7 @@ const HEALTH_TIMELINE_SLOT_MINUTES: i64 = 15;
 const HEALTH_TIMELINE_MIN_SAMPLE_SIZE: u64 = 10;
 const HEALTH_TIMELINE_UNAVAILABLE_FAILURE_THRESHOLD: u64 = 3;
 const HEALTH_TIMELINE_STABLE_RELIABILITY: f64 = 95.0;
+mod errors;
 mod export;
 mod store_cache;
 pub(crate) use store_cache::CachedObservabilityStore;
@@ -50,13 +51,38 @@ pub(crate) use store_cache::CachedObservabilityStore;
 /// API 消费的观测控制面服务
 #[async_trait]
 pub trait ObservabilityService: Send + Sync {
+    async fn prompt_guard_records(
+        &self,
+        _query: crate::model::prompt_guard_records::PromptGuardQuery,
+    ) -> Result<crate::model::prompt_guard_records::PromptGuardPage, AdminError> {
+        Err(AdminError::internal("审查记录服务未装配"))
+    }
     async fn dashboard_summary(
         &self,
         range: TimeRange,
         kind: TrendKind,
+    ) -> Result<DashboardResult, AdminError> {
+        self.dashboard_summary_for_provider(range, kind, None).await
+    }
+    async fn dashboard_trend(
+        &self,
+        range: TimeRange,
+        kind: TrendKind,
+    ) -> Result<Trend, AdminError> {
+        self.dashboard_trend_for_provider(range, kind, None).await
+    }
+    async fn dashboard_summary_for_provider(
+        &self,
+        range: TimeRange,
+        kind: TrendKind,
+        provider: Option<String>,
     ) -> Result<DashboardResult, AdminError>;
-    async fn dashboard_trend(&self, range: TimeRange, kind: TrendKind)
-    -> Result<Trend, AdminError>;
+    async fn dashboard_trend_for_provider(
+        &self,
+        range: TimeRange,
+        kind: TrendKind,
+        provider: Option<String>,
+    ) -> Result<Trend, AdminError>;
     async fn usage_records(&self, query: UsageQuery) -> Result<UsagePage, AdminError>;
     async fn usage_record_detail(&self, request_id: &str) -> Result<UsageDetail, AdminError>;
     async fn usage_summary(
@@ -123,10 +149,14 @@ impl DefaultObservabilityService {
     async fn load_dashboard_summary(
         &self,
         range: TimeRange,
+        provider: Option<String>,
     ) -> Result<DashboardResult, AdminError> {
         let observed_at = Utc::now();
-        let query = DashboardQuery::new(range, self.timezone)
+        let mut query = DashboardQuery::new(range, self.timezone)
             .map_err(|_| AdminError::internal("时间超出支持范围"))?;
+        // 供应商进入缓存键，并贯穿汇总、最近请求、账号及容量的查询。
+        query.provider_kind = provider.clone();
+        query.recent_request_filter.provider_kind = provider.clone();
         let today_start = query.yesterday_range.end;
         let (mut observation, settings) = futures::try_join!(
             self.store.dashboard_summary(query, observed_at),
@@ -176,9 +206,12 @@ impl DefaultObservabilityService {
         )?;
         let health_timeline =
             health_timeline_at(&observation.trend, observation.range.end, self.timezone)?;
-        let wire_profiles = self
+        let mut wire_profiles = self
             .providers
             .dashboard_wire_profiles(&settings.request_profiles);
+        if let Some(provider) = &provider {
+            wire_profiles.retain(|profile| &profile.provider == provider);
+        }
         let max_concurrent_per_account = u64::from(settings.values.max_concurrent_per_account);
         let (mut inherited_accounts, mut overridden_slots) = runtime_slots
             .map_or((observation.provider_accounts.normal, 0), |slots| {
@@ -224,6 +257,16 @@ impl DefaultObservabilityService {
 
 #[async_trait]
 impl ObservabilityService for DefaultObservabilityService {
+    async fn prompt_guard_records(
+        &self,
+        query: crate::model::prompt_guard_records::PromptGuardQuery,
+    ) -> Result<crate::model::prompt_guard_records::PromptGuardPage, AdminError> {
+        query.validate()?;
+        self.store
+            .prompt_guard_records(query)
+            .await
+            .map_err(|error| map_store_error(error, "prompt guard records"))
+    }
     async fn export_diagnostics(
         &self,
         target: crate::model::diagnostics::DiagnosticTarget,
@@ -231,12 +274,13 @@ impl ObservabilityService for DefaultObservabilityService {
         self.collect_diagnostics(target).await
     }
 
-    async fn dashboard_summary(
+    async fn dashboard_summary_for_provider(
         &self,
         range: TimeRange,
         kind: TrendKind,
+        provider: Option<String>,
     ) -> Result<DashboardResult, AdminError> {
-        let mut result = self.load_dashboard_summary(range).await?;
+        let mut result = self.load_dashboard_summary(range, provider).await?;
         result.trend = trend(
             kind,
             result.observation.trend.clone(),
@@ -245,16 +289,20 @@ impl ObservabilityService for DefaultObservabilityService {
         Ok(result)
     }
 
-    async fn dashboard_trend(
+    async fn dashboard_trend_for_provider(
         &self,
         range: TimeRange,
         kind: TrendKind,
+        provider: Option<String>,
     ) -> Result<Trend, AdminError> {
         let observation = self
             .store
             .usage_insights_observation(
                 range,
-                UsageFilter::default(),
+                UsageFilter {
+                    provider_kind: provider,
+                    ..UsageFilter::default()
+                },
                 Granularity::for_range(range),
                 false,
             )

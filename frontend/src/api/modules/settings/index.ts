@@ -1,14 +1,12 @@
 import type { RequestOptions } from '../../request'
 import type { RequestLocation, RequestLocationDetection } from '../../types/location'
 import type { CodexPrivacyPolicy } from './privacy'
-import type { ClientProfileSelection, ProviderRequestProfiles, ProviderRequestProfileUpdates, XaiClientProfileSelection } from './profiles'
-import type { AccountErrorProtection } from './protection'
+import type { ClientProfileSelection, ProviderRequestProfiles, ProviderRequestProfileUpdates } from './profiles'
 import request from '../../request'
 
 export * from './backups'
 export * from './pricing'
 export * from './privacy'
-export * from './protection'
 export * from './system'
 
 export function detectRequestLocation() {
@@ -23,6 +21,12 @@ export type AccountAffinity = 'relaxed' | 'preferred' | 'strict'
 
 export type RotationStrategy = 'smart' | 'quota_reset_priority' | 'round_robin' | 'sticky'
 
+export interface ResetWindowWeights {
+  fiveHour: number
+  weekly: number
+  monthly: number
+}
+
 export interface SmartSchedulingConfig {
   loadWeight: number
   quotaWeight: number
@@ -30,27 +34,63 @@ export interface SmartSchedulingConfig {
   latencyWeight: number
   resetWeight: number
   queueWeight: number
+  resetWindowWeights: ResetWindowWeights
+}
+
+export interface PromptGuardConfig {
+  enabled: boolean
+  mode: 'observe' | 'enforce'
+  localAction: 'warn' | 'block'
+  threshold: number
+  strictThreshold: number
+  strictTerminalEnabled: boolean
+  reviewEnabled: boolean
+  reviewFailClosed: boolean
+  reviewMaxConcurrent: number
+  reviewRequestMode: 'chat_completions' | 'moderations'
+  moderationThresholds: Record<string, number>
+  scope: 'local_candidates' | 'all'
+  reviewUrl: string
+  reviewModel: string
+  reviewApiKey?: string
+  hasApiKey: boolean
+  apiKeyCount: number
+  state: 'disabled' | 'ready' | 'candidate_review_unavailable'
+  timeoutSeconds: number
+  confidenceThresholdBps: number
+  maxTextChars: number
+  disabledRules: string[]
+  conversationLockEnabled: boolean
+  conversationLockTtlHours: number
+  learningEnabled: boolean
+  learningModel: string
 }
 
 export interface RuntimeSettings {
+  promptGuard: PromptGuardConfig
+  claudePublicUrl: string
   configRevision: number
   smartScheduling: SmartSchedulingConfig
   smartSchedulingDefaults: SmartSchedulingConfig
+  quotaResetWindowWeights: ResetWindowWeights
+  quotaResetWindowWeightsDefaults: ResetWindowWeights
   providerRequestProfiles: ProviderRequestProfiles
   openaiClientProfile: ClientProfileSelection | null
-  xaiClientProfile: XaiClientProfileSelection | null
 
   codexPrivacyPolicy: CodexPrivacyPolicy
   requestLocationEnabled: boolean
   requestLocation: RequestLocation
   modelMappings: Record<string, string>
+  anthropicModelMappings: Record<string, string>
   refreshMarginSeconds: number
   refreshConcurrency: number
   maxConcurrentPerAccount: number
   openaiGuardianReservedConcurrency: number
   openaiAccountAffinity: AccountAffinity
+  anthropicAccountAffinity: AccountAffinity
   maxAccountRotations: number
   openaiSessionAffinityTtlHours: number
+  anthropicSessionAffinityTtlHours: number
   maxWaitingPerKey: number
   maxWaitingPerAccount: number
   keyQueueTimeoutSeconds: number
@@ -61,13 +101,14 @@ export interface RuntimeSettings {
   rotationStrategy: RotationStrategy
   minCodexDesktopVersion: string | null
   minCodexCliVersion: string | null
+  minClaudeCodeVersion: string | null
   usageRetentionDays: number
   opsEventRetentionDays: number
   auditRetentionDays: number
-  accountErrorProtection: AccountErrorProtection
   accountWarmupEnabled: boolean
   accountWarmupCron: string
   accountWarmupModel: string | null
+  resetCreditOnLowWeeklyQuota: boolean
   resetCreditLeadMinutes: number
   resetCreditMaxWeeklyRemainingPercent: number | null
   updatedAt: string
@@ -116,7 +157,7 @@ export function getSettings(options: RequestOptions = {}) {
   })
 }
 
-type UpdateSettingsParam = Omit<RuntimeSettings, 'updatedAt' | 'updatedAtDisplay' | 'smartSchedulingDefaults' | 'openaiClientProfile' | 'xaiClientProfile' | 'providerRequestProfiles'> & {
+type UpdateSettingsParam = Omit<RuntimeSettings, 'promptGuard' | 'claudePublicUrl' | 'updatedAt' | 'updatedAtDisplay' | 'smartSchedulingDefaults' | 'quotaResetWindowWeightsDefaults' | 'openaiClientProfile' | 'providerRequestProfiles'> & {
   providerRequestProfiles: ProviderRequestProfileUpdates
 }
 

@@ -1,4 +1,4 @@
-//! 受管子进程的创建、退出通知与回收，不解释插件或其他业务协议
+//! 受管子进程的创建、退出通知与回收
 
 use std::{num::NonZeroUsize, path::PathBuf, process::Stdio, sync::Arc};
 

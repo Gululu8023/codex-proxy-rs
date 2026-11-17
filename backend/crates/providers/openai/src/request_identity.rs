@@ -8,7 +8,7 @@ use serde_json::{Map, Value};
 pub(crate) fn follows_session_with_headers(
     body: &Map<String, Value>,
     context: &Map<String, Value>,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
 ) -> bool {
     let metadata = headers
         .iter()
@@ -32,7 +32,7 @@ pub(crate) fn follows_session_with_headers(
 fn account_thread_with_headers(
     body: &Map<String, Value>,
     context: &Map<String, Value>,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
 ) -> Option<String> {
     let header = |name: &str| {
         headers
@@ -50,11 +50,11 @@ fn account_thread_with_headers(
         .or_else(|| gateway_protocol::openai::codex_account_thread_id(body, context))
 }
 
-/// 中间件最终请求头按实际传输的覆盖语义参与身份复验
+/// 最终请求头按实际传输的覆盖语义参与身份复验。
 pub(crate) fn account_session_with_headers(
     body: &Map<String, Value>,
     context: &Map<String, Value>,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
 ) -> Option<String> {
     let header = |name: &str| {
         headers
@@ -84,7 +84,7 @@ pub(crate) fn account_session_with_headers(
 pub(crate) fn turn_id_with_headers(
     body: &Map<String, Value>,
     context: &Map<String, Value>,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
 ) -> Option<String> {
     headers
         .iter()

@@ -14,11 +14,10 @@ use crate::{
     model::{
         AdminError, MutationContext,
         client_keys::{
-            ClientKeyBudgetMutationOrigin, ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod,
-            ClientKeyCursorValue, ClientKeyListQuery, ClientKeyMutation, ClientKeyPage,
-            ClientKeyRecord, ClientKeySecret, ClientKeySortField, CreateClientKey,
-            CreatedClientKey, DeleteClientKey, NewClientKey, ResetClientKeyBudget,
-            SetClientKeyBudgetWindow, SetClientKeyEnabled, UpdateClientKey,
+            ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod, ClientKeyCursorValue,
+            ClientKeyListQuery, ClientKeyMutation, ClientKeyPage, ClientKeyRecord, ClientKeySecret,
+            ClientKeySortField, CreateClientKey, CreatedClientKey, DeleteClientKey, NewClientKey,
+            ResetClientKeyBudget, SetClientKeyBudgetWindow, SetClientKeyEnabled, UpdateClientKey,
             UpdateClientKeyBudgetLimits,
         },
     },
@@ -39,7 +38,6 @@ pub trait ClientKeyService: Send + Sync {
         &self,
         context: &MutationContext,
         command: SetClientKeyBudgetWindow,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<u64, AdminError>;
 
     async fn get(&self, id: &ClientApiKeyId) -> Result<ClientKeyRecord, AdminError>;
@@ -70,13 +68,11 @@ pub trait ClientKeyService: Send + Sync {
         &self,
         context: &MutationContext,
         command: UpdateClientKeyBudgetLimits,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<ClientApiKeyId, AdminError>;
     async fn reset_budget(
         &self,
         context: &MutationContext,
         command: ResetClientKeyBudget,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<ClientApiKeyId, AdminError>;
 }
 
@@ -118,7 +114,6 @@ impl ClientKeyService for DefaultClientKeyService {
         &self,
         context: &MutationContext,
         command: SetClientKeyBudgetWindow,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<u64, AdminError> {
         if command
             .window
@@ -127,7 +122,7 @@ impl ClientKeyService for DefaultClientKeyService {
             return Err(AdminError::invalid("预算窗口结束时间必须晚于开始时间"));
         }
         self.store
-            .set_client_key_budget_window(command, origin, context)
+            .set_client_key_budget_window(command, context)
             .await
             .map_err(|error| map_store_error(error, "client API key"))
     }
@@ -148,7 +143,6 @@ impl ClientKeyService for DefaultClientKeyService {
         &self,
         context: &MutationContext,
         command: UpdateClientKeyBudgetLimits,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<ClientApiKeyId, AdminError> {
         if command.daily_limit_usd.is_none() && command.weekly_limit_usd.is_none() {
             return Err(AdminError::invalid("至少指定一个预算上限"));
@@ -156,7 +150,7 @@ impl ClientKeyService for DefaultClientKeyService {
         let id = command.id.clone();
         if let Some(revision) = self
             .store
-            .update_client_key_budget_limits(command, origin, context)
+            .update_client_key_budget_limits(command, context)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?
         {
@@ -169,11 +163,10 @@ impl ClientKeyService for DefaultClientKeyService {
         &self,
         context: &MutationContext,
         command: ResetClientKeyBudget,
-        origin: ClientKeyBudgetMutationOrigin,
     ) -> Result<ClientApiKeyId, AdminError> {
         let id = command.id.clone();
         self.store
-            .reset_client_key_budget(command, origin, context)
+            .reset_client_key_budget(command, context)
             .await
             .map_err(|error| map_store_error(error, "client API key"))?;
         Ok(id)
@@ -350,7 +343,7 @@ fn validate_cursor(query: &ClientKeyListQuery) -> Result<(), AdminError> {
     }
 }
 
-// 原生与插件创建共用相同的密钥生成规则
+// Client Key 使用统一的密钥生成规则
 pub(super) fn generate_key() -> String {
     let mut bytes = [0_u8; 32];
     OsRng.fill_bytes(&mut bytes);

@@ -56,6 +56,16 @@ export type BackupStatus
     | 'failed'
     | 'deleting'
 
+/** 与数据库归档并列的附属对象 */
+export interface BackupObject {
+  objectKey: string
+  sizeBytes: number
+  sha256: string
+}
+
+/** 可下载的归档：数据库或 Claude 隐私存储（veil 映射卷） */
+export type BackupArtifact = 'database' | 'privacyStore'
+
 export interface BackupRecord {
   id: string
   triggerKind: BackupTriggerKind
@@ -65,6 +75,8 @@ export interface BackupRecord {
   objectKey: string
   sizeBytes: number | null
   sha256: string | null
+  /** Claude 隐私存储快照；映射卷从未初始化时为空 */
+  privacyStore: BackupObject | null
   attemptCount: number
   errorCode: string | null
   errorMessage: string | null
@@ -153,7 +165,11 @@ export function createBackup() {
   })
 }
 
-export function getBackupDownloadUrl(data: BackupIdParam) {
+interface BackupDownloadParam extends BackupIdParam {
+  artifact?: BackupArtifact
+}
+
+export function getBackupDownloadUrl(data: BackupDownloadParam) {
   return request<DownloadUrlResult>({
     url: '/api/admin/settings/backups/download-url',
     method: 'POST',

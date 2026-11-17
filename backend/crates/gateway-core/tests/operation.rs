@@ -74,7 +74,7 @@ fn capability_requirements_should_read_known_openai_fields_without_rewriting_bod
 }
 
 #[test]
-fn middleware_protocol_change_keeps_source_capability_facts_without_interpreting_target_json() {
+fn protocol_change_keeps_source_capability_facts_without_interpreting_target_json() {
     let operation = Operation::Generate(generate(json!({
         "model":"gpt-test",
         "input":[{"type":"message","role":"user","content":[{
@@ -88,7 +88,7 @@ fn middleware_protocol_change_keeps_source_capability_facts_without_interpreting
     })));
     let source_requirements = operation.capability_requirements();
     let translated = operation
-        .replace_middleware_wire(
+        .translate_protocol_wire(
             "openai_chat_completions",
             Bytes::from_static(
                 br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"max_completion_tokens":1024}"#,
@@ -110,23 +110,25 @@ fn middleware_protocol_change_keeps_source_capability_facts_without_interpreting
 }
 
 #[test]
-fn middleware_processing_recomputes_requirements_but_protocol_change_is_direct_once() {
+fn body_processing_recomputes_requirements_but_protocol_change_is_direct_once() {
     let operation = Operation::Generate(generate(json!({
         "model":"gpt-test",
         "input":"hello"
     })));
     let enriched = operation
-        .replace_middleware_wire(
-            "openai",
-            Bytes::from_static(br#"{"model":"gpt-test","input":"hello","max_output_tokens":64}"#),
+        .replace_protocol_wire(
+            Some(Bytes::from_static(
+                br#"{"model":"gpt-test","input":"hello","max_output_tokens":64}"#,
+            )),
+            Map::new(),
         )
-        .expect("same-protocol middleware processing");
+        .expect("same-protocol body processing");
     assert_eq!(
         enriched.capability_requirements().requested_output_tokens(),
         Some(64)
     );
     let translated = enriched
-        .replace_middleware_wire(
+        .translate_protocol_wire(
             "openai_chat_completions",
             Bytes::from_static(
                 br#"{"model":"gpt-test","messages":[{"role":"user","content":"hello"}],"max_completion_tokens":64}"#,
@@ -135,7 +137,7 @@ fn middleware_processing_recomputes_requirements_but_protocol_change_is_direct_o
         .expect("first direct translation");
     assert!(
         translated
-            .replace_middleware_wire(
+            .translate_protocol_wire(
                 "anthropic_messages",
                 Bytes::from_static(br#"{"model":"gpt-test","messages":[]}"#),
             )
@@ -197,7 +199,7 @@ fn image_generation_detection_distinguishes_tools_from_image_inputs_and_passive_
 fn image_generation_fact_survives_cross_protocol_translation() {
     let operation = Operation::Generate(generate(json!({"tools":[{"type":"image_generation"}]})));
     let translated = operation
-        .replace_middleware_wire(
+        .translate_protocol_wire(
             "openai_chat_completions",
             Bytes::from_static(br#"{"model":"gpt-test","messages":[]}"#),
         )

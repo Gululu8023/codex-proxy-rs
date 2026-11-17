@@ -31,6 +31,11 @@ export default defineConfig(({ mode }) => {
     server: {
       port: 5173,
       proxy: {
+        // Claude 客户端直接访问 /claude，保留后端的原生协议路径。
+        '/claude': {
+          target: 'http://127.0.0.1:8080',
+          changeOrigin: true,
+        },
         '/dev': {
           target: 'http://127.0.0.1:8080',
           changeOrigin: true,

@@ -226,7 +226,6 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
         ("x-codex-parent-thread-id", "parent-456"),
         ("x-openai-subagent", "future_codex_mode"),
         ("x-openai-memgen-request", "true"),
-        ("x-codex-installation-id", "install-123"),
         ("session-id", "cp_derived"),
     ] {
         let value = &headers.iter().find(|(header, _)| header == name).unwrap().1;
@@ -367,7 +366,7 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
     }
     assert_eq!(
         read_header_value(&raw_request, "x-codex-installation-id"),
-        Some("install-1")
+        None
     );
     for forbidden in [
         "x-codex-turn-id",

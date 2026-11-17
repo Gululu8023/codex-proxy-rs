@@ -10,8 +10,9 @@ pub use lease::{
 };
 mod affinity;
 pub use affinity::{
-    ProviderSessionAffinityKey, ProviderSessionAffinityPort, ProviderSessionAlias,
-    ProviderSessionBinding, ProviderSessionExclusionPort, ProviderSessionExclusions,
+    ProviderAccountAdmission, ProviderSessionAffinityKey, ProviderSessionAffinityPort,
+    ProviderSessionAlias, ProviderSessionBinding, ProviderSessionClaim,
+    ProviderSessionExclusionPort, ProviderSessionExclusions,
 };
 mod catalog;
 pub use catalog::{
@@ -22,8 +23,8 @@ mod credential;
 pub use credential::{ProviderCredentialState, ProviderCredentialStatePort};
 mod cooldown;
 pub use cooldown::{
-    AccountProtectionGuard, ProviderCooldown, ProviderCooldownKind, ProviderCooldownPort,
-    ProviderCooldownScope, ProviderScopedCooldown,
+    ProviderCooldown, ProviderCooldownKind, ProviderCooldownPort, ProviderCooldownScope,
+    ProviderScopedCooldown,
 };
 mod refresh;
 pub use refresh::{ProviderRefreshPolicy, provider_refresh_backoff_at, provider_refresh_retry_at};

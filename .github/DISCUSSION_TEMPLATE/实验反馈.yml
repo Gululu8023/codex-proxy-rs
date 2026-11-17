@@ -3,8 +3,8 @@ body:
     attributes:
       value: |
         欢迎分享实验版本的使用体验，包括有效、无明显变化或遇到限制的情况。
-        请先查看对应[预发行页面](https://github.com/zyycn/codex-proxy-rs/releases)的部署与数据隔离说明，并搜索已有反馈。
-        明确的程序缺陷请使用 [Issue 模板](https://github.com/zyycn/codex-proxy-rs/issues/new/choose)，在两处互相附链接即可，无需重复粘贴。
+        请先查看对应[预发行页面](https://github.com/Gululu8023/codex-proxy-rs/releases)的部署与数据隔离说明，并搜索已有反馈。
+        明确的程序缺陷请使用 [Issue 模板](https://github.com/Gululu8023/codex-proxy-rs/issues/new/choose)，在两处互相附链接即可，无需重复粘贴。
         请移除密钥、令牌、Cookie、代理认证和私人内容，不要上传完整配置或请求转储。
 
   - type: input

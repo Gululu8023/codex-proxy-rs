@@ -87,14 +87,14 @@ async fn healthz_should_reject_critical_worker_failure() {
 }
 
 #[tokio::test]
-async fn readiness_ignores_freeze_recovery_and_logging_failures_without_clearing_alerts() {
+async fn readiness_ignores_background_maintenance_and_logging_failures_without_clearing_alerts() {
     let diagnostics = Arc::new(RecordingDiagnostics::default());
     let router = health_router(
         vec![Arc::new(MutableProbe(Mutex::new(HealthState::Degraded(
             "file logging maintenance failed".to_owned(),
         ))))],
         vec![worker_snapshot(
-            WorkerKind::AccountFreezeRecovery,
+            WorkerKind::Retention,
             WorkerRuntimeState::BackingOff,
         )],
         diagnostics.clone(),
@@ -294,6 +294,7 @@ async fn health_router(
 ) -> axum::Router {
     let admin = crate::admin::AdminTestFixture::new().await;
     gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         gateway_api::ApiConfig {
             asset_directory: std::env::temp_dir(),
             cors_allowed_origins: Vec::new(),

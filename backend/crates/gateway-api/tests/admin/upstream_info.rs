@@ -10,6 +10,10 @@ use std::time::SystemTime;
 pub(super) struct TestPeerInfo(pub Arc<Mutex<Option<ProviderQuota>>>);
 
 impl UpstreamInfoSource for TestPeerInfo {
+    fn is_peer(&self, _: &gateway_core::account::ProviderAccount) -> bool {
+        true
+    }
+
     fn signal(
         &self,
         _: &ProviderAccount,

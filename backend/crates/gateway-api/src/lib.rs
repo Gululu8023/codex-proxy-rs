@@ -28,14 +28,17 @@ use crate::health::HealthStatus;
 use crate::openai::service::OpenAiService;
 
 pub mod admin;
+mod anthropic;
 pub mod auth;
 mod client_error;
 mod diagnostics;
+mod execution;
 mod health;
 mod key_usage;
 mod middleware;
 pub mod openai;
 mod provider;
+mod request_body;
 mod request_context;
 mod session_cookie;
 mod time;
@@ -137,56 +140,53 @@ pub enum ApiConfigError {
 
 /// 完成组装的唯一 API router
 pub struct ApiBundle {
+    prompt_guard_control:
+        Arc<std::sync::OnceLock<Arc<dyn gateway_admin::ports::prompt_guard::PromptGuardControl>>>,
+    claude_privacy: Arc<std::sync::OnceLock<Arc<gateway_veil::Runtime>>>,
+    peer_node: HeaderValue,
     router: Router,
     settings: middleware::SettingsSource,
-    middleware: Option<middleware::PlanSource>,
     timeout: Option<Duration>,
     request_id_header: HeaderName,
 }
 
 impl ApiBundle {
-    /// 组合根从请求已冻结的快照解析计划；响应流持有同一代次
     #[must_use]
-    pub fn with_middleware(
-        mut self,
-        source: impl Fn(
-            Option<&gateway_core::routing::RuntimeSnapshot>,
-        ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan>
-        + Send
-        + Sync
-        + 'static,
+    pub fn with_prompt_guard_control(
+        self,
+        control: Arc<dyn gateway_admin::ports::prompt_guard::PromptGuardControl>,
     ) -> Self {
-        self.middleware = Some(Arc::new(source));
+        assert!(
+            self.prompt_guard_control.set(control).is_ok(),
+            "Prompt guard control already initialized"
+        );
         self
     }
-
-    /// 内部调用使用同一总路由；组合根持有强引用，Runtime 只保存 Weak
-    pub fn dispatcher(&self) -> Arc<dyn gateway_core::engine::middleware::http::Dispatcher> {
-        Arc::new(middleware::RouterDispatcher {
-            router: middleware::wrap(
-                self.router.clone(),
-                self.middleware.clone(),
-                self.timeout,
-                self.request_id_header.clone(),
-                self.settings.clone(),
-            ),
-            settings: self.settings.clone(),
-        })
+    /// Provider、复审及原生缓存目录使用同一运行时，未装配时 Claude 入口关闭。
+    #[must_use]
+    pub fn with_claude_privacy(self, runtime: Arc<gateway_veil::Runtime>) -> Self {
+        assert!(
+            self.claude_privacy.set(runtime).is_ok(),
+            "Claude privacy already initialized"
+        );
+        self
     }
 
     pub fn router(self) -> Router {
         middleware::wrap(
             self.router,
-            self.middleware,
             self.timeout,
             self.request_id_header,
             self.settings,
+            self.peer_node,
         )
     }
 }
 
 /// 组装客户端、管理端、健康检查和静态资源路由
+#[expect(clippy::too_many_arguments)]
 pub fn initialize(
+    peer_node: uuid::Uuid,
     mut config: ApiConfig,
     execution: Arc<dyn ExecutionService>,
     admin: AdminServices,
@@ -201,17 +201,15 @@ pub fn initialize(
         .map_err(|_| ApiError::Config(ApiConfigError::InvalidRequestIdHeader))?;
     let settings: middleware::SettingsSource = {
         let execution = execution.clone();
-        let timeout_ms = config
-            .request_timeout_seconds
-            .map(|seconds| seconds.saturating_mul(1000));
-        Arc::new(move || {
-            execution
-                .request_settings()
-                .map(|settings| settings.with_http_timeout(timeout_ms))
-        })
+        Arc::new(move || execution.request_settings())
     };
+    let claude_privacy = Arc::new(std::sync::OnceLock::new());
+    let prompt_guard_control = Arc::new(std::sync::OnceLock::new());
     let state = ApiState {
+        prompt_guard_control: prompt_guard_control.clone(),
+        claude_privacy: claude_privacy.clone(),
         admin,
+        execution: execution.clone(),
         openai: OpenAiService::new(execution, lifecycle),
         health: HealthStatus::new(probes, worker_health, diagnostics.clone()),
     };
@@ -220,11 +218,13 @@ pub fn initialize(
         .route("/readyz", get(health::readyz))
         .route("/healthz", get(health::healthz))
         .merge(openai::router::router())
+        .merge(anthropic::router())
         .merge(provider::router())
         .merge(admin::router::<ApiState>())
         .merge(admin::model_router())
         .merge(auth::router::<ApiState>())
         .merge(key_usage::router::<ApiState>())
+        .merge(key_usage::claude_models_router())
         .fallback_service(
             Router::new()
                 .fallback_service(
@@ -297,9 +297,17 @@ pub fn initialize(
         ))
         .with_state(state);
     Ok(ApiBundle {
+        prompt_guard_control,
+        claude_privacy,
+        peer_node: HeaderValue::from_bytes(
+            peer_node
+                .simple()
+                .encode_lower(&mut uuid::Uuid::encode_buffer())
+                .as_bytes(),
+        )
+        .expect("UUID encodes as ASCII"),
         settings,
         router,
-        middleware: None,
         timeout: config.request_timeout_seconds.map(Duration::from_secs),
         request_id_header,
     })
@@ -322,7 +330,11 @@ pub enum ApiError {
 
 #[derive(Clone)]
 pub(crate) struct ApiState {
+    prompt_guard_control:
+        Arc<std::sync::OnceLock<Arc<dyn gateway_admin::ports::prompt_guard::PromptGuardControl>>>,
+    claude_privacy: Arc<std::sync::OnceLock<Arc<gateway_veil::Runtime>>>,
     admin: AdminServices,
+    execution: Arc<dyn ExecutionService>,
     openai: OpenAiService,
     health: HealthStatus,
 }

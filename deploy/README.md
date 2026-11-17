@@ -20,7 +20,7 @@
 | --- | --- | --- |
 | `deploy/config.yaml` | 监听、数据库/Redis 连接、部署凭据、时区、日志与可选内存分配策略等启动配置 | 从模板创建，已有部署合并修改，不覆盖原文件 |
 | `deploy/compose.yaml` | 镜像、容器网络、端口、挂载、PostgreSQL 启动参数与资源限制 | 调整 Compose 并重建受影响容器 |
-| PostgreSQL | 账号、Key、运行设置、上游身份、插件配置等业务数据 | 管理端或管理 API |
+| PostgreSQL | 账号、Key、运行设置、上游身份等业务数据 | 管理端或管理 API |
 | 浏览器本地 | 主题和界面偏好 | 当前浏览器的主题设置 |
 
 项目不使用 `.env` 配置文件。Compose 环境变量用于容器地址、镜像选择和构建发布；
@@ -219,6 +219,8 @@ docker compose -f deploy/compose.yaml stats --no-stream
 
 ## 部署结构
 
+Claude 订阅 OAuth 复用 CPRS 网关并强制经过同进程 veil，双域名入口与映射卷准备见 [Claude OAuth 与内嵌 veil](claude/README.md)
+
 ```mermaid
 flowchart LR
   Client[客户端 / 管理浏览器] -->|HTTPS| Proxy[反向代理]
@@ -229,34 +231,30 @@ flowchart LR
   App -. 数据库备份 .-> Backup[S3 / R2]
 ```
 
-网关端口默认只绑定本机；数据库和 Redis 不对公网开放。插件以网关同一系统身份运行，不能作为不可信代码沙箱
+网关端口默认只绑定本机；数据库和 Redis 不对公网开放。
 
 ## 手动安装
 
-本节适用于 Linux amd64/arm64，需准备 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL，
+本节默认使用 Linux amd64 的 `latest` 镜像（由 `main` 自动构建）；Linux arm64 请改用对应 Release 的部署文件和版本号镜像。需准备 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL，
 并确保当前用户能访问 Docker、可通过 `sudo` 或 root 设置目录权限。一键安装入口见
 [快速开始](../README.md#一键安装)，脚本会自动完成本节准备和服务启动
 
-下载同一正式 Release 的部署文件并设置目录权限：
+下载 `main` 分支的部署文件并设置目录权限：
 
 ```bash
 mkdir -p codex-proxy-rs/deploy && cd codex-proxy-rs
 
-# 只解析一次最新正式版本，确保两个文件来自同一 Release。
-CPR_RELEASE_URL="$(curl -fsSL -o /dev/null -w '%{url_effective}' https://github.com/zyycn/codex-proxy-rs/releases/latest)"
-CPR_RELEASE_TAG="${CPR_RELEASE_URL##*/}"
-curl -fsSL "https://github.com/zyycn/codex-proxy-rs/releases/download/${CPR_RELEASE_TAG}/compose.yaml" \
-  -o deploy/compose.yaml
-curl -fsSL "https://github.com/zyycn/codex-proxy-rs/releases/download/${CPR_RELEASE_TAG}/config.example.yaml" \
-  -o deploy/config.example.yaml
+CPR_SOURCE=https://raw.githubusercontent.com/Gululu8023/codex-proxy-rs/main/deploy
+curl -fsSL "${CPR_SOURCE}/compose.yaml" -o deploy/compose.yaml
+curl -fsSL "${CPR_SOURCE}/config.example.yaml" -o deploy/config.example.yaml
 
 install -d -m 0750 .runtime/postgres .runtime/redis
 sudo install -d -m 0770 -o "$(id -u)" -g 10001 .runtime/data .runtime/logs
 sudo install -m 0640 -o "$(id -u)" -g 10001 deploy/config.example.yaml deploy/config.yaml
 ```
 
-也可将 `CPR_RELEASE_TAG` 设置为指定的发布标签。Release 附带的 `compose.yaml` 默认使用该版本镜像，
-配置模板和部署文件均包含在 `checksums.txt` 中；不要混用 `main` 分支模板与已发布镜像
+`main` 分支的 `compose.yaml` 默认使用 `main` 构建的 `latest` 镜像，两者同步更新。
+发布 Release 后也可改为下载该 Release 附带的部署文件，此时不要混用 `main` 分支模板与该版本镜像
 
 为 PostgreSQL 与 Redis 分别生成一个密码：
 
@@ -318,8 +316,8 @@ store:
 发行包提供 Windows x64（`windows_amd64`）和 ARM64（`windows_arm64`）版本，按运行机器的 CPU 架构选择。
 需先准备可访问的 PostgreSQL 和 Redis，创建数据库及用户；使用数据库备份功能时，还需将匹配服务端版本的 `pg_dump` 加入 `PATH`
 
-从 [Release 附件](https://github.com/zyycn/codex-proxy-rs/releases) 下载对应的
-`codex-proxy-rs_<version>_windows_<arch>.tar.gz`，解压后保留 `codex-proxy-rs.exe`、`web/dist`、`deploy` 和 `plugins/official` 的目录关系。
+从 [Release 附件](https://github.com/Gululu8023/codex-proxy-rs/releases) 下载对应的
+`codex-proxy-rs_<version>_windows_<arch>.tar.gz`，解压后保留 `codex-proxy-rs.exe`、`web/dist`和 `deploy` 的目录关系。
 在解压后的 `codex-proxy-rs` 目录中打开 PowerShell，首次安装时创建配置：
 
 ```powershell
@@ -346,7 +344,7 @@ api:
 
 启动成功后访问 `http://127.0.0.1:8080`，使用配置中的管理员账号登录；在运行终端按 `Ctrl+C` 停止服务。
 官方构建支持管理端[在线更新、重启与回滚](#管理端在线更新)，安装目录与 `.runtime` 必须可写。
-手动更换版本时先停止进程并备份当前发行文件，再整体替换 EXE、`web/dist` 和 `plugins/official`，
+手动更换版本时先停止进程并备份当前发行文件，再整体替换 EXE 和 `web/dist`，
 保留 `deploy/config.yaml` 与 `.runtime`，按新版本模板合并配置后重新启动
 
 ## 启动
@@ -390,7 +388,6 @@ PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`
 | --- | --- |
 | 上游客户端身份 | “系统设置 → 上游配置 → 客户端身份”；Key 可按 Provider 覆盖，OpenAI Key 可独立配置[安装身份种子](../docs/api.md#key-客户端身份) |
 | 并发与排队 | “系统设置 → 运行设置”；Key 与账号分别设置排队容量和超时，可选择账号排队失败后换号，见[排队规则](../docs/api.md#并发与排队) |
-| 账号错误保护 | “系统设置 → 运行设置 → 错误保护”；默认关闭，按[自定义规则](../docs/api.md#账号错误保护)暂停账号调度 |
 | 全局请求位置 | “系统设置 → 上游配置 → 请求位置覆盖”；默认关闭，不从 YAML 导入 |
 | 代理位置 | “代理管理”；优先于全局位置，全局关闭时仍可独立生效 |
 
@@ -411,7 +408,7 @@ PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`
 地址包含自定义前缀时保留完整前缀，后台在该地址下请求 `cpr/link`。
 列表与详情显示已保存的观测。展开账号可查看上游密钥限制，普通账号并发留空时跟随上游有效的正数上限。启用的 OpenAI API Key 账号可点击「刷新额度」重新识别。上游明确关闭共享或不支持互联时，账号显示为 API，重新识别成功后显示 CPR
 
-第三方网关通过插件实现相同协议也可被识别，不按软件名称判定兼容。
+第三方网关实现相同协议也可被识别，不按软件名称判定兼容。
 上游明确返回 Key 预算耗尽时，下游暂停该账号；后续同步确认允许使用后自动恢复，普通限流冷却独立保留。
 金额只供展示，缺少访问状态时不根据余额推断恢复。账号池额度观测作为 Smart 选择的参考，不能保证下一次请求成功
 互联两端均须使用 CPR Link v3；协议、第三方接入与公开边界见 [CPR 互联 API](../docs/api.md#cpr-互联只读协议)
@@ -433,38 +430,14 @@ PostgreSQL/Redis 启动密码。日常校验使用 `config --quiet`
 请求中断或结果无法确认时暂停后续提交，添加结果待确认的条目可能已保存，应先刷新列表核对，不能直接重复添加
 
 创建或编辑账号时，在“出站隧道”选择直连或已保存的代理，点击右侧的“测试出口”图标。
+直连不继承 `HTTP_PROXY`、`HTTPS_PROXY`、`ALL_PROXY` 环境代理；账号推理、OAuth、令牌续期、额度和模型查询均使用账号所选出口。版本更新和下载等后台请求仍可使用部署环境代理。
 耗时显示在对应选项右侧，悬浮可查看 IPv4 / IPv6，测试失败通过通知提示。
 禁用代理的账号使用服务器直连出口。出口测试不保存账号设置，也不验证账号权限或额度；账号可用性使用账号连接测试
 
+Docker 中使用宿主机代理时，在“代理管理”添加 `http://host.docker.internal:7890`，再从账号的下拉列表选择。Compose 已将该名称映射到宿主机网关；宿主机代理须允许容器访问该端口，不能仅监听宿主机的 `127.0.0.1`。
+
 在代理列表点击关联账号数量，再点击“分配账号”，搜索并跨页勾选账号后点击右上角的“分配”，一次最多 1000 个。
 已使用此代理的账号不可重复选择；所选账号原有代理会被替换，凭据、分组与调度设置保留。禁用代理须先启用
-
-### 插件命令行
-
-使用与网关相同的工作目录和 `deploy/config.yaml`，读取制品已接受且当前已启用的插件实例：
-
-```bash
-codex-proxy-rs plugin --help
-codex-proxy-rs plugin '实例ID' '命令' --help
-codex-proxy-rs plugin '实例ID' '命令' --参数 '值'
-```
-
-将示例中的实例 ID、命令、参数名和值替换为插件实际提供的内容
-
-不带子命令或使用 `serve` 时启动网关；插件命令不监听 HTTP、不启动后台任务，也不恢复或清理正在运行的
-网关准入状态。顶层 `--help/--version` 不读取配置。插件帮助只读数据库，不执行迁移、登录或账号保存，
-因此需要先由正常部署完成数据库初始化。宿主诊断保留在配置的文件日志中，stdout/stderr 专用于命令结果
-
-参数支持 `--名称=值` 或 `--名称 值`；布尔参数可直接写 `--名称`，关闭时写 `--名称=false`。
-duration 使用 `500ms`、`1m30s` 等带单位形式。参数可能进入 shell 历史和系统进程列表，不能因为插件声明
-了敏感参数就认为命令行是安全的密钥输入通道；真实凭据优先使用对应插件提供的受控登录或导入入口
-
-成功命令原样返回插件退出码与输出。命令受总期限约束，`Ctrl-C` 或终止信号会取消调用并回收插件进程。
-若命令产生账号，只有成功结果才按顺序通过 Admin 保存；调用仍检查期限、实例版本和当前资源事实，
-模型执行 Key 由具体调用选择，不在实例中预绑定。
-部分保存后失败或取消不会自动重放，先核对账号和审计记录，再决定是否重新执行
-
-独立仓库 `codex-proxy-plugins` 的 `examples/workbench` 提供命令行、请求处理与管理页面示例；模型相关操作会产生真实上游用量
 
 ## 公网访问
 
@@ -478,7 +451,7 @@ HTTP 传输不加密，公网部署仍建议使用 HTTPS。
 
 反向代理需要保留 `Authorization`，支持 `/v1/responses` 的 WebSocket Upgrade，
 并关闭 SSE 响应缓冲。读取超时应覆盖长时间生成任务。
-客户端使用部署地址下的 `/v1`，协议与部署一致，不要使用前端开发服务的 `5173/dev/v1`。
+客户端地址使用部署地址加路径前缀：Codex 为 `/v1`，Claude Code 为 `/claude`，协议（HTTP/HTTPS）与部署保持一致；不要填前端开发服务的 `5173/dev` 地址。
 当前应用只支持单副本，不能通过复制容器扩容
 
 Responses 流式请求完成准入后，每 15 秒无输出会发送一次 SSE 注释保活，覆盖首个业务事件前的等待，
@@ -489,7 +462,7 @@ Responses 流式请求完成准入后，每 15 秒无输出会发送一次 SSE �
 
 网关默认不限制模型请求的总执行时长；OpenAI 上游流默认有 300 秒空闲超时。
 `api.request_timeout_seconds` 默认 `null`，只控制 HTTP 路由返回响应前的等待，不是流式正文或 WebSocket 每轮执行的总时限。
-排队、插件显式执行期限与客户端断开的边界见 [请求期限](../docs/api.md#请求期限)
+排队与客户端断开的边界见 [请求期限](../docs/api.md#请求期限)
 
 OpenAI Responses 上游 WebSocket 每 25 秒发送 Ping 保活，并回应上游 Ping；Ping/Pong 写入最多等待 5 秒，
 不因等待 Pong 超时主动断开。入站背压期间暂停主动 Ping，恢复后不集中补发。
@@ -503,7 +476,7 @@ OpenAI Responses 上游 WebSocket 每 25 秒发送 Ping 保活，并回应上游
 上限应按代理实际容量、其他流量与 CPR 实例数设置。例如 32 槽代理可配置为 24，为 HTTP 等流量留出 8 槽，但这不是统一默认值。
 不同代理 URL（含认证）分别计数；不同 URL 若共用服务商额度，需自行分配预算，各 CPR 实例之间也不协调容量。
 修改上限对后续请求生效，已存在的连接继续计数；调低上限不会强制中断在途或绑定下游 WS 的连接。
-预算仅覆盖宿主原生 OpenAI Responses 连接，插件自建连接及其他 HTTP/WS 流量仍需预留容量
+预算仅覆盖宿主原生 OpenAI Responses 连接，其他 HTTP/WS 流量仍需预留容量
 
 未绑定活跃客户端 WS 的池化连接，归池后按 `openai.ws_pool.idle_timeout_ms` 计时，默认 `300000`（5 分钟，必须大于零）。
 Ping/Pong 不延长空闲期限；默认每 5 秒扫描，通常在空闲 300～305 秒开始回收，复用前也检查是否到期。
@@ -521,6 +494,27 @@ SSE 注释保活用于防止传输链路空闲断开，不会重置 Codex 等待
 若报错为 `idle timeout waiting for SSE`，再检查客户端的 `stream_idle_timeout_ms`
 
 ## 客户端配置
+
+### Claude Code
+
+准备工作：
+
+1. 默认配置在首次启动时自动准备 veil 主密钥和映射库，在管理端确认隐私状态就绪；持久化和恢复要求见 [Claude 部署说明](claude/README.md#主密钥规则与持久化)
+2. 在「账号」中添加 Claude OAuth 账号，或导入 Claude Code 凭据
+3. 创建具有 Anthropic 权限的客户端密钥
+
+然后在密钥配置中选择 Claude Code 和操作系统，把配置合并到 `~/.claude/settings.json`（Windows 为 `%userprofile%\.claude\settings.json`），CLI 与 VS Code 扩展共用该文件。主要环境变量如下：
+
+| 变量 | 值 |
+| --- | --- |
+| `ANTHROPIC_BASE_URL` | 同域名部署为 `https://网关域名/claude`；本机开发可用 `http://127.0.0.1:8080/claude` |
+| `ANTHROPIC_AUTH_TOKEN` | 管理端创建的客户端密钥 |
+
+Base URL 不要追加 `/v1`，客户端会自行拼接 `/v1/messages` 等路径。使用独立 Claude 域名时，按 [Nginx 模板的路径映射](claude/README.md#公网入口与客户端)调整地址
+
+导出的配置默认启用网关模型发现：没有显式指定模型时，由客户端根据账号的模型目录选择。Claude 和 Codex 的客户端身份分开配置，身份预览只显示可修改的字段。veil 未就绪时 Claude 入口会直接拒绝请求，可在管理端查看具体状态
+
+### Codex CLI / 桌面端
 
 在管理端创建客户端密钥，打开「使用密钥」，按操作系统复制 `config.toml`。
 已有配置先备份，合并后完全退出并重启 Codex。代理密钥由 Provider 配置提供，
@@ -590,7 +584,7 @@ V2 远程压缩通过 Responses 接口发送 `compaction_trigger`，网关和上
 模板启用原生生图。Codex 可在任务需要图片时调用 `image_gen.imagegen`，
 再通过代理的 Images 接口生成或编辑图片；也可以在需求中明确要求生成并使用图片。
 需要支持该能力的客户端、支持图片输入的对话模型，以及有生图权限和额度的 Codex 账号。
-代理不会增加上游权限，xAI 账号不能承接这些 Images 请求
+代理不会增加上游权限，Anthropic 账号不承接 OpenAI Images 请求
 
 生图不要求开启 WebSocket。要启用客户端 WebSocket，把当前 Provider 的
 `supports_websockets` 改为 `true`，并检查反向代理是否允许 Upgrade
@@ -627,7 +621,7 @@ Codex 回答仍显示本机时区时，先核对请求是否使用了预期账�
 - 若模型调用 `date` 等工具查询本机，工具结果仍反映真实系统时区，覆盖不会修改客户端操作系统
 
 网关的请求头画像和位置覆盖不提供完整匿名化。正文与工作区 metadata 的保留范围见
-[正文兼容](../docs/api.md#正文兼容)，xAI 请求不应用 OpenAI 的请求位置覆盖
+[正文兼容](../docs/api.md#正文兼容)，Anthropic 请求不应用 OpenAI 的请求位置覆盖
 
 Codex 客户端还有独立的出站请求。analytics 使用 `chatgpt_base_url`，可以包含真实系统类型、
 系统版本和架构；模型 Provider 的 `base_url` 不改变该地址。官方发行配置默认启用 Statsig 指标，目标为
@@ -787,16 +781,7 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
    按配置的保留窗口及组织的数据处理要求管理已生成文件。不要为普通请求排查开启 OAuth 恢复记录，
    也不要直接上传整个日志目录或完整转储
 
-请求问题反馈使用 [接口问题反馈表单](../.github/ISSUE_TEMPLATE/api-bug-report.yml)；错误诊断与查询合同见
-[API 文档](../docs/api.md#10-dashboard用量与错误)
-
-### 插件取文与 DNS
-
-插件受管 HTTP 由实际运行网关的主机或容器解析 DNS，再通过直连或账号代理访问目标。插件拥有完整网络访问能力，宿主不按插件身份限制私网、回环或保留地址
-
-域名解析失败时先核对网关运行环境的 DNS。Clash / Mihomo 的 Fake-IP 地址需要相应代理接管；无法连通时可让目标域名返回真实地址，并检查所选代理。代理失败不会自动回退直连
-
-排障区分域名解析失败、超时、连接失败和响应读取失败，避免在日志或截图中输出真实请求头、正文及凭据
+错误诊断与查询合同见 [API 文档](../docs/api.md#10-dashboard用量与错误)
 
 ## 密码语义
 
@@ -812,6 +797,8 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
 
 ## 镜像升级与源码构建
 
+当前二开版使用独立的 `0001_cprs_initial.sql` 数据库基线。首次从源仓库或旧定制版切换时，必须使用全新数据库及空 Redis，不能直接替换镜像后复用旧库；详细边界见[二开初始化基线](../backend/migrations/README.md#二开初始化基线)。已使用此基线的实例，后续版本按追加迁移升级。
+
 每个 Release 独立提供 `config.example.yaml`、默认镜像固定到该版本的 `compose.yaml` 和校验和；
 各平台归档也包含 `deploy/config.example.yaml`。配置模板来自构建该版本的同一提交。
 使用二进制归档手动部署时，将模板中的 `api.asset_directory` 改为 `../web/dist`，指向归档内的静态资源。
@@ -825,6 +812,21 @@ OAuth 恢复开关为 `host.logging.oauth_recovery`，默认关闭，与普通�
 docker compose -f deploy/compose.yaml pull codex-proxy-rs
 docker compose -f deploy/compose.yaml up -d --no-build --wait codex-proxy-rs
 ```
+
+本仓库推送到 `main` 且 CI 成功后，GitHub Actions（`.github/workflows/docker-image.yml`）自动构建 linux/amd64 镜像并发布到
+`ghcr.io/gululu8023/codex-proxy-rs`，标签为 `latest` 与 `sha-<提交前 12 位>`。版本号取自 `release/version.yaml`，
+提交与构建时间自动写入，无需手动传参。Compose 默认使用 `latest`，执行上面两条命令即可更新到最新提交；
+需要固定或回退版本时，设置 `CPR_IMAGE=ghcr.io/gululu8023/codex-proxy-rs:sha-<提交>` 后再执行
+
+手动触发 Docker image 也仅允许当前 `main` 且该提交的 CI 已成功。工作流使用仓库自动提供的 `GITHUB_TOKEN`
+发布到 GHCR，无需额外配置 Docker Hub 密码或 PAT。仓库需允许 Actions 运行及 `packages: write`；
+首次发布后，在 GitHub Packages 将镜像可见性设为 Public，服务器才能按上述命令匿名拉取。
+
+手动 Release 工作流负责版本号标签和多架构 `stable` 标签，GitHub 最新 Release 也随正式版本更新；
+它不修改 `latest`。希望跟随正式发行时，设置 `CPR_IMAGE=ghcr.io/gululu8023/codex-proxy-rs:stable`。
+Release 附带的 Compose 文件固定到对应版本号。`latest` 始终由 `main` 的自动构建维护。
+
+本地检查与手动发版步骤见 [检查与发布](../docs/development.md#检查与发布)。注意：类型检查通过或开发页面能打开，不代表 CI 会通过；只有 ESLint、构建等全部适用检查成功后，镜像才会发布
 
 源码构建需要克隆源码仓库并准备配置与数据目录，构建过程自动准备前端依赖，无需初始化子模块或准备额外 build context。以下命令从仓库根目录执行：
 
@@ -848,7 +850,6 @@ docker compose -f deploy/compose.yaml build codex-proxy-rs
 
 - OpenAI 或 xAI 授权使用已保存代理，且代理的 WebSocket 连接上限非零：升级或回退后，重新发起尚未完成的授权，不复用旧回调或授权码。上限为 `0` 的在途授权和已保存的账号、凭据不受影响
 - Key 配置含 `installationId`：数据库自动转换为 `installationSeed`，API 调用方须使用[当前字段](../docs/api.md#key-客户端身份)。出站安装身份及关联的会话、缓存标识会变化，已有 WebSocket 精确续写需重发完整上下文
-- 数据库或备份含 `accountAutoFreeze*` 设置：升级后错误保护关闭、规则为空，需在管理端重新配置并启用；API 调用方使用 [`accountErrorProtection`](../docs/api.md#账号错误保护)。已有冻结到当前冷却截止后解除，账号并发上限保留，需调整时手动设置
 
 ### 版本命名与升级规则
 
@@ -873,7 +874,7 @@ docker compose -f deploy/compose.yaml build codex-proxy-rs
 自定义更新仓库须提供这份清单和候选版本的公开 Release。发布工作流在安装包公开并通过校验后更新 `published`，需要具有写入 `main` 的权限
 
 提示有更新前会按精确 tag 核对候选 Release、当前平台包和校验文件，无需配置 GitHub 令牌。GitHub 限流时按提示稍后重试；
-也可从[发行页](https://github.com/zyycn/codex-proxy-rs/releases)下载平台归档，按[手动安装](#手动安装)升级
+也可从[发行页](https://github.com/Gululu8023/codex-proxy-rs/releases)下载平台归档，按[手动安装](#手动安装)升级
 
 同一 `X.Y.Z-exp.N` 系列只用于同一轮实验，不能混用不同实验分支；变更基线即进入另一实验线，需手动迁移。
 exp 不进入正式版、alpha、beta 或 rc，普通实例也不能选择 Exp。
@@ -918,7 +919,7 @@ YAML 中显式配置的值优先于对应环境变量
 
 Compose 提供以下在线更新运行参数：
 
-- `CPR_UPDATE_REPOSITORY`：只接受 `owner/repository`；默认 `zyycn/codex-proxy-rs`
+- `CPR_UPDATE_REPOSITORY`：只接受 `owner/repository`；默认 `Gululu8023/codex-proxy-rs`
 - `CPR_GITHUB_API_BASE`：正式环境必须为 `https://api.github.com/repos`
 - `CPR_UPDATE_EXE_PATH`、`CPR_WEB_DIST_DIR`：分别指向容器内二进制和前端静态目录；
   `CPR_WEB_DIST_DIR` 同时供页面服务与更新器使用，相对路径以 `deploy/config.yaml` 所在目录为基准
@@ -940,26 +941,9 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
 .runtime/data/update-tmp/
 ```
 
-### 插件兼容与发行目录
+### 发行目录
 
-教学示例在 `codex-proxy-plugins` 独立构建和发布，通过[插件管理](../docs/plugins.md)安装。
-宿主发行物不内置插件，包含用于兼容检查的封口清单
-
-| 文件或目录 | 用途 |
-| --- | --- |
-| `plugins/official/plugin-release-manifest.json` | 随平台安装包和镜像分发，记录宿主版本、提交与支持的插件合同 |
-| 可执行文件同目录的 `plugins/official` | 随受信宿主发行物部署的只读目录，与二进制、Web 资源成套更新或恢复 |
-
-- 下载更新时校验发行身份，插件合同不兼容不阻止安装。点击重启时检查已安装目标版本，列出不兼容插件的名称和原因；确认后重启，不兼容实例保持未启动，启用配置、绑定、密钥和私有数据保留
-- 回滚同样在重启前提示插件兼容风险，启动时重新检查，不改写持久启用配置。更新或回滚期间的并发配置变更会阻止切换，文件替换失败或取消时恢复整组文件
-- 非空官方清单中的包经身份、平台和摘要校验后幂等导入；导入不确认信任、不创建配置、不启用，也不删除旧包。管理员确认信任后才执行默认配置流程；重复摘要保留首次安装出处
-- `sealed` 是构建封口标记，不是密码学签名。普通上传、URL 或 GitHub 安装不能获得 `builtin` 身份，独立教学示例也不例外
-
-宿主启动检查覆盖管理页更新、Docker 与手工替换二进制。不兼容实例不挂载任何能力或故障占位，其额外认证和拦截停止生效，宿主原生认证继续执行。
-宿主范围或能力版本不匹配时，可在插件页确认风险后尝试本次启动；清单、RPC、平台或包完整性错误不能绕过。具体操作见[插件故障处理](../docs/plugins.md#故障处理)
-
-部署须保留完整的二进制、Web 资源与官方插件目录；不要手动修改制品元数据或迁移 checksum 绕过校验。
-插件安装包必须匹配宿主 OS 和架构，部署前需验证目标平台的插件运行与上游调用，不能只以打包成功判断可用
+部署须保留完整的二进制和 `web/dist`，更新或回滚时成套替换。文件校验、交换失败或取消时恢复原发行文件。
 
 ## 备份与恢复
 
@@ -969,7 +953,9 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
 
 | 需要保留的内容 | 备份方式 |
 | --- | --- |
-| 账号、Key、设置、插件、已用额度与用量汇总 | 管理端 S3/R2 业务备份 |
+| 账号、Key、设置、已用额度与用量汇总 | 管理端 S3/R2 业务备份 |
+| Claude 隐私存储映射库、`initialized`、`rules-revision` 与自定义规则 | 管理端 S3/R2 业务备份，与数据库归档同属一条记录（`.veil.tar.gz`） |
+| Claude 隐私存储主密钥（`master.key` 或 `VEIL_MASTER_KEY`） | 单独加密保管，**不进入**任何自动备份 |
 | 完整请求、诊断和审计历史 | 独立整库备份，或停库后备份 `.runtime/postgres` |
 | 部署配置与凭据 | 单独备份 `deploy/config.yaml` 及 Compose 自定义配置 |
 | 应用日志与已启用的 OAuth 恢复记录 | 单独备份 `.runtime/logs`，不包含在数据库归档中 |
@@ -978,7 +964,7 @@ Release 必须提供当前 OS/架构的 `codex-proxy-rs_<version>_<os>_<arch>.ta
 
 OpenAI 主动额度重置卡及消费结果由上游持有，不属于本地备份内容
 
-数据库、配置、插件敏感设置和 OAuth 恢复日志均按凭据保护
+数据库、配置和 OAuth 恢复日志均按凭据保护
 
 ### 备份内容与限制
 
@@ -988,19 +974,17 @@ OpenAI 主动额度重置卡及消费结果由上游持有，不属于本地备�
 从未记录费用历史完整范围的版本升级时，宿主以库中最早留存的费用判断可重算范围；没有费用事件时采用升级时间
 
 原生用量按 UTC 小时保留全局请求数、成功/失败数、Token 和实际费用，每小时至多一行；
-插件维护的用量贡献按其原维度保留。原生汇总只覆盖备份快照中已发布且尚未被历史清理撤销的统计，
+原生汇总只覆盖备份快照中已发布且尚未被历史清理撤销的统计，
 不是永久累计账本，异步投影尚未处理的请求不计入。统计重建期间备份失败，统计就绪后可重试
 
 恢复后的原生历史可用于全局总量与小时趋势，不支持请求详情、按 Key/账号等维度筛选或历史延迟分布；
 小时内不完整时间范围无法还原到请求精度。若需这些能力，应使用整库灾备
 
-- 插件包体、固定来源、下载凭据、制品接受事实、实例配置、版本配置快照、敏感配置、功能范围绑定和私有状态都保存在
-  PostgreSQL，随数据库一起备份。插件通过宿主回调读写的内置平台账号保存在同库的通用账号表。
-  来源使用的出站代理及其认证也须随库恢复，不能只备份 `plugin_*` 表；来源代理与账号代理独立选择，
-  不依赖进程代理环境，故障时不会自动回退直连。
-  包体单个上限为 32 MiB，需要计入数据库及备份容量；解压运行目录和 Redis 协调状态是可重建数据，
-  不作为插件安装或制品接受事实。恢复时保留制品接受状态、实例配置、账号引用和状态代次的一致性；插件降级仍须
-  通过状态兼容校验，不通过手工替换缓存目录回滚
+- Claude 隐私存储已初始化时，每条备份在数据库导出后再生成 veil 映射库快照，与 `.sql.gz` 同目录、同名，
+  后缀为 `.veil.tar.gz`；两个对象都上传并校验成功后记录才完成，删除记录时一并删除。映射库只增不删，
+  后取的快照覆盖数据库可能引用的全部映射。快照失败时整条备份失败（`backup.privacy_store_failed`），
+  不会产出缺少映射的备份；从未初始化映射卷的部署只上传数据库归档。快照与数据库归档共用暂存目录，
+  暂存空间需要额外容纳一份映射库压缩包
 - 官方运行镜像内置与 Compose 数据库服务版本一致的 `pg_dump`，无需额外安装。
   自行替换 PostgreSQL 版本时，应同步核对备份工具版本
 - 备份暂存目录为 `host.runtime_data_dir/backup-staging`；Compose 默认对应
@@ -1012,6 +996,8 @@ OpenAI 主动额度重置卡及消费结果由上游持有，不属于本地备�
   `expires_at`，并同时受 `retentionCount` 清理规则约束。到期只进入删除流程，不构成在线恢复点
 
 ### 人工恢复数据库
+
+恢复前核对归档与程序属于同一迁移发行线。源仓库或旧定制版归档包含旧迁移历史，不能直接供采用 `0001_cprs_initial.sql` 的程序使用；这类归档应配套原版本程序恢复，不能改写迁移记录绕过校验。
 
 业务归档是 gzip 压缩的 SQL，使用与数据库版本匹配的 `psql` 恢复到空目标库：
 
@@ -1030,10 +1016,33 @@ gzip -dc backup.sql.gz | psql -X --single-transaction --set=ON_ERROR_STOP=1 --pa
 1. 先备份现有数据库，并停止应用；在独立的空数据库中恢复归档，检查数据和迁移版本
 2. 应用保持停止，离线核对备份设置与记录。禁用快照中的旧计划，处理非终态记录
    （`queued/dumping/uploading/deleting`）、旧调度游标和到期清理条件，再决定哪些记录保留
-3. 使用空 Redis 和空插件解包缓存做一次冷启动；逐一核对已启用实例的包摘要/平台、制品接受状态、配置与绑定、账号引用、
-   私有状态 schema/代次，并执行实际插件操作。缺少或损坏必需包体、引用不完整或状态不兼容时，恢复不能
-   记为成功，也不能用相同插件 ID 的其他包替代
+3. 使用空 Redis 做一次冷启动，核对账号、Key、配置、用量汇总及 Claude 隐私映射存储。
 4. 确认不会误执行旧任务或删除恢复前的远端对象后，再接入业务流量；重新测试 S3 连接并设置计划
 
 只关闭计划备份不会停止 Worker 的任务恢复和到期删除。无法确认这些记录的影响时，
 不要把恢复后的数据库直接接入运行中的应用。具体处理应根据目标库数据制定，不提供清空生产记录的通用命令
+
+### Claude 隐私存储恢复
+
+备份记录带有隐私存储时，管理端「下载 Claude 隐私存储」可取得同名 `.veil.tar.gz`。归档内含 `manifest.json`、
+`mappings.db`、`initialized`、`rules-revision`，使用自定义规则时另含 `rules.toml`；**不含主密钥**。
+必须与同一条记录的数据库归档一起恢复，不要混用不同记录的两个归档
+
+1. 保持应用停止，核对归档 SHA-256 与记录中的 `privacyStore.sha256` 一致，并执行 `gzip -t` 校验完整性
+2. 准备一个**空的** veil 数据目录（默认 `.runtime/data/veil`），解包后放回原主密钥：
+
+   ```bash
+   install -d -m 0700 .runtime/data/veil
+   tar -xzf backup.veil.tar.gz -C .runtime/data/veil
+   install -m 0600 /secure/path/master.key .runtime/data/veil/master.key
+   ```
+
+   目录和文件须归运行身份所有（官方镜像为 `cpr` 用户）。使用 `VEIL_MASTER_KEY` 环境变量时无需放置 `master.key`
+3. 归档带有 `rules.toml` 时，把它放回配置中 `veil.rules_file` 指向的位置；规则与 `rules-revision` 不一致时
+   Claude 数据面会拒绝启动。保持 `veil.initialize_store: false`
+4. 按[人工恢复数据库](#人工恢复数据库)恢复同一条记录的数据库归档，并使用空 Redis 冷启动
+5. 在管理端 Claude 隐私状态中确认运行就绪，且主密钥指纹与 `manifest.json` 的 `keyFingerprint` 一致。
+   启动时 veil 会用已有密文校验主密钥，密钥错误时只关闭 Claude 数据面
+
+Redis 中的 Thread 续接状态不在备份范围内，恢复后客户端需新建 Claude 会话。主密钥丢失时映射库无法解密，
+只能配置全新映射卷并开始新会话

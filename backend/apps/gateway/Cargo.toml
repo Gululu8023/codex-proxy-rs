@@ -16,10 +16,10 @@ gateway-admin = { path = "../../crates/gateway-admin" }
 gateway-api = { path = "../../crates/gateway-api" }
 gateway-core = { path = "../../crates/gateway-core" }
 gateway-host = { path = "../../crates/gateway-host" }
-gateway-plugin-runtime = { path = "../../crates/gateway-plugin/runtime" }
 gateway-store = { path = "../../crates/gateway-store" }
+gateway-veil = { path = "../../crates/gateway-veil" }
 provider-openai = { path = "../../crates/providers/openai" }
-provider-xai = { path = "../../crates/providers/xai" }
+provider-anthropic = { path = "../../crates/providers/anthropic" }
 serde = { version = "1.0.228", features = ["derive"] }
 thiserror = "2.0.18"
 tokio = { version = "1.52.3", default-features = false, features = ["rt-multi-thread"] }

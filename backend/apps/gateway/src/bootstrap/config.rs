@@ -18,6 +18,8 @@ pub struct GatewayConfig {
     pub(super) api: gateway_api::ApiConfig,
     #[serde(default)]
     pub(super) openai: provider_openai::OpenAiConfig,
+    #[serde(default)]
+    pub(super) veil: gateway_veil::Config,
 }
 
 impl LoadableConfig for GatewayConfig {
@@ -45,6 +47,7 @@ impl LoadableConfig for GatewayConfig {
         self.openai
             .resolve_and_validate(&runtime_data_dir)
             .map_err(|_| ConfigError::InvalidField("openai"))?;
+        self.veil.resolve_paths(&runtime_data_dir, source_dir);
         Ok(())
     }
 }

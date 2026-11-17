@@ -6,7 +6,6 @@
     "groups": "分組管理",
     "apiKeys": "API密鑰",
     "usage": "分析統計",
-    "plugins": "插件",
     "appearance": "主題設置",
     "settings": "系統設置",
     "update": {
@@ -16,7 +15,6 @@
     "switchLanguage": "切換語言（{value}）",
     "languageLoadFailed": "語言加載失敗，請刷新重試",
     "mainLabel": "主導航",
-    "pluginManagement": "插件管理",
     "online": "在線",
     "sidebar": {
       "close": "關閉側邊欄",

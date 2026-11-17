@@ -1,6 +1,7 @@
 import type { ApiKey } from '@/api'
-import { onScopeDispose, shallowRef } from 'vue'
+import { onScopeDispose, shallowRef, watch } from 'vue'
 import { revealApiKey } from '@/api'
+import { getSettings } from '@/api/modules/settings'
 import { useCopyText } from '@/composables/useCopyText'
 import { useRequestState } from '@/composables/useRequestState'
 import { t } from '@/i18n'
@@ -15,40 +16,38 @@ export function useApiKeyUse() {
   const revealingKeys = shallowRef(new Map<string, KeyRevealAction>())
   const revealRequest = useRequestState()
   const showUseKeyModal = shallowRef(false)
-  const selectedUseKey = shallowRef<(ApiKey & { key: string }) | null>(null)
+  const selectedUseKey = shallowRef<(ApiKey & { key: string, claudePublicUrl: string }) | null>(null)
   const showCreatedKeyModal = shallowRef(false)
   const createdKey = shallowRef('')
-  const createdKeyName = shallowRef('')
   const showImportKeyModal = shallowRef(false)
   const selectedImportKey = shallowRef<ApiKey | null>(null)
+  watch(showUseKeyModal, (open) => {
+    if (!open)
+      selectedUseKey.value = null
+  })
 
-  function showCreatedKey(key: string, name: string) {
+  function showCreatedKey(key: string) {
     createdKey.value = key
-    createdKeyName.value = name
     showCreatedKeyModal.value = true
   }
 
   const openAiBaseUrl = `${resolveServiceRootUrl()}/v1`
 
-  function importCreatedKey() {
-    if (!createdKey.value)
-      return
-
-    window.location.href = buildCodexCcSwitchImportDeeplink({
-      apiKey: createdKey.value,
-      baseUrl: openAiBaseUrl,
-      providerName: createdKeyName.value || 'codex-proxy-rs',
-    })
-  }
-
   function openUseKeyModal(apiKey: ApiKey) {
-    return withPlaintextKey(apiKey, 'use', (key) => {
-      selectedUseKey.value = { ...apiKey, key }
+    return withPlaintextKey(apiKey, 'use', async (key) => {
+      const signal = revealRequest.signal
+      const settings = await getSettings({ signal })
+      if (signal?.aborted)
+        return
+      selectedUseKey.value = { ...apiKey, key, claudePublicUrl: settings.claudePublicUrl }
       showUseKeyModal.value = true
     })
   }
 
   function openImportKeyModal(apiKey: ApiKey) {
+    // Claude 专用密钥沿用原生配置入口，不能导入为 Codex 配置。
+    if (apiKey.providerKinds.length && !apiKey.providerKinds.includes('openai'))
+      return openUseKeyModal(apiKey)
     revealRequest.invalidate()
     selectedImportKey.value = apiKey
     showImportKeyModal.value = true
@@ -108,7 +107,6 @@ export function useApiKeyUse() {
 
   function clearCreatedKey() {
     createdKey.value = ''
-    createdKeyName.value = ''
   }
 
   onScopeDispose(() => {
@@ -130,7 +128,6 @@ export function useApiKeyUse() {
     clearCreatedKey,
     copyToClipboard,
     copyApiKey,
-    importCreatedKey,
     openUseKeyModal,
     openImportKeyModal,
     importSelectedKey,

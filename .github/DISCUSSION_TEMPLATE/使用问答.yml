@@ -2,8 +2,8 @@ body:
   - type: markdown
     attributes:
       value: |
-        欢迎提问。提交前可以搜索已有讨论，并查看[部署文档](https://github.com/zyycn/codex-proxy-rs/blob/main/deploy/README.md)。
-        明确的程序故障请使用 [Issue 模板](https://github.com/zyycn/codex-proxy-rs/issues/new/choose)；不确定是不是 Bug，也可以先在这里交流。
+        欢迎提问。提交前可以搜索已有讨论，并查看[部署文档](https://github.com/Gululu8023/codex-proxy-rs/blob/main/deploy/README.md)。
+        明确的程序故障请使用 [Issue 模板](https://github.com/Gululu8023/codex-proxy-rs/issues/new/choose)；不确定是不是 Bug，也可以先在这里交流。
         请移除密钥、令牌、Cookie、代理认证和私人内容，不要上传完整配置或请求转储。解决后请标记帮助到你的答案。
 
   - type: textarea

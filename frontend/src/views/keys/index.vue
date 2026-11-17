@@ -67,7 +67,6 @@ const {
   clearCreatedKey,
   copyToClipboard,
   copyApiKey,
-  importCreatedKey,
   openUseKeyModal,
   openImportKeyModal,
   importSelectedKey,
@@ -238,7 +237,6 @@ watch(
       v-model="showCreatedKeyModal"
       :created-key="createdKey"
       @copy="copyToClipboard"
-      @import-client="importCreatedKey"
       @after-leave="clearCreatedKey"
     />
 
@@ -252,6 +250,7 @@ watch(
       v-model="showUseKeyModal"
       :api-key="selectedUseKey"
       :api-base-url="openAiBaseUrl"
+      :claude-public-url="selectedUseKey?.claudePublicUrl"
       @copy="copyToClipboard"
       @after-leave="selectedUseKey = null"
     />

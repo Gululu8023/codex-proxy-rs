@@ -19,7 +19,7 @@ use gateway_core::task::{
 use gateway_host::workers::{WorkerStartError, WorkerSupervisor};
 use tokio::sync::Notify;
 
-const ACTIVE_KINDS: [WorkerKind; 11] = [
+const ACTIVE_KINDS: [WorkerKind; 10] = [
     WorkerKind::OAuthRefresh,
     WorkerKind::QuotaCatalogHealth,
     WorkerKind::RuntimeSnapshotReconciliation,
@@ -29,7 +29,6 @@ const ACTIVE_KINDS: [WorkerKind; 11] = [
     WorkerKind::Retention,
     WorkerKind::Backup,
     WorkerKind::AccountImport,
-    WorkerKind::AccountFreezeRecovery,
     WorkerKind::ResetCreditAutomation,
 ];
 

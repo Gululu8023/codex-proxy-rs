@@ -2,4 +2,3 @@
 
 mod openai;
 mod peer;
-mod xai;

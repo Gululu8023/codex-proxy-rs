@@ -237,7 +237,8 @@ async fn start_upload(size: usize) -> UploadProbe {
 }
 
 async fn accept_request(listener: &TcpListener) -> (TcpStream, String, Vec<u8>) {
-    tokio::time::timeout(Duration::from_secs(3), async {
+    // 并行上传测试会校验完整的 16 MiB 分片，给共享 CI CPU 留足处理预算。
+    tokio::time::timeout(Duration::from_secs(20), async {
         let (mut stream, _) = listener.accept().await.expect("accept S3 request");
         let (request, body) = read_http_request(&mut stream)
             .await

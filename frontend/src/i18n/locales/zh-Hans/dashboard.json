@@ -5,7 +5,7 @@
       "totalSlots": "总槽位",
       "freeSlots": "空闲槽位",
       "smart": "智能调度",
-      "quotaReset": "额度重置优先",
+      "quotaReset": "额度调度",
       "sticky": "粘滞",
       "title": "账号调度",
       "description": "容量、并发与分配策略",
@@ -14,12 +14,12 @@
     },
     "accountPool": {
       "empty": "暂无账号池观测",
-      "quotaExhausted": "配额耗尽",
+      "quotaLimited": "额度受限",
       "rateLimited": "限流中",
       "pending": "待处理",
       "issueCountsEmpty": "停用 — · 错误 —",
       "availableDescription": "账号当前可用",
-      "exhaustedDescription": "账号额度已耗尽",
+      "limitedQuotaDescription": "额度耗尽或达到调度上限",
       "limitedDescription": "账号请求暂时受限",
       "issueCounts": "停用 {disabled} · 错误 {error}",
       "title": "账号状态",
@@ -59,7 +59,7 @@
       "totalRequests": "总请求",
       "requestCount": "请求次数",
       "totalTokens": "总 Token",
-      "totalCharges": "总计费",
+      "totalCharges": "已知估算费用",
       "totalCacheHits": "总缓存命中",
       "totalCache": "总缓存"
     },
@@ -78,6 +78,8 @@
       "empty": "暂无成功记录"
     },
     "clientIdentity": {
+      "followClient": "跟随客户端",
+      "followClientDescription": "身份由每次请求提供，没有固定的全局客户端版本。",
       "clientMode": "运行模式",
       "versionPolicy": "版本策略",
       "notChecked": "尚未检查",

@@ -10,13 +10,8 @@
 | 客户端协议 | [Responses、Chat、Images、模型与 Provider 操作](#3-openai-数据面与模型目录) · [额度查询](#api-key-额度查询) |
 | 账号与授权范围 | [账号](#5-账号) · [代理](#独立代理管理--managed-proxies) · [分组](#6-账号分组) · [Client Key](#7-client-key) |
 | 系统与运维 | [健康检查](#2-健康检查) · [运行设置](#8-运行设置) · [备份](#9-备份) · [统计与诊断](#10-dashboard用量与错误) · [版本与更新](#11-版本更新与重启) |
-| 插件 | [安装包与来源](#安装包与来源) · [运行实例](#121-运行实例) · [管理扩展](#122-管理扩展页面与原始-api) |
 
 ## 1. 鉴权与公共约定
-
-下文描述宿主路由的默认行为。已启用的 `http` 中间件在路由匹配、认证和正文解析前统一进入，
-可改写请求、覆盖本次请求设置、直接返回响应或接管 WebSocket 升级；管理、模型、健康检查和静态资源使用同一入口。
-挂载与覆盖合同见 [SDK 洋葱中间件](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#洋葱中间件)
 
 ### OpenAI 数据面客户端接口
 
@@ -29,16 +24,12 @@ Authorization: Bearer sk_...
 自动生成的 Key 保持 `sk_` 格式；迁入的自定义 Key 使用保存时的原值，不限制前缀或固定长度。
 无论格式如何，只有已保存且启用的 Client Key 能通过鉴权
 
-启用[入口认证插件](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#数据面入口认证)时，
-`Authorization` 可按插件协议校验，并由宿主将外部身份映射到明确绑定的 Client Key。
-账号范围、模型权限、并发和预算仍由该 Key 决定；插件认证不接管管理员或 Key 自助页登录
-
 Codex 原生生图配置还会携带 `X-OpenAI-Actor-Authorization: proxy-managed`。
 它仅用于客户端识别服务端托管认证，不能代替 Client Key。网关和 OpenAI Provider 都会过滤该请求头，
 上游账号身份只由服务端选中的账号提供；不要把真实账号 token 放进该标记
 
 Client Key 通过账号分组限定路由范围：未绑定分组时可使用全部账号，绑定一个或多个分组时只能使用
-已启用分组成员的并集。分组可以混合 `openai` 与 `xai` 账号；同一请求只会在模型能力明确匹配且满足
+已启用分组成员的并集。分组可以混合 `openai` 与 `anthropic` 账号；同一请求只会在模型能力明确匹配且满足
 重放安全边界时跨 Provider fallback
 
 运行设置可以分别配置 `minCodexDesktopVersion` 与 `minCodexCliVersion`。两者只接受 SemVer，`null`
@@ -46,6 +37,12 @@ Client Key 通过账号分组限定路由范围：未绑定分组时可使用全
 适用门禁的客户端没有合法版本，或版本低于对应门槛时，除只读 `/v1/usage`、`/v1/cpr/link` 外的 `/v1/*` HTTP 请求和新 WebSocket
 握手在访问上游前返回 `400 Bad Request`，按不可重试的请求错误处理。
 未知客户端保持兼容，不应用版本门禁
+
+Claude 原生入口使用独立的 `minClaudeCodeVersion`，同样接受 SemVer，`null` 表示不限。
+在 Client Key 鉴权后、出站身份伪装前，按原始 `User-Agent` 的 `claude-cli/<版本>` 产品段
+校验 Claude Code；低版本或已识别但版本无效时返回 Anthropic 格式的 `400 invalid_request_error`。
+CLI 和 IDE 共用该下限，普通 SDK 等未识别为 Claude Code 的客户端不受此门禁影响。
+`anthropic-version` 是 API 协议版本，不作为客户端版本；上游身份自动同步也不改变此检查。
 
 `minCodexCliVersion` 检查官方客户端 User-Agent 产品段中的 Core 版本，支持
 `codex_cli_rs`、`codex-cli`、`codex-tui`、`codex_exec`、`codex_vscode`、`codex_sdk_ts`、
@@ -91,7 +88,7 @@ HTTPS 来源以及缺失、`null` 或非法来源保留 `Secure`。`HttpOnly`、
 
 请求无需自带 `x-request-id`；缺失时服务端自动生成 UUID 并在响应头回传同一 request ID。
 `api.request_id_header` 可改变注入与回传的 header 名，管理端鉴权不依赖该名字。
-管理端 JSON 与动态响应统一带 `Cache-Control: no-store`；插件静态资源按下述资源接口的私有缓存策略返回
+管理端 JSON 与动态响应统一带 `Cache-Control: no-store`
 
 管理端长度已知且至少 1 KiB 的 `application/json` 响应按 `Accept-Encoding` 协商 gzip，
 压缩时返回 `Content-Encoding: gzip`，可协商的响应带 `Vary: accept-encoding`。
@@ -152,7 +149,7 @@ HTTPS 来源以及缺失、`null` 或非法来源保留 `Secure`。`HttpOnly`、
 | `40901` | 刷新容量、账号租约占用或账号快照冲突 | 按提示等待，或重新查询账号后操作 |
 | `40001` | 缺少或无效的凭据、已确认刷新令牌失效或账号停用 | 检查凭据或重新授权 |
 | `50201` | 明确的上游失败，且未归类为凭据永久失效 | 根据安全消息处理上游拒绝、限流或服务异常 |
-| `50202` | 无法确认令牌轮换结果，包括 xAI 返回无效的新凭据 | 先核对账号状态，不要自动重发可能已轮换的一次性令牌 |
+| `50202` | 无法确认令牌轮换结果，包括 Claude 刷新响应无法确认 | 先核对账号状态，不要自动重发可能已轮换的一次性令牌 |
 | `50301` | 刷新服务或依赖暂不可用 | 检查出站连接与依赖服务后重试 |
 
 OpenAI 上游 `401` 按 `50201` 返回，不代表管理员会话失效，也不要求管理端重新登录。
@@ -177,8 +174,8 @@ Dashboard 的 `lastUsedRelative` 和账号额度的 `refreshedAtRelative` 由后
 
 原始 RFC3339 `lastUsedAt`、`quota.refreshedAt` 与兼容展示字段保持可用，不用于前端重新决定上述展示方式
 
-账号冷却返回 RFC3339 `rateLimitedUntil` 和 `rateLimitRecoveryDisplay`，后者包含剩余时长、
-到期时间或等待恢复探测的提示，随账号数据刷新；前端不解析展示文本或自行计算恢复提示
+账号冷却返回 RFC3339 `rateLimitedUntil` 和 `rateLimitRecoveryDisplay`，后者包含剩余时长或到期时间，
+随账号数据刷新；前端不解析展示文本或自行计算恢复提示
 
 `period=today|7d|30d` 表达自然日范围，`asOf` 是 Unix 毫秒查询锚点，省略时取服务端当前时刻。
 近 7 天包含锚点所在日期及前 6 个自然日，近 30 天同理包含前 29 日；结束点为锚点。
@@ -197,7 +194,7 @@ Dashboard 的 `lastUsedRelative` 和账号额度的 `refreshedAtRelative` 由后
 会改变路由快照或安全配置的写入由后端在事务内推进 `config_revision`，用于快照发布与审计。
 账号、分组等响应中的 `configRevision` 表示已提交事实，不是这些接口的写入前置条件。
 [运行设置整体更新](#8-运行设置)必须提交读取时的 `configRevision`，过期返回 `409`；
-代理的 `revision`、插件实例的 `expectedRevision` 属于各自资源，按对应接口提交，不与全局版本混用
+代理的 `revision` 属于该资源，按对应接口提交，不与全局版本混用
 
 ## 2. 健康检查
 
@@ -376,8 +373,7 @@ Codex 的 review 等子代理请求仍使用 `/v1/responses`，并通过 `x-open
 #### 请求期限
 
 模型请求默认不限制总执行时长。排队受[并发等待设置](#8-运行设置)约束，上游传输仍有独立的连接、空闲与心跳超时；
-持续有输出的请求不会仅因总时长达到固定值而结束。插件可以对单次模型执行设置显式总时限，
-从该次请求开始计算，见 [SDK 请求设置](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#模型请求与-attempt)
+持续有输出的请求不会仅因总时长达到固定值而结束。
 
 `api.request_timeout_seconds` 控制 HTTP 路由处理到返回响应的等待，默认 `null`；不限制已返回响应的流式正文寿命，
 也不是 WebSocket 每轮模型执行的总时限。客户端断开或取消仍会结束所属执行，反向代理和客户端可另设超时
@@ -389,8 +385,7 @@ Codex 的 review 等子代理请求仍使用 `/v1/responses`，并通过 `x-open
 多帧连续解码，整体展开结果受运行设置 `responsesMaxDecompressedBodyBytes` 约束（默认 64 MiB），
 超限在继续展开前返回 `400 request_too_large`，错误信息包含当前请求的上限字节数。zstd
 回溯窗口独立固定为最多 64 MiB，不能满足该限制的帧按解码失败处理。这个限制保护入站解压资源，不是
-模型上下文或 Token 上限；未压缩正文不经过此解压检查。插件受管出站仍受同一设置约束，
-见[请求解压上限](#请求解压上限)。
+模型上下文或 Token 上限；未压缩正文同样受该大小限制，见[请求解压上限](#请求解压上限)。
 不支持的编码、逗号分隔的叠加编码和重复 `Content-Encoding` 头返回
 `400 unsupported_content_encoding`；压缩正文损坏、截断或解压后不是合法 JSON 返回
 `400 invalid_json`。本地错误不包含原始正文或解压库细节。WebSocket 文本帧不经过这条解压路径
@@ -410,8 +405,6 @@ API Key 与 OAuth 共用模拟客户端画像（`User-Agent`、`originator`、`v
 `openai.residency`、`openai.account_routing_override` 控制，配置值原样发送并覆盖客户端同名头，
 省略或 `null` 时删除对应请求头。配置说明见 [部署与运维](../deploy/README.md#启动后的运行设置)
 `x-openai-fedramp` 默认按业务头透传并保留原始多值，Responses 明确换号时清理。
-上述过滤描述原生转发；已信任插件的显式 header 改写可以覆盖账号与画像生成的默认头，
-不按认证或会话字段名称拦截，边界见 [SDK 请求中间件](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#模型请求与-attempt)
 
 Responses 也不透传 `x-stainless-*`、`Origin`、`Referer`、`sec-ch-ua*` 和 `sec-fetch-*`
 携带的下游 SDK/浏览器环境或页面来源。过滤规则适用于所有下游客户端，与 User-Agent 无关；
@@ -432,8 +425,6 @@ Responses 明确换号时清理 `traceparent`、`tracestate`、`sentry-trace`、
 Images 的 `x-codex-image-turn-id` 和 Desktop 自动 Git 上下文的 `clientUserMessageId`。
 输入项元数据保持不变。Search 的会话 `id` 按同一安装身份域映射，只替换该值的原始字节，其余正文保持不变。
 `prompt_cache_key` 同样按安装身份映射，保留同一身份内的缓存共享关系；未提供时不补造。
-受信任插件可读取原始请求，自行生成身份并在 `outbound` 改写完整请求与关联字段；宿主不重新派生或补回业务字段，
-实际选号与计费归属保持不变，详见 [SDK 出站请求准备](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#上游出站准备)。
 续接 response ID、历史 item/call ID、业务正文和未知扩展不参与映射，
 该处理减少显式追踪标识的跨账号复用，不保证会话内容或业务 metadata 无法关联
 
@@ -484,10 +475,6 @@ turn metadata 的 `workspaces` 也会保留仓库绝对路径、Git 远端地址
 
 #### WebSocket 与上游传输
 
-公开 HTTP 请求在路由匹配前经过已绑定的 `http` 中间件；插件可以改写握手路径和请求参数。
-已升级的 Responses 连接在入站解析前和出站写入前经过 `websocket` 中间件，完整消息与主动发送接口见
-[SDK 洋葱中间件](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#洋葱中间件)。下述规则描述默认协议处理
-
 Responses WebSocket 接受文本消息，`response.create` 在同一连接串行执行。当前响应期间收到的后续创建请求
 留在有界接收队列中，待当前响应完成终结和写出后再逐条校验、准入与执行，不因请求提前到达而断开。
 接收队列容量为 32 个事件，超载仍关闭连接；Ping/Pong、客户端关闭和服务关闭不等待队列中的请求执行
@@ -537,10 +524,6 @@ OAuth 账号默认 `prefer_websocket`，客户端使用 HTTP/SSE 时仍可能选
 客户端配置的 `supports_websockets` 只控制第一段连接，不是服务端传输策略开关。
 上游在响应终态前发送 Close 1000 仍属于失败，不能按“正常关闭”计为成功
 
-内建 xAI 适配器不支持 `generate=false` 的非生成预热请求，在发送推理请求前返回
-`400 unsupported_prewarm`，不会将其当作普通生成调用。`generate=true` 或省略该字段正常执行；
-客户端可跳过预热继续正式请求，外部插件 adapter 按各自的协议能力处理
-
 Codex OAuth backend 的候选上游为 WS 时，无 `previous_response_id` 的普通新链若规范化
 `response.create` 达到 15.5 MiB，发送前选择 HTTP/SSE；HTTP 和 WS 入站均适用。能关联到客户端线程时，
 后续完整新链沿用 HTTP/SSE，直到帧长低于 13.5 MiB 再尝试 WS。预热和增量帧不改变此大小判断。
@@ -560,7 +543,7 @@ OAuth 的大 connection-local WS 续接，以及 HTTP `store=false` 成功后标
 已建立模型执行的 Responses、Images 和 Search HTTP 响应按以下规则返回关联 ID：
 `x-gateway-request-id` 为模型执行 ID；`x-request-id` 保留有效上游值，只有上游
 `x-oai-request-id` 时复用其值，没有上游 ID 时使用模型执行 ID。`x-oai-request-id` 不是必需字段，
-也不要求客户端识别它；OpenAI 与 xAI 路由使用相同规则。失败响应的关联 ID 不采用会话 opening ID，
+也不要求客户端识别它。失败响应的关联 ID 不采用会话 opening ID，
 错误正文读取失败时仍返回已知上游 ID；已采集的 turn state 等允许的会话头继续按原合同交付。
 尚未建立执行的入口拒绝继续使用 middleware 的入口关联
 
@@ -584,13 +567,11 @@ API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回�
 保留在 Codex 目录中，且不出现在默认选模列表。其他 ID 保持可见；此规则不影响普通模型列表或直接调用。
 模型别名仅替换 `slug`，不替换上游展示名、提示词、能力或 `priority`；保持原生模型顺序，新增别名附在后面。
 目录按当前路由快照的模型存在性及账号模型政策过滤，避免公布已知无法路由的模型；新模型需待后台目录对账后进入列表。
-xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用画像。推理菜单读取
-`reasoning_efforts` 对象列表，默认值只取菜单中的显式标记；缺失时保持未知
 
 已知模型只路由到明确提供该模型的 Provider，账号不可用时不转发给其他平台的未知模型通道。
 未知模型只在当前范围与路由约束下存在唯一 Provider 透传候选时发送；无法确定归属时返回不可用错误，
 可通过 Client Key 分组限定目标平台。Provider 在选号时检查账号模型政策与目录资格，
-具体边界见[账号模型限制](#账号模型限制)；ChatGPT OAuth 账号不接受 Grok 模型
+具体边界见[账号模型限制](#账号模型限制)
 
 目录账号只能来自本次 Client Key 冻结的账号范围。OpenAI 的 OAuth 目录按账号 ID 排序，使用首个成功读取的
 合格账号，最多尝试三个账号；API Key 目录按账号模型权限过滤后聚合。同名模型优先采用 OAuth 原生对象，
@@ -599,8 +580,7 @@ xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用�
 “与某个官方账号的整个目录完全一致”，也不会固定后续推理账号。
 读取失败返回 `503 model_catalog_unavailable`，不以简化模板或空成功响应覆盖客户端缓存。
 成功获取的 API Key 目录被账号模型政策全部过滤时返回空列表，区别于读取失败。
-目录保留完整的原生 Codex 模型对象。对于 OpenAI API Key 普通模型列表和 xAI 目录生成的通用画像，
-当前 Key 可访问的适配器若声明了同名模型，其画像在原位置替换通用画像。仅由插件提供的可见模型按声明顺序追加到所属 Provider 的条目之后
+目录保留完整的原生 Codex 模型对象；OpenAI API Key 普通模型列表和 xAI 目录使用通用画像。
 
 原生目录可能返回缓存结果，成功缓存有效期为 5 分钟。每次查询都检查账号资格和 Client Key 范围。
 成功目录响应带 `Cache-Control: private, no-store`，不借用上游 ETag 标识经过选择/别名/聚合后的正文
@@ -614,8 +594,7 @@ xAI 没有 Codex 原生目录，使用官方 CLI proxy 当前目录生成通用�
 Codex 专用目录中的 `context_window` 与 `max_context_window` 分别表示默认上下文窗口和客户端本地
 覆盖的上限。OpenAI Provider 原样保留上游对应字段，缺失与 `null` 不互相转换；网关不通过部署配置
 覆盖这些值。Codex 客户端配置 `model_context_window` 后，按该值与非空 `max_context_window` 的较小值
-使用窗口；上限为空时保留客户端本地值。xAI 默认窗口取 `context_window`，缺失时取 `context_windows`
-中的首个有效值；覆盖上限取默认窗口和可选窗口的最大值，只有标量时以该值作为上限
+使用窗口；上限为空时保留客户端本地值
 
 ### 透传与错误恢复
 
@@ -627,10 +606,9 @@ response ID 按 opaque 值处理而不假设 UUID 或固定长度；除客户端
 OpenAI 上游错误 envelope 和允许下发的 opaque header 值也不由 canonical 观测结果重写。
 `reasoning.effort` 的数字和未知扩展值保留给上游判断，本地观测不限制参数形态。
 `response.metadata` 的业务内容继续交付，仅其中的响应头沿用凭据、账号身份和逐跳头隔离规则。
-未改写的 WebSocket 文本不依赖 JSON 旁路解析成功；插件改写后的响应仍复核必要关联，原始 SSE 心跳
-和无法提取事实的未改写内容不构成协议失败。
+WebSocket 文本不依赖 JSON 旁路解析成功；原始 SSE 心跳和无法提取事实的内容不构成协议失败。
 Images 固定使用 OpenAI Provider，不重建正文或映射模型字段；Provider 从原始 JSON 旁路提取图片模型，
-按[账号模型限制](#账号模型限制)选号，并复核插件改写后的模型。账号选择、鉴权头替换和端点路由
+按[账号模型限制](#账号模型限制)选号。账号选择、鉴权头替换和端点路由
 不改变请求正文，成功与非容量失败响应正文保持原始字节。
 
 Images 排除已知为 Free 套餐的 OAuth 账号；套餐缺失或未知时不推断为 Free，API Key 账号不套用该套餐规则。
@@ -644,23 +622,19 @@ Images 与 Search 保留通过现有过滤规则的普通业务请求头及多�
 不随独立端点转发，turn metadata 仍由所属端点按当前账号处理。
 模型映射是全局精确映射，未命中时模型名原样交给候选 Provider；分组只限定账号集合，不参与模型改名
 
-#### xAI 适配
-
-xAI Provider 将 Grok wire 转换为 Responses wire。上游结构化错误的 message/code/type 可透出，内嵌的账号指纹 UUID 脱敏。
-模型名完整保留，不剥离前缀；别名使用显式模型映射。目录读取失败返回错误，不用硬编码型号补全能力
-
-xAI 的 `reasoning.effort` 接受 `none / minimal / low / medium / high / xhigh / max`，去除两端
-空白并转为小写后保留档位，不按模型名称降档或删除；模型是否支持该选择由上游判断。
-未知值或错误类型返回字段错误，其他 reasoning 字段保留。`web_search.filters` 支持
-`allowed_domains` 与 `excluded_domains`，两者不能同时为非空；客户端函数与托管搜索工具
-同名时使用内部别名，并在返回工具调用时还原客户端名称。搜索工具顶层的 `allowed_domains` 不受支持，返回请求错误
+严格亲和的后代线程因绑定账号不具备当前模型权限而等待超时，错误码仍为 `concurrency_queue_timeout`，消息说明模型限制。只有账号属于当前授权范围时才区分该原因，其余资格缺失使用一般不可用提示。
 
 #### 容量拒绝与重试
 
-OpenAI HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）在单请求内共享最多 4 次 opening、30 秒预算。
-先在原账号上退避恢复；允许换号且至少剩余两次 opening 时，本次恢复最多使用一半剩余时间，并保留一次 opening。
-再次建连失败才按调度规则重选账号，选号不可用时使用原账号的剩余预算；固定账号或换号预算不足时仅在原账号恢复。
-证书、TLS 协议及配置错误不进入该恢复，取消与请求截止时间优先终止等待
+没有 HTTP 状态码且明确携带 `invalid_request_error` 的流内拒绝归为请求错误；容量、Flex 和轮次限流的专用分类优先。
+非流式返回请求错误，SSE/WS 保留消息和关联 ID；不因此换号、冷却账号或计入账号故障评分。
+
+OpenAI HTTP 明确未发送的瞬时建连失败（含 TLS 握手 EOF）在单请求内共享最多 4 次 opening、30 秒预算；WS 瞬时建连失败也可为替代账号预留建连机会。
+只有整个请求尚未发送、无续接依赖且 Provider 明确允许时才能建连换号；同账号恢复不消耗换号次数，跨账号选择仍受总尝试次数与换号上限约束。
+先在原账号恢复；允许换号且至少剩余两次 opening 时，为后续选号保留时间和一次 opening。WS 重试或降级 HTTP 仍由既有传输策略决定。
+确认连接账号代理的 TCP 入口失败时，本次请求按规范化主机与端口排除所有共用该入口的账号。TLS 证书、代理认证、SOCKS/CONNECT 握手拒绝不证明入口不可达。
+排除不持久化、不输出代理凭据；候选全部使用故障入口时保留原错误结束，不回退该入口。其他建连失败选号不可用时仍可使用原账号剩余预算。
+固定账号、禁止重试、已交付输出、取消与截止时间约束继续生效。Claude 保留既有传输禁止重试、OAuth 恢复和 veil 门禁规则
 
 客户端推理请求提供有效逻辑线程、轮次及 `request_kind=turn` 时，网关按 Client Key 隔离短期失败状态。
 “同账号重试后返回错误”策略终态失败后，5 分钟内同轮次再次命中该策略时直接返回错误，不重复执行其最多 5 次重试；
@@ -684,7 +658,7 @@ Responses 的 HTTP/SSE 与 WebSocket 按顺序即时交付正常事件，不暂�
 WebSocket 独立 Ping 保活；Responses HTTP 流式请求完成准入后，执行仍在等待且连续 15 秒无输出时提交 `200`
 和 SSE 注释心跳，此后的等待继续每 15 秒保活，包括请求中间件等待和上游尚未返回事件。
 首次心跳前仍保留最终 HTTP 状态与响应头；心跳发出后发生的失败使用 `response.failed` 和 `[DONE]`，
-后续取得的上游或插件响应头无法再补发，`Retry-After` 转入流内错误的 `response.error.headers`。
+后续取得的上游响应头无法再补发，`Retry-After` 转入流内错误的 `response.error.headers`。
 心跳不代表业务输出，不关闭已有的安全重试窗口。
 SSE 注释和 WebSocket Ping/Pong 不重置官方 Codex 客户端的事件空闲超时，
 其 `stream_idle_timeout_ms` 默认是 300 秒；长请求需持续收到真实事件，
@@ -708,17 +682,17 @@ OpenAI 仅在允许安全重放且尚未交付不可重放输出时执行下表�
 
 `maxRetryAfterSeconds` 限制网关接受的单次服务器建议等待，默认 240 秒，取值 0～4,294,967,295。
 建议时间超过上限时跳过同账号等待，按原有耗尽动作安全换号或返回错误；无可用账号时返回最后一次上游错误，
-保留原始 `Retry-After`。等于上限仍可等待，0 表示不接受正数等待；未提供有效建议时继续使用本地退避。
-该设置不限制请求总时长，不改变已交付不可重放输出、续接绑定和换号次数等限制；保存后对新请求生效。
+容量恢复投影清除旧账号的 `Retry-After` 和 `retry-after-ms`，普通限流仍保留等待建议。等于上限仍可等待，0 表示不接受正数等待；未提供有效建议时继续使用本地退避。
+该设置不限制请求总时长；续接仅可按下文的绑定迁移合同要求客户端重放，仍受已交付输出和换号次数限制。保存后对新请求生效。
 
 已发送的容量失败计入[智能调度健康分](architecture.md#智能调度)，可用账号的会话亲和优先。
-容量不足不触发 Provider 全局熔断，也不作为账号额度耗尽；账号冷却由独立的[错误保护规则](#账号错误保护)决定。
+容量不足不触发 Provider 全局熔断，也不作为账号额度耗尽；明确的上游限流、额度及认证故障由各 Provider 的调度策略处理。
 客户端错误兼容由 API 编码出口统一处理：最终交付的 `server_is_overloaded`、`slow_down` 错误码
 投影为 `server_error`，HTTP 错误状态及 WS 包装错误的数字状态投影为 `503`，让客户端执行自己的
 有界重试。Provider 已确认容量不足的初始失败，即使没有这两个错误码，也返回 `503`。
 SSE/WS 的 `response.failed` 保留原消息、响应 ID 与其他业务字段；客户端无法消费的裸 `error`
-继续按现有规则投影为 `response.failed`。`Retry-After` 等允许下发的响应头保留，
-其他错误码不受影响。内部上游状态、错误码、原始事件及计量事实保持不变；已开始输出的请求由
+继续按现有规则投影为 `response.failed`。容量恢复投影清除实际响应头及错误帧内嵌头中的 `Retry-After`、`retry-after-ms`；
+普通限流与 Claude 原生等待提示不受影响。内部上游状态、错误码、原始事件及计量事实保持不变；已开始输出的请求由
 客户端决定如何恢复，代理不因此重放已提交的请求。
 `flex_unavailable` 是当前请求的终止拒绝，保留原始错误，不自动重试、切换传输或冷却账号
 
@@ -740,12 +714,16 @@ OpenAI 选号阶段确认本次可选账号全部额度耗尽时，HTTP 返回 `
 （WebSocket 为 `status: 400`）及 `previous_response_not_found`，不附带额度窗口的 `Retry-After`。
 支持该恢复协议的客户端应去掉 `previous_response_id`、携带完整历史重试，由正常调度选择可用账号；
 官方 Codex 的 WebSocket 客户端支持这一流程。其他客户端需要自行处理，网关不会跨账号发送原增量输入。
-普通限流、容量不足、发送结果不明以及已经交付输出的失败不触发此转换
+原生续接的明确容量拒绝仅在安全重放证明成立、尚未交付语义输出、发送结果明确、建议等待超过 `maxRetryAfterSeconds` 且允许换号时进入绑定迁移。
+网关在授权范围内选择替代账号，以原子准入更新真实会话绑定后返回同一 `400 / previous_response_not_found` 恢复指令。优先亲和在此路径迁移主绑定，严格亲和的后代仍只跟随根绑定。
+迁移不发送旧账号的 `previous_response_id` 或增量输入，不新增生成请求或 Token 费用；内部保留原账号的容量分类、发送状态、上游请求 ID 和计量事实，客户端收到当前失败的关联 ID。
+无真实会话身份、宽松亲和、无替代账号或预算耗尽时保留原容量失败；取消、超时和存储失败不报告迁移成功，选号租约按既有生命周期释放。
+普通限流、发送结果不明以及已经交付语义输出的失败不触发此转换
 
 ### API Key 额度查询
 
 `GET /v1/usage` 使用同一数据面入口认证，默认传入 `Authorization: Bearer <Client Key>`；
-启用入口认证插件时可查询其映射 Key 的额度。不接受会话 Cookie、管理 API Key 或查询参数。
+不接受会话 Cookie、管理 API Key 或查询参数。
 只返回当前 Key 的日与周额度，不包含明文 Key、账号资料或其他 Key 的数据。查询本身不执行模型推理、扣费或占用推理并发/RPM，
 不更新最近使用时间或开启预算窗口；额度耗尽后仍可查询。已配置的入口认证和 request 中间件仍按授权执行
 
@@ -762,7 +740,7 @@ OpenAI 选号阶段确认本次可选账号全部额度耗尽时，HTTP 返回 `
 金额使用十进制字符串，`total` 为当前周期限额，`used` 为该周期已结算金额，`remaining` 为限额减已用且最低为零。
 不限额时 `total`、`remaining` 均为 `null`，仍返回已用金额。`resetsAt` 为 RFC3339 窗口结束时间。
 原生窗口尚未开启或已到期时，`resetsAt` 为 `null`，`used` 为 `"0"`；显式窗口到期后仍返回已结算金额和结束时间。
-原生窗口按部署时区的自然日或首次使用起的七个本地日历日划分，显式窗口采用[插件设置的边界](#7-client-key)。
+原生窗口按部署时区的自然日或首次使用起的七个本地日历日划分，显式窗口采用已保存的起止边界。
 修改限额、管理员重置和费用结算均复用现有 Key 账本，不从请求日志重算余额
 
 缺失、非法、已禁用或已删除的 Key 返回 OpenAI 风格 `401` 错误；未知查询参数返回 `400 invalid_usage_query`，
@@ -771,7 +749,7 @@ OpenAI 选号阶段确认本次可选账号全部额度耗尽时，HTTP 返回 `
 ### CPR 互联只读协议
 
 `GET {api_base}/cpr/link` 使用推理 Key 查询当前授权范围内的只读快照，不接受查询参数。
-响应直接返回 JSON，所有状态均带 `Cache-Control: no-store`。第三方项目或插件可独立实现此 HTTP 协议，无需依赖 CPR 插件 SDK
+响应直接返回 JSON，所有状态均带 `Cache-Control: no-store`。第三方项目可独立实现此 HTTP 协议
 
 #### 版本与可选能力
 
@@ -954,7 +932,7 @@ CPR 默认路径为 `/v1/cpr/link`，使用同一数据面入口认证，不接�
 引导、sideband 与 hangup 的业务扩展头默认透传；认证、账号身份、下游环境与传输头遵守
 [请求头与身份](#请求头与身份)边界。`X-Session-Id`、`Voice-Session-Id` 是 Live 业务会话标识，原样透传。
 `Session-Id`、`Thread-Id` 等已识别追踪标识按选中账号的安装身份稳定映射，同账号各阶段保持一致，
-换账号使用不同标识，客户端 trace 原样透传。创建请求可由 attempt 插件改写本次构造身份，后续 sideband / hangup 仍使用钉住账号的身份。
+换账号使用不同标识，客户端 trace 原样透传。后续 sideband / hangup 使用钉住账号的身份。
 Live 不继承 Responses 的路由提示与续接状态；turn metadata 中的原账号绑定信息清理后保留其他字段。
 真实 call ID 保留用于钉住账号访问通话。HTTP 业务头保留原始多值字节，sideband 握手沿用 WebSocket 可编码的头值
 
@@ -978,6 +956,81 @@ call 与账号的绑定保存在网关进程内，未连接时一小时过期；
 - 已连接的 sideband 不随权限变更自动断开；仍有效的创建方 Client Key 可调用 hangup 结束通话
 - 标准实时 WebSocket（`GET /v1/realtime?model=…`）、realtime client secrets、legacy sessions、
   transcription/translation 会话与 SIP 控制返回 `501 realtime_capability_not_supported`。
+
+### Anthropic 原生接口
+
+Claude 域名对外使用标准路径，CPRS 内部使用 `/claude` 前缀，避免与 OpenAI 模型目录冲突：
+
+| 公网路径 | CPRS 内部路径 |
+| --- | --- |
+| `POST /v1/messages` | `POST /claude/v1/messages` |
+| `POST /v1/messages/count_tokens` | `POST /claude/v1/messages/count_tokens` |
+| `GET /v1/models` | `GET /claude/v1/models` |
+| `GET /v1/models/{id}` | `GET /claude/v1/models/{id}` |
+
+客户端使用 CPRS Client Key，以 `Authorization: Bearer <key>` 或 `x-api-key: <key>` 鉴权。
+重复凭据头、冲突凭据、逗号或空白混入的 Key 返回原生 401；无 Anthropic 账号访问权限返回 403。
+认证后的内部 Key ID 用于同进程 veil 映射隔离，不向 Nginx 或其他服务回传归一化 Key。
+veil 未就绪时，有效 Claude 推理、计数、目录、诊断与后台请求均停止，不回退直连
+
+Claude 使用原生 Messages/count_tokens 终端，保持 JSON/SSE 的协议语义和一次性响应恢复。
+
+Messages 和 count_tokens 保留原始 query 的编码、顺序与重复参数，固定转发到各自上游端点。
+本次支持原生 HTTP JSON/SSE 与 Messages Thread；不提供透明 tunnel，也不将 Responses WebSocket 转成 Claude。
+
+Thread 使用 `message-threads-2026-08-12` beta；`{"thread":{"type":"create"}}` 创建，
+`{"thread":{"type":"continue","previous_message_id":"msg_..."}}` 发送增量续接。
+续接固定原 Client Key、Provider 和账号，允许同账号 OAuth 刷新；缺失记录返回 404（`thread_not_found`），
+跨 Key/权限拒绝返回 403，身份配置、协议或 veil 状态变化返回 409，检查点存储不可用返回 503。
+稳定错误码在 `error.details.error_code` 中；409 后需携带完整历史创建新 Thread。
+成功终态须先提交符合条件的检查点；存储失败发生在流开始后时返回原生 SSE `error`，不再发送成功终止。
+`refusal` 或含 `fallback_message` iteration 的完整响应仍正常返回，但不登记为可续接检查点。
+Redis 记录沿用现有 TTL/容量边界；到期或淘汰后客户端须以完整历史重新创建。
+
+Messages 要求 JSON object、有效的 `model` 和正整数 `max_tokens`。
+Messages 与 count_tokens 的请求体大小共用 `responsesMaxDecompressedBodyBytes`（默认 64 MiB），
+支持 `identity`、`gzip`、`deflate`、`zstd`；解压后的正文和请求中间件改写后的正文均复核上限。
+入口读取也受该字节预算限制；超限返回 Anthropic 格式的 `413 request_too_large`，
+无效压缩正文、重复或不支持的编码返回 `400 invalid_request_error`，不向上游发送请求。
+保留 `anthropic-version`、可合并的 `anthropic-beta` 及原生正文，流式使用原始 SSE。
+`x-claude-code-session-id` 优先提供显式会话亲和；兼容 `metadata.user_id` 中 JSON 的 `session_id` 和旧格式的 UUID 会话后缀。
+这些字段不是身份认证，不从 IP 或提示词推断会话；无 session 正常调度，管理端诊断不修改亲和。
+不进行 Codex 到 Claude 的协议转换，未知模型不会自动替换；count_tokens 请求真实上游，拒绝时保留原始错误，
+不合成精确计数
+
+模型目录仅返回当前 Key 能访问的 Anthropic 模型，支持 `limit`（默认 20，范围 1–1000）、
+`before_id` 或 `after_id`，两个游标不能同时使用。
+目录读取本地账号快照，未采集或过期时明确不可用；后台和显式刷新负责访问上游，不合成旧模型列表。
+上游 HTTP 错误经过严格占位符恢复后保留原状态及允许的响应头；流开始后发生错误不重放推理。
+原生 `input_tokens`、cache read/write 分开保留；共享输入总量由三者加总，总 token 仅在输入与输出均已知时派生。
+断流保留已观察到的部分用量，Provider metadata 的 `usageComplete` 标识是否观察到正常终态，缺价格不等于零费用。
+费用是 API 等价估算，缓存 5 分钟／1 小时明细及当次计价依据位于 Provider metadata，
+不等同于订阅实际扣费或剩余额度
+
+账号通过通用管理接口选择 `anthropic`，支持浏览器 OAuth、官方 callback URL 或 `code#state` 回填，
+以及包含 `claudeAiOauth` 的 Claude Code 凭据 JSON；不把订阅凭据下发给客户端。
+
+浏览器授权总有效期 10 分钟，单次领取权 120 秒，状态依次为 `ready → exchanging → exchanged`。
+profile 或账号事务失败后，同一 owner 可在原有效期内继续提交；已提交账号的重复回调由数据库 receipt 处理。
+账号身份优先取成功 token 响应中的 account/organization UUID，缺失时查询 profile；上传 JSON 中的身份字段不作为证明。
+
+凭据 JSON 要求非空 `accessToken` 和包含 `user:inference` 的 `scopes`，不支持仅 RT；`expiresAt` 可省略，提供时为 Unix 毫秒，
+没有 RT 的账号不能续期。AT 已过期或 profile 明确返回 401 时使用 RT 受控刷新，403 与网络故障不触发轮换。
+刷新检查点保留 30 分钟，成功刷新后先保存新 token 再提交账号，批量失败可在窗口内用同一原始文档重试；该窗口不随重试延长。
+批量导入与导出每份 1–200 个账号，先解析整份材料再访问上游。
+
+```json
+{
+  "claudeAiOauth": {
+    "accessToken": "<access-token>",
+    "refreshToken": "<refresh-token>",
+    "expiresAt": 1893456000000,
+    "scopes": ["user:inference", "user:profile"]
+  }
+}
+```
+
+部署及客户端设置见 [Claude OAuth 与 veil](../deploy/claude/README.md)
 
 ## 4. 浏览器认证
 
@@ -1068,7 +1121,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 ## 5. 账号
 
 账号 API 使用统一路由，不存在 Provider Instance 或 Provider 专属账号路由。`provider` 使用 Provider ID，
-固定为内置 `openai`、`xai`；操作可用性由平台实现与账号认证类型决定
+固定为内置 `openai`、`anthropic`；操作可用性由平台实现与账号认证类型决定
 
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
@@ -1106,7 +1159,7 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 
 账号列表支持以下稳定值：
 
-- `provider`: `openai` 或 `xai`，省略或空值表示不过滤
+- `provider`: `openai` 或 `anthropic`，省略或空值表示不过滤
 - `groupId`: 分组 ID、`ungrouped`，或省略以不过滤
 - `status`: `normal`、`quota_exhausted`、`rate_limited`、`disabled`、`error`
 - `sortBy`: `email`、`status`、`planType`、`usage`、`lastUsedAt`、`expiresAt`
@@ -1136,11 +1189,8 @@ config 返回 `{ name, plaintextKey }`，仅读取服务端会话绑定的当前
 `models` 只表示上游目录返回了这些模型 ID，不表示 Responses、Chat Completions、Embeddings 等所有端点均已验证可用。
 连接测试仅验证所选模型在 Provider 测试路径上的请求，其他端点需通过对应请求确认；目录观察时间不改变路由或账号能力判断
 
-账号限流详情在 `quota` 中返回：`rateLimitReason` 为 `upstream_rate_limit`（上游临时限流）、
-`error_protection`（自定义错误规则触发保护）或 `null`。`recoveryProbeRequired` 表示解除冻结是否需要成功探测；
-此时 `rateLimitedUntil` 是最早探测时间，到期后仍保持 `rate_limited`，直到探测成功或手动恢复。
-未要求探测时，该字段表示冷却结束时间。`protectionRules` 返回触发时的规则快照 `[{ id, name }]`，
-没有保护原因时为空数组，修改或删除当前规则不改写此快照。错误保护与上游限流独立恢复，解除保护不保证其他限制已经解除
+账号限流详情在 `quota` 中返回：`rateLimitReason` 为 `upstream_rate_limit`（上游临时限流）或 `null`，
+`rateLimitedUntil` 表示冷却结束时间，到期后自动恢复调度
 
 `quota.credits` 返回上游点数信息，缺失时为 `null`；包含 `hasCredits`、`unlimited` 和 `balance`。
 余额是保留上游精度的十进制字符串，未知为 `null`，零为 `"0"`，与重置卡库存独立
@@ -1245,7 +1295,7 @@ Key 预算及其访问状态随互联默认公开，不要求开启 `shareQuota`
 自定义模型取消勾选后在本次编辑期间保留，可再次勾选。保存时以最终选中项更新限制，关闭或取消编辑会丢弃草稿。
 白名单的清理按钮列出当前目录未返回的已选 ID，默认不选中任何项，
 由管理员确认后从当前表单移除，保存账号后生效。目录未就绪、刷新失败或返回空目录时不能清理，清理也不能将白名单置空。
-图像、搜索、插件适配模型和映射目标可能不在目录中，目录缺失本身不代表模型失效。
+图像、搜索和映射目标可能不在目录中，目录缺失本身不代表模型失效。
 例如 Plus 设置 `allowlist` 并选中 luna 的实际 ID，Pro 设置 `denylist` 并选中同一 ID，即可严格分流；
 Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修改规则
 
@@ -1268,10 +1318,6 @@ OpenAI 使用最近 30 分钟内同步的目录，xAI 使用未过期的套餐�
 无可用账号错误，不会回退到被禁止的账号。已开始请求使用冻结的政策，新请求使用已发布的新配置。
 Images 和 Search 按原始请求正文的模型 ID 检查，不依赖模型目录或全局模型映射；可手动添加目录未列出的模型 ID。
 模型缺失、重复或无法识别时，仅使用模型政策为 `all` 的账号，不推测上游默认模型。
-Search 的选号限制不约束插件在选号后主动改写正文。
-管理员连接测试的选项包含上游目录和账号白名单中的 ID。连接测试跳过普通选号的模型政策、目录资格筛选与模型拒绝冷却，成功表示指定账号可调用测试使用的端点与模型。
-普通 `/v1/models` 和单模型查询将已发现的 OpenAI 模型关联到来源账号，至少一个来源账号在当前 Key 范围内且政策允许时才展示；
-同 Provider 中未发现该模型的 `all` 账号不会使它进入列表。原生目录保留已有来源选择和完整模型对象
 
 ### 独立代理管理 / Managed Proxies
 
@@ -1316,7 +1362,6 @@ Search 的选号限制不约束插件在选号后主动改写正文。
 移除关联账号只清除指定账号的代理绑定与连接地址，使其改为直连，保留凭据、调度参数与分组。
 若账号已不再绑定请求中的代理，则返回 409
 删除代理会自动解除全部关联账号的代理绑定与连接地址，账号保留其余设置并改为直连。
-代理仍被插件来源或插件包引用时返回 409，账号绑定保持不变
 
 `maxWebsocketConnections` 为此代理的 OpenAI Responses 上游 WS 连接上限，范围 0–4294967295，0 表示不限制。
 创建时省略默认为 0，更新时省略或 `null` 保留原值。关联账号共享预算，修改后新请求使用新值，已存在的连接仍计数。
@@ -1327,7 +1372,7 @@ Search 的选号限制不约束插件在选号后主动改写正文。
 
 代理默认启用，更新 `enabled: false` 后保留配置、测试结果和账号绑定，关联账号的新请求改为直连，
 不应用该代理的位置覆盖；重新启用后恢复原出口及位置规则。省略 `enabled` 保留当前状态。
-禁用代理仍可执行连接测试，但不能以 ID 选择用于账号绑定、新的账号授权、导入或插件下载
+禁用代理仍可执行连接测试，但不能以 ID 选择用于账号绑定、新的账号授权或导入
 
 `detectLocation: true` 在测试连接时解析出口位置；结果 `location.status` 为 `notRequested`、
 `detected`、`failed` 或 `conflict`。`detected` 携带 `location`，`failed` 携带安全错误说明；
@@ -1344,7 +1389,7 @@ API 的 `autoLocation` 默认为 `false`；开启时使用已检测位置，测�
 运行设置中已开启的 `requestLocation`；两者均未开启时保留客户端原有位置和时区。全局覆盖按请求冻结，
 新请求使用保存后的设置，无需重启；代理覆盖在每次执行时读取，
 换号或换出口按该次选定账号解析。位置只影响客户端时间上下文的时区和 Web Search 的结构化位置，
-不改变 epoch 时间戳、真实出口 IP、服务或管理端时区、数据驻留约束及 xAI 请求
+不改变 epoch 时间戳、真实出口 IP、服务或管理端时区、数据驻留约束及 Anthropic 请求
 
 时间上下文支持以下两种消息，文本块均为 `type: "input_text"`：
 
@@ -1416,7 +1461,7 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
 每个任务接受 1–200 个 `items`，请求体上限为 4 MiB。每个条目遵循下节的 Provider 文档与设置合同，独立处理
 并返回结果。批量 AT / RT 按非空输入顺序拆成单账号条目，因此可逐条统计；
 管理端上传的 OpenAI JSON 文件按 `accounts` 数组拆成单账号条目，每项保留该账号引用的代理，
-成功与失败分别记录；xAI、插件文档及直接调用导入 API 的多账号文档仍由 Provider 按自身语义处理。
+成功与失败分别记录；Anthropic 及直接调用导入 API 的多账号文档仍由 Provider 按自身语义处理。
 管理端按条目数和请求体大小分批创建任务，同一输入重试时复用各批的提交标识，已创建任务不会重复执行。
 一个未拆分的文档可导入多个账号，条目成功数与入库账号数可能不同
 
@@ -1442,18 +1487,16 @@ OAuth 等待回调期间不持有保护；提交仍拒绝已删除或连接配�
 能力是查询时的投影，不能代替实际操作的权限校验，也不保证上游可用
 
 导入的 `data` 必须是 JSON object，Admin API 请求上限为 64 MiB；Provider 可以收紧限制，
-当前 xAI 导入上限为 16 MiB。内部 schema 由目标 Provider 独占解释：
+内部 schema 由目标 Provider 独占解释：
 
 - OpenAI 接受单账号 OAuth 或 API Key 文档、`accounts` 数组（最多 200 项）、CPR 账号 bundle 和含代理引用的 sub2api 导出
 - OpenAI OAuth token 字段接受 `accessToken`、`refreshToken`、`idToken`，以及官方
   `auth.json` 中的 `access_token`、`refresh_token`、`id_token`，可以嵌套在 `tokens` 等账号 object 内；
   每项至少包含 AT 或 RT。仅含 `OPENAI_API_KEY` 的客户端代理配置不是 OAuth 账号导入材料；
   RT-only 会在导入时换取 AT，已知过期的 AT-only 会拒绝导入，其他 AT-only 不具备自动续期能力
-- OpenAI 与 xAI 的账号条目接受 `outboundProxyUrl`；OpenAI 还会解析 sub2api 的 `proxy_key` 和顶层 `proxies`。
+- OpenAI 的账号条目接受 `outboundProxyUrl`；OpenAI 还会解析 sub2api 的 `proxy_key` 和顶层 `proxies`。
   代理在 token 刷新前绑定。缺失、重复、停用、带到期时间或配置回退策略的 sub2api 代理会拒绝导入
-- xAI 从单账号 object 或 `accounts` 数组中提取 OAuth token；并发、优先级等字段不参与认证
-- xAI 批量导入逐条独立校验：失败条目跳过并记录日志，不中断其余条目，仅当没有任何条目成功时整个导入才报错
-- xAI API Key 不是受支持的账号 credential
+- Anthropic 接受 Claude Code OAuth 凭据 JSON；身份通过官方 profile 验证，重复身份更新已有账号
 - OAuth 导入由目标 Provider 完成必要的 token exchange 或身份投影。API Key 导入校验凭据格式与地址，不调用 OAuth 或 ChatGPT 身份接口；可用性由模型目录和连接测试验证
 
 API Key 账号使用以下独立凭据形态：
@@ -1526,7 +1569,7 @@ RT-only 使用同一形状，只提交 `refreshToken`。不得把真实 token �
 
 账号列表的每个 item 返回轻量 `groups: [{ id, name, enabled }]`
 
-OpenAI 的 CPR 导出保持 OAuth 账号的既有 token 与过期时间字段。OpenAI 与 xAI 的 CPR 账号条目均包含
+OpenAI 的 CPR 导出保持 OAuth 账号的既有 token 与过期时间字段。CPR 账号条目包含
 `modelAccess`，重新导入时恢复；导入 `settings.modelAccess` 显式提供时覆盖条目中的政策。
 导入条目未提供 `modelAccess` 且 `settings` 未指定该字段时，新账号默认 `all`，已有账号保留原值；凭据刷新、重新授权和目录刷新均保留政策。
 sub2api 的 `credentials.model_mapping` 不转换为本项目的账号模型限制
@@ -1609,8 +1652,7 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   无法识别新用户或新身份已绑定其他记录时，原账号保持不变
 - OAuth 账号文件导入和 OAuth complete（包括重新授权）在 credential 提交后后台尝试一次额度观测，不等待
   观测完成才返回成功。观测失败只记录告警，不回滚已提交的账号；手工或后台 RT 刷新只更新 token，
-  不隐式等同于手工额度刷新，也不更新既有账号资料或 OAuth principal。xAI 导入与 OAuth complete
-  使用相同的提交后观察流程
+  不隐式等同于手工额度刷新，也不更新既有账号资料或 OAuth principal；Anthropic 使用相同的提交后观察流程
 - 同一 OAuth flow 不能并发完成；账号事务提交成功后保留可重试读取的完成结果。
   失败会释放流程占用，但上游 authorization code 通常只能交换一次；已完成 token exchange 而未提交账号时应重新创建 OAuth flow
 - `GET /api/admin/accounts/quota` 只读取最后一次落库快照；`POST /api/admin/accounts/quota/refresh` 才访问上游。access token
@@ -1623,7 +1665,7 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   本次耗尽之后的已记录窗口 reset 全部到期后，新查询明确 `allowed=true` 可解除限制，即使用量仍为
   100%。未知 reset 或再次拒绝后残留的旧 reset 仍走原规则，不复用旧边界解封；时间到期本身不会
   解除限制，也不会将展示用量归零
-- 账号 `enabled` 控制是否参与请求调度，不控制 OAuth 凭据续期。OpenAI 与 xAI 的停用账号仍按各自刷新
+- 账号 `enabled` 控制是否参与请求调度，不控制 OAuth 凭据续期。OpenAI 与 Anthropic 的停用账号仍按各自刷新
   策略维护 Token；刷新结果更新凭据状态，但不会启用调度。无 refresh token 或凭据已进入失效、无效、
   封禁状态的账号不参加后台自动续期
 - `POST /api/admin/accounts/recover` 对停用账号只将 `enabled` 改为 `true`，保留已有额度快照、凭据、错误和 Redis
@@ -1634,9 +1676,6 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   `quota_exhausted`。额度观测不会清除凭据过期、无效或封禁事实；这些事实统一投影为 `error`，并由
   `errorReason` 区分。额度接口的 401/403 也不足以判定 refresh token 永久失效，credential 终态只由
   OAuth refresh 的明确永久错误写入
-- xAI 额度百分比只读取 `creditUsagePercent`，缺失时保持未知，不由旧月额度与用量计算。
-  预付余额保留上游账本符号，非零余额及剩余按量额度可独立证明可用；窗口已过期或缺少可用证据时，
-  不凭旧快照恢复账号
 - 正常 Responses 请求会解析上游响应的 rate-limit headers，合并进同一 quota 快照并同步状态。Free、
   K12 等套餐共用该状态机；套餐只参与账号展示和按套餐隔离的模型目录 cache，不存在 K12 专属额度路径
 - OAuth 账号详情的 Token 统计、模型排行和列表 Token 汇总优先使用账号级周额度窗口，无可统计的周窗口时
@@ -1647,6 +1686,14 @@ OpenAI 授权码交换与令牌刷新请求的连接超时为 30 秒，单次上
   金额原值保持完整精度，USD 展示值
   小于 1 美元时最多保留四位小数，其余最多保留两位，小数末尾不补零。
   额度百分比展示最多保留一位小数，小数末尾不补零；数值为零时返回 `0%`
+
+### Claude 动态额度
+
+Anthropic 账号的 `quota.providerData` 返回 `state`、`source`、`scope`、`queryFailedAt` 和独立的 `responseHeaders` 观测。`state` 区分 `unsampled`、`sampled`、`stale`、`query_failed`、`exhausted`；窗口的 `providerData` 分别保留来源、观测时间和作用范围，缺失百分比或重置时间保持未知
+
+主动查询的动态窗口与账号额度访问事实保存在既有 Provider quota 存储中，提交受 credential revision 和观测时间约束。账号级窗口的明确耗尽参与调度，模型专属窗口不扩大为整个账号耗尽；额外付费用量已启用或状态未知时，不仅凭订阅窗口触顶断定整个账号耗尽。后台每分钟检查是否需要复核，查询间隔至少五分钟，已知 reset 未到时继续保留耗尽；时间到期本身不解除限制，查询失败与令牌刷新也不解除旧额度事实
+
+响应头只保存有界的 `anthropic-ratelimit-*` 原始事实及其时间，不反推订阅余额；API 等价估算费用与订阅额度分别展示。Claude 未提供周/月 Token 预测
 
 ### 周/月额度预测
 
@@ -1778,7 +1825,7 @@ revision 变化时丢弃结果
 
 消费响应只返回上游结果 `code` 和可选 `credit`。消费端确认成功后应重新 GET 卡片列表，并显式调用
 `POST /api/admin/accounts/quota/refresh` 回读上游额度；未提供 `quotaRefresh` 能力时不发起该查询。
-不得因为消费成功直接改写本地 `resetAt` 或解除冻结。xAI 不支持该能力
+不得因为消费成功直接改写本地 `resetAt` 或解除冻结；Anthropic 不支持该能力
 
 消费期间账号身份或凭据版本变化时返回结果未知，不将旧结果套用到新绑定账号
 
@@ -1889,7 +1936,7 @@ OpenAI Key 的 `installationSeed` 接受带连字符的 UUID，保存时规范�
 - 填写种子：按种子、Key 记录 ID 和账号记录 ID 派生安装 UUID；重启、UA 变化或凭据更新不改变结果，换 Key、换账号或修改种子会改变身份
 - 种子不发送给上游，也不改写账号凭据；更改或清除种子使生效身份变化时，WebSocket 精确续写须重发完整上下文
 
-兼容字段 `openaiClientProfileOverride` 和 `xaiClientProfileOverride` 分别对应上述映射中的 `openai`、`xai`。
+兼容字段 `openaiClientProfileOverride` 对应上述映射中的 `openai`。Anthropic 不提供身份覆盖配置
 创建时省略或 `null` 表示无覆盖；更新时省略保留、`null` 清除。与通用字段同时提交时必须一致，否则拒绝整个请求；
 响应中的兼容字段从同一映射派生，不是第二份配置
 
@@ -1933,7 +1980,7 @@ OpenAI Key 的 `installationSeed` 接受带连字符的 UUID，保存时规范�
 记账和限额比较保留完整精度。
 原生日窗口按部署时区的下一自然日边界重置；周窗口从首次准入当天日界起持续七个本地日历日，到期后在下一次使用时重新开启。
 切换部署时区不修改已打开窗口的起止点或金额，到期后续接窗口不与旧窗口重叠。
-通过[插件预算接口](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#client-key-预算)设置的显式窗口使用指定起止时间，
+已保存的显式窗口使用指定起止时间，
 到期后仍返回当前消费与结束时间，不自动开启下一周期；未开始或已到期时拒绝准入，零金额上限也不例外。
 手动重置清零所选周期的已用金额、退出显式模式并清除到期时间，保留限额上限和历史费用，返回 `{ id }`。
 所选窗口的重置时间返回 `null`，下次使用时按新建 Key 的规则重新开启。重置前完成但延迟结算的费用不再计入所选周期，也不会开启窗口；
@@ -1949,7 +1996,7 @@ OpenAI Key 的 `installationSeed` 接受带连字符的 UUID，保存时规范�
 严格亲和下的后代线程始终启用账号排队，沿用 `accountQueueTimeoutSeconds` 和请求截止时间；
 `maxWaitingPerAccount` 为 0 时使用每队列 1,000 人上限，否则沿用配置的上限。
 可识别来源的 Search、Images、Live 创建请求采用同样规则，身份与轮次关联见[会话绑定](architecture.md#6-路由账号范围与-continuation)。
-插件显式选号须通过账号资格与租约检查，见[调度合同](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#路由调度与观察)。普通请求关闭账号排队且没有可用容量时返回 `503` / `account_capacity_unavailable`，
+普通请求关闭账号排队且没有可用容量时返回 `503` / `account_capacity_unavailable`，
 与无候选账号的 `no_available_provider` 区分；排队不绕过账号范围、模型权限、RPM 或金额限额
 
 OpenAI 会话因之前的上游 `cyber_policy` 拒绝而排除全部可选账号时，选号失败返回 `400` / `cyber_policy`，
@@ -1958,11 +2005,7 @@ OpenAI 会话因之前的上游 `cyber_policy` 拒绝而排除全部可选账号
 同次请求换号耗尽时保留已收到的原始上游错误；后续请求没有上游失败可交付时才使用上述本地提示。
 已开始交付的请求沿用流内错误合同，不能再改变 HTTP 状态
 
-xAI 由本地账号/模型冷却、无可选账号、并发容量不足及选号基础设施不可用引起的终态错误返回 `503`，
-保留 `account_unavailable_error` 类型和各自的机器码；可用备用 Provider 仍按路由范围与换号预算尝试。
-同次请求选号耗尽时保留最近一次上游失败，新的基础设施故障仍按自身原因报告
-
-默认队列满返回 `429` / `concurrency_queue_full`，排队超时返回 `429` / `concurrency_queue_timeout`；
+队列满返回 `429` / `concurrency_queue_full`，排队超时返回 `429` / `concurrency_queue_timeout`；
 WebSocket 使用对应错误事件。等待期间不发送上游请求，取消后释放等待位置，排队重查不重复计入 RPM。
 SSE 在 Key 准入完成并取得执行会话前不发送保活帧，此阶段保留 HTTP 错误状态；
 取得会话后的账号等待受 SSE 保活覆盖，已开始交付的失败沿用流内错误合同
@@ -1987,7 +2030,7 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | `POST` | `/api/admin/settings/location/detect` | 无请求体，检测网关服务器直连出口的位置，不保存设置 |
 | `POST` | `/api/admin/settings/privacy/preview` | 使用管理员提供的样本预览隐私规则，不保存设置或样本 |
 | `GET` | `/api/admin/settings/client-downloads/codex-desktop/windows` | 提取 Codex Desktop Windows 离线安装直链；`refresh=true` 强制刷新进程内短缓存 |
-| `GET` | `/api/admin/settings/client-profiles/{provider}` | 读取 `openai` 或 `xai` 的可选配置和 `globalConfiguration` |
+| `GET` | `/api/admin/settings/client-profiles/{provider}` | 读取支持身份配置的 `openai` 可选配置和 `globalConfiguration` |
 | `POST` | `/api/admin/settings/client-profiles/{provider}/preview` | `{ configuration }`，完整配置对象或 `null`（解析当前通用设置）；使用已加载版本与最近检查时间，不触发上游检查或保存 |
 | `GET` | `/api/admin/settings/admin-api-key` | 只返回管理 API Key 是否存在 |
 | `POST` | `/api/admin/settings/admin-api-key/delete` | 删除管理 API Key |
@@ -2006,25 +2049,97 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | 用途 | 字段 |
 | --- | --- |
 | 并发控制版本 | `configRevision` |
-| [客户端身份](#provider-客户端身份) | `providerRequestProfiles`、`openaiClientProfile`、`xaiClientProfile` |
+| [客户端身份](#provider-客户端身份) | `providerRequestProfiles`、`openaiClientProfile` |
 | [请求位置](#请求位置) | `requestLocationEnabled`、`requestLocation` |
 | [隐私策略](#隐私策略) | `codexPrivacyPolicy` |
-| 模型映射 | `modelMappings` |
+| 模型映射 | `modelMappings`、`anthropicModelMappings` |
 | 凭据刷新 | `refreshMarginSeconds`、`refreshConcurrency` |
 | [并发与排队](#并发与排队) | `maxConcurrentPerAccount`、`maxWaitingPerKey`、`maxWaitingPerAccount`、`openaiGuardianReservedConcurrency`、`keyQueueTimeoutSeconds`、`accountQueueTimeoutSeconds`、`switchAccountOnQueueFailure` |
 | [上游重试等待](#容量拒绝与重试) | `maxRetryAfterSeconds` |
-| [亲和与换号](#账号亲和与换号) | `openaiAccountAffinity`、`openaiSessionAffinityTtlHours`、`maxAccountRotations` |
+| [亲和与换号](#账号亲和与换号) | `openaiAccountAffinity`、`openaiSessionAffinityTtlHours`、`anthropicAccountAffinity`、`anthropicSessionAffinityTtlHours`、`maxAccountRotations` |
 | [调度策略](#智能调度) | `rotationStrategy`、`smartScheduling` |
 | [请求解压](#请求解压上限) | `responsesMaxDecompressedBodyBytes` |
-| [客户端门禁](#1-鉴权与公共约定) | `minCodexDesktopVersion`、`minCodexCliVersion` |
+| [客户端门禁](#1-鉴权与公共约定) | `minCodexDesktopVersion`、`minCodexCliVersion`、`minClaudeCodeVersion` |
 | [历史保留](#历史保留) | `usageRetentionDays`、`opsEventRetentionDays`、`auditRetentionDays` |
-| [账号错误保护](#账号错误保护) | `accountErrorProtection` |
+| [Prompt 审查](#prompt-审查) | 独立领域接口管理 `promptGuard`；`accountErrorProtection` 已退役，见[账号错误保护](#账号错误保护) |
 | [账号预热](#账号预热) | `accountWarmupEnabled`、`accountWarmupCron`、`accountWarmupModel` |
 | [主动额度重置卡](#主动额度重置卡) | `resetCreditLeadMinutes`、`resetCreditMaxWeeklyRemainingPercent` |
+
+`providerRequestProfiles.openai` 与 `providerRequestProfiles.anthropic` 分别配置两种供应商的客户端身份；模型映射分别使用 `modelMappings` 与 `anthropicModelMappings`，不跨供应商借用配置。
+Claude 映射作用于 Messages、count_tokens 与原生模型目录：先映射，再校验目标模型、Key 和账号权限；拒绝循环与无法解析的过长映射链。
+请求记录保留客户端模型，实际调用、用量与费用使用上游模型。增量 Thread 冻结实际模型，映射后目标改变或旧 Thread 缺少模型证据时须重建会话。
+
+### Prompt 审查
+
+`promptGuard` 核对 codex2api 提交 `811ad451e29d752cc01a13acaacc25074b515034`，使用 CPRS 的来源、类别与复审合同 `cprs-guard-v2`。内部职责见 [Prompt 审查架构](architecture.md#prompt-审查)。
+覆盖 Codex Responses HTTP／WebSocket、Claude Messages 和 count_tokens；本地分析读取最终原文，Claude 外部复审投影先经 veil。
+同一规则在重复归一化视图中不重复计分；只有当前用户文本参与决策，历史／系统／工具内容只形成审计证据。纯信号和仅观察类别不推高决策分。普通命中遵循本地告警／阻断策略，严格规则独立达到阈值后直接终止，不调用外部复审。
+图片、二进制与签名历史按 `text_only` 明示范围；意外遗漏的可执行文本属于覆盖不足
+
+| 字段 | 默认值与合同 |
+| --- | --- |
+| `enabled` | `true`，不提供按 Key 或模型绕过 |
+| `mode` | `enforce` 或 `observe`；observe 保留 `wouldAction` 但放行，Claude veil 仍强制执行 |
+| `localAction`、`threshold` | 默认 `block`、50；动作支持 `warn/block`，阈值 1–1000 |
+| `strictTerminalEnabled`、`strictThreshold` | 默认 `true`、90；严格分独立累计，阈值不低于普通阈值 |
+| `reviewEnabled`、`reviewFailClosed` | 默认 `false`、`true`；关闭复审仍执行本地策略，失败放行不能清除已有本地阻断 |
+| `scope` | `local_candidates`（默认）或 `all`；会话锁和严格终止优先 |
+| `reviewRequestMode` | `chat_completions`（默认）或 `moderations` |
+| `reviewUrl` | 对应格式的完整 `/chat/completions` 或 `/moderations` URL；HTTPS 或 loopback HTTP，不跟随重定向 |
+| `reviewModel` | 独立语义节点的模型 |
+| `reviewApiKey` | 只写 Key 池，支持逗号、分号、空白分隔；省略保留，空字符串清除；只返回 `hasApiKey`、`apiKeyCount` |
+| `reviewMaxConcurrent` | 默认 8，范围 1–64；按进程限制复审与学习调用，池内 Key 轮询，无隐式重试 |
+| `moderationThresholds` | 13 个 Moderations 类别的独立阈值，单位 bps（1–10000）；按分类分数判定，不单独采用 `flagged` |
+| `timeoutSeconds` | 10，范围 1–60 |
+| `confidenceThresholdBps` | 7000，即 0.7；范围 1–10000 |
+| `maxTextChars` | 32768，范围 1–262144；约束包含信封的复审投影，不限制为只扫描本地前 32K；必选材料不得截断 |
+| `disabledRules` | 停用规则 ID，最多 1024 个；内置与已发布规则使用同一评分器 |
+| `conversationLockEnabled`、`conversationLockTtlHours` | 默认 `true`、168 小时；Client Key＋协议＋会话／请求指纹隔离，支持人工解除 |
+| `learningEnabled`、`learningModel` | 默认采集脱敏证据；Moderations 模式生成规则草稿须配置同服务商的对话模型；生成与发布分离 |
+| `state` | 只读配置状态：`disabled`、`ready`、`candidate_review_unavailable`，不代表远程探测成功 |
+
+节点必须独立于托管 OAuth 池。Codex 候选内容会发送到管理员配置的节点；密钥不随设置读取、审计或普通日志返回。
+外部复审开启时必须有有效配置；复审失败按 `reviewFailClosed` 执行，fail-open 保留独立本地结论；observe 记录故障与拟处置。Chat Completions 复审包含来源标记，Moderations 只发送当前用户文本。
+本地错误返回原生协议 JSON 与稳定 `prompt_guard_*` 错误码，不触发上游推理、凭据刷新、换号或账号降级。
+有效策略阻断、无法归属内容和必选复审材料超限为 400，节点、规则执行或隐私依赖不可用为 503；取消与总期限沿用共享错误合同。
+
+Claude 与审查配置从通用设置更新中迁出，使用以下管理员接口，响应沿用管理信封及 `no-store`：
+
+| 方法与路径 | 合同 |
+| --- | --- |
+| `GET /api/admin/claude/settings` | 返回 `{configRevision, publicUrl}` |
+| `POST /api/admin/claude/settings` | 仅保存 `{configRevision, publicUrl}`；URL 为空或无认证、查询参数及 fragment 的 HTTPS 根地址 |
+| `GET /api/admin/claude/privacy` | 运行时、规则版本/包/类别、映射容量、库调用计数、受控错误和部署时区时间；`keyFingerprint` 为主密钥的域分离 SHA-256 指纹，用于与备份清单核对；不暴露规则模式、主密钥或映射内容 |
+| `GET /api/admin/claude/models?keyId=…` | 指定 Key 的有效原生模型集合；不存在 404、禁用 403、依赖不可用 503 |
+| `GET /api/admin/prompt-guard/settings` | `{configRevision, config, retentionDays}`，密钥只返回配置状态 |
+| `POST /api/admin/prompt-guard/settings/update` | `{configRevision, config}`，revision 冲突 409；密钥省略保留、空字符串清除 |
+| `GET /api/admin/prompt-guard/policy` | 当前规则版本与 `rulesRevision`、类别用途、阈值、表达式和启停状态 |
+| `GET /api/admin/prompt-guard/records` | 根请求分页记录、同一查询快照的汇总及共享记录队列健康 |
+| `POST /api/admin/prompt-guard/evaluate` | `{text, origin}`；本地评估已保存配置，来源为 `current_user/history/system/tool_output`，不保存文本或调用上游 |
+| `GET /api/admin/prompt-guard/candidates` | `page/pageSize` 必填，可按 `protocol/status` 筛选；返回候选、脱敏证据及 revision |
+| `POST /api/admin/prompt-guard/candidates/save` | `{id, revision, rule, rationale}`；id=0 创建人工草稿，仅 pending/disabled 可编辑 |
+| `POST /api/admin/prompt-guard/candidates/action` | `{id, revision, action}`；支持 `generate/publish/dismiss/disable/reopen`，冲突返回 409 |
+| `GET /api/admin/prompt-guard/profiles` | `page/pageSize` 必填，可按协议筛选；最近30天根请求事实及最多100个活动锁事件，受请求保留期约束 |
+| `POST /api/admin/prompt-guard/locks/release` | `{id, revision}`；同一次拒绝的会话锁和指纹锁一起解除，操作同事务记审计 |
+
+记录查询必填 `start`、`end`、`page`、`pageSize`（1–100），可选 `requestId`、`clientKeyId`、`protocol`、`model`、`mode`、`action`、`category`、`origin`、`policyVersion`、`reviewResult`、`minScore`、`maxScore`。
+精确 `requestId` 查询不受页面时间窗限制，但已清理记录不会恢复；`action=missing` 查询缺失摘要。
+来源过滤作用于最多 1024 条已保存命中，其余数量见 `omittedHits`；摘要不含原文与自由文本理由。
+队列指标是整个网关进程启动以来的统计，不是 Prompt 专属计数；摘要写入可能失败，不保证与请求终态原子落盘。
+
+明确的 `cyber_policy` 或 `content_policy_violation` 不自动换号，也不归因为账号故障。反馈按根请求去重，候选按协议和当前文本指纹去重；仅完整脱敏证据可调用学习模型，产物始终是草稿。发布／停用规则更新全局规则代次，下一次评估读取新代次。`upstreamPolicy.recorded=false` 表示持久化未确认，锁状态应以画像页为准。已发布规则不会随证据过期被撤销。
+
+候选状态为 `pending → published → disabled`，待审核项可 `dismiss`，已忽略项可 `reopen`。仅 pending/disabled 可编辑，已发布规则须先停用再修改；人工新建规则同样须发布后才生效。
+最多同时启用 256 条自定义规则，不能覆盖内置 ID 或发布匹配空串的规则。生成结果必须通过结构和正则校验并命中来源证据，表达式的泛化范围仍由管理员审核。
+候选保存、状态变更与解锁均携带 revision，过期返回 409；状态、规则代次及管理审计在同一事务提交。证据仅管理员可见，反馈与学习证据沿用 `usageRetentionDays` 清理，管理审计沿用审计保留期。
+
+`GET /api/key-usage/claude-models` 仅限 Key 浏览器会话，按服务端绑定身份返回目录，不接受客户端指定其他 Key ID，也不读取明文 Key。
+账号诊断额外发送 `type=stages`，包含阶段结果、耗时及 Guard 的实际 `mode/action/wouldAction`；未执行阶段不表示成功，诊断不进入普通业务审查记录
 
 ### 历史保留
 
 `usageRetentionDays` 控制请求明细及其用量统计的保留天数，默认 31，支持 1～31 的整数天数。
+Prompt 上游反馈与学习证据沿用此保留期；清理样本不删除人工发布的规则。
 `opsEventRetentionDays` 与 `auditRetentionDays` 分别控制独立运维事件和管理审计，默认 30、90，均须为正整数
 
 清理任务每轮读取已保存设置，按完成时间分批删除过期请求及关联事件，不删除运行中的请求；有界单轮结束后等待一分钟再检查。
@@ -2056,6 +2171,9 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 字段约束与[代理位置](#独立代理管理--managed-proxies)一致。全局自定义开启后，OpenAI Responses 使用全局位置，
 关联代理配置了自定义位置时优先使用代理值。保存后通过现有配置发布机制对新请求生效，
 已开始请求及其重试保持同一份全局值；普通文本、绝对时间戳和数据驻留要求不受影响
+
+这两个位置字段同时作用于 Codex 与 Claude，Claude 没有独立的位置配置。账号（含关联代理）的位置覆盖优先于共享全局值。
+Claude 仅覆盖原生 `web_search_*` 的 `user_location`，不插入 Codex 环境标签或改变出口 IP；管理员位置先参与审查，再于脱敏后恢复同一份结构化配置，不恢复用户提供的原文。
 
 ### 隐私策略
 
@@ -2161,7 +2279,7 @@ Guardian 以 `subagent_kind` 或 `client_metadata.x-openai-subagent` 值 `guardi
   原生续接仍固定其状态归属账号
 - `strict`（严格）：同一会话共用账号，后代请求等待当前账号并跟随根请求换号
 
-插件显式选号及原生续写的状态归属约束在三种模式下仍然生效
+原生续写的状态归属约束在三种模式下仍然生效
 
 Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少显式会话 ID 的请求会在同一 Client Key 下匹配账号亲和。
 网关先匹配客户端传入的 `prompt_cache_key`，否则按上游模型、开头的指令和首条用户消息的文本匹配。
@@ -2180,15 +2298,11 @@ Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少�
 
 ### 请求解压上限
 
-`responsesMaxDecompressedBodyBytes` 限制压缩 Responses HTTP 请求的解压输出，以及插件受管 HTTP
-的实际出站正文（包括账号上游请求，无论是否压缩），单位字节，默认 67108864（64 MiB）。
+`responsesMaxDecompressedBodyBytes` 保留历史字段名，作为 Codex Responses/Chat 和 Claude Messages/count_tokens
+共用的 HTTP 请求体上限，压缩正文按解压后大小检查，未压缩正文同样检查，默认 67108864（64 MiB）。
 必须为正整数，且可表示为进程平台的 `isize`；管理端以整数 MiB 编辑。
-插件模型调用从同一设置派生内部请求编码预算，具体边界见 [SDK 模型请求](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#key模型与模型调用)
 
-保存并发布成功后，新请求使用新值；在途模型请求及其路由、调度、attempt 和重试回调沿用冻结预算。
-显式 Key 的模型调用沿用当前父调用内绑定的快照，父调用结束后重新绑定时使用新值；无模型请求上下文的
-受管 HTTP 调用读取当前发布值，无需重启插件。调小该值可能使插件上传或转发返回 413，且不发送出站请求。
-调高上限会增加大请求的内存占用，不代表扩大模型 Token 上限、响应缓冲或整个进程的内存预算
+保存并发布成功后，新请求使用新值；在途请求及其重试沿用冻结预算。调高上限会增加大请求的内存占用，不代表扩大模型 Token 上限、响应缓冲或整个进程的内存预算。
 
 ### 智能调度
 
@@ -2238,15 +2352,15 @@ Chat Completions 和 Responses 通过原生 OpenAI Provider 选号时，缺少�
 Token，范围 0～1000000、最多四位小数。`"0"` 表示免费，缺少整个档位表示继承；不能只缺少部分单价
 
 `bands` 可用键为 `standard`、`fast`、`ultrafast`、`flex`、`long_standard`、`long_fast`、`long_ultrafast`、`long_flex`、`image`。
-OpenAI 长上下文为输入超过 272000 Token，xAI 为输入达到 200000 Token；仍按 Provider 支持的
+OpenAI 长上下文为输入超过 272000 Token，Anthropic 已知 Sonnet 模型为输入超过 200000 Token；仍按 Provider 支持的
 模型与服务档位判断是否能估算。OpenAI 内置 Ultrafast 价目覆盖 `gpt-6-astra` 与 `gpt-6.1-sol`。
-xAI 不接受 `flex`、`long_flex`、`ultrafast`、`long_ultrafast`、`image`。图像端点的 `standard`
+Anthropic 不接受 `flex`、`long_flex`、`ultrafast`、`long_ultrafast`、`image`。图像端点的 `standard`
 用于文本输入，`image` 用于图像 Token；不能用文本输出单价替代图像输出单价。用量无法完整拆分时不估算
 
 `multiplierBps` 为 0～1000000 的整数，10000 表示 1 倍、0 表示本地估算为零，最大 100 倍。
 它作用于本地费用及对应明细，独立于服务档位；缺少计价依据的请求即使倍率为零仍然是费用未知
 
-`provider` 为内置 `openai` 或 `xai`，对应价目由 `GET` 返回的 `defaults` 提供。
+`provider` 为内置 `openai` 或 `anthropic`，对应价目由 `GET` 返回的 `defaults` 提供。
 `models` 为 1～500 个模型 ID，每个 ID 为
 1～128 字节且不含空白、控制字符。`change` 为以下形式之一：
 
@@ -2259,7 +2373,7 @@ xAI 不接受 `flex`、`long_flex`、`ultrafast`、`long_ultrafast`、`image`。
 
 一批更新原子提交并写审计，不覆盖未选中的模型。未知字段、错误类型和非法价格字符串等 JSON 合同错误
 返回 422；Provider、模型 ID、批量数量、倍率上限和不支持的档位等业务校验错误返回 400。
-models.dev 同步只导入可表示为当前文本 Token 计价的 OpenAI/xAI 模型；不完整价格、其他输出模态及
+models.dev 同步只导入可表示为当前文本 Token 计价的 OpenAI/Anthropic 模型；不完整价格、其他输出模态及
 不匹配的上下文梯度在 `skipped` 中返回 `provider/model`。确认会重新抓取价目；若与预览不同返回 400，
 需重新预览。来源不可用返回 502，已有价目保持不变。`preview` 必须原样提交，`models` 按 Provider
 指定 1～10000 个待同步模型；空选择或未登记的模型返回 400。同步只更新选中模型的来源层，未选中模型
@@ -2272,18 +2386,39 @@ models.dev 同步只导入可表示为当前文本 Token 计价的 OpenAI/xAI �
 更新时省略某项保留原值，对象替换该项，`null` 删除显式选择并使用 Provider 默认值；不清除其他 Provider 的配置。
 配置内容由对应 Provider 校验，不包含账号凭据。Key 可通过 `providerRequestProfileOverrides` 整体覆盖所属 Provider 的选择
 
-`openaiClientProfile` 与 `xaiClientProfile` 是同一映射的兼容字段：省略保留，不能显式提交 `null`；
-与通用字段同时提供时必须一致，否则整次更新拒绝。读取响应从映射派生这两个字段，不维护平行状态
+`openaiClientProfile` 是该映射中 OpenAI 的兼容字段：省略保留，不能显式提交 `null`；
+与通用字段同时提供时必须一致，否则整次更新拒绝。读取响应从映射派生该字段，不维护平行状态
 
-直接读取 `openai` 或 `xai` 的选项与预览。OpenAI 选项返回六个 `presets` 与 `maxVersionLag`，xAI 返回 `defaults`；
-响应均包含 `globalConfiguration`
+身份选项和预览复用 `GET /api/admin/settings/client-profiles/{provider}` 与
+`POST /api/admin/settings/client-profiles/{provider}/preview`。OpenAI 保持既有返回格式。
+Anthropic 返回自身配置和有效身份，使用 `providerRequestProfiles.anthropic` 与 Key 的同名覆盖项。
+
+### Claude 上游客户端身份
+
+默认配置为 `mode=preset`、`client=cli`、`platform=macos`、`arch=arm64`、`versionMode=latest`。
+客户端支持 `cli`、`vscode`，平台支持 `macos/linux/windows`，架构为 `arm64/x64`；
+`versionMode` 支持 `latest/stable/fixed`，固定版本须提供 `version`。
+`mode=custom` 要求完整 `userAgent`、对应 `version`/`client` 以及有效的 `sdkVersion`/`runtimeVersion`；
+`mode=follow` 要求请求携带完整一致的 Claude UA、x-app 和 SDK/环境身份。
+SDK 默认 `0.128.0`，Node 默认 `v26.12.1`，独立于自动同步的 CLI 版本。
+
+UA、SDK 头、正文版本标记来自请求内同一快照。设备身份按内部 Key ID、账号 ID 和可选 Key
+`installationSeed` 派生；更换访问令牌不改变设备身份，账号 UUID 来自所选 OAuth 账号。
+会话使用显式 UUID 或新生成 UUID，不由提示词、IP 或路径推导。
+Key 仅设置种子时使用 `{"inherit":{"installationSeed":"<UUID>"}}`，保持继承全局画像。
+控制请求使用默认画像的身份头，不携带推理 metadata、billing 或 Key 会话；count_tokens 不注入生成 metadata/billing。
+
+后台启动及每 24 小时在分布式租约内读取官方 latest/stable，先提交共享发布缓存再发布内存状态；
+每进程每分钟读取共享缓存。失败保留最后成功版本，离线基线标注日期。
+预览返回有效身份、发布来源、核验/检查时间、同步错误和独立模板修订；CLI 版本同步不代表模板重新核验。
+已有 Thread 恢复保存的身份；自动发布更新不使它失效，显式配置、安装种子或模板变化会拒绝续接。
 
 ### OpenAI 上游客户端身份
 
 `openaiClientProfile` 保存通用选择，首次默认 `MacOS · Desktop · 自动最新`。
 兼容字段的更新语义见上节。初始化不读取 YAML 身份字段。
 该配置作用于 Client Key 的 OpenAI 模型请求与原生模型目录，适用于 HTTP/SSE、WebSocket、Images 和 Search。
-不改变 xAI、入站客户端版本门禁、账号认证或后台 Desktop 专属操作
+不改变 Anthropic、入站客户端版本门禁、账号认证或后台 Desktop 专属操作
 
 自定义配置使用 `{ "mode": "custom", "userAgent": "完整 UA" }`。
 已识别的 `Codex Desktop`、`codex-tui`、`codex_exec`、`codex_cli_rs` 前缀由后端解析 `originator` 和 Core `version`，
@@ -2345,74 +2480,9 @@ Responses 的自动 Desktop Git 上下文与请求头使用同一画像快照：
 配置在请求开始时冻结，Provider 首次解析的版本用于该请求的全部重试与换号。
 WebSocket 精确续写沿用所属连接；安装身份配置与变更限制见 [Key 客户端身份](#key-客户端身份)
 
-### xAI 上游客户端身份
-
-`xaiClientProfile` 保存 Grok CLI 的通用身份选择；首次使用内置 `grok-shell / headless / linux / x86_64`
-并采用自动更新版本。初始化不读取 YAML 身份字段，数据库已有选择时不覆盖。
-更新设置省略该字段保留现值，不能提交 `null`
-
-| 字段 | 取值与语义 |
-| --- | --- |
-| `versionMode` | 必填，`latest` 或 `fixed` |
-| `clientVersion` | `fixed` 必填 SemVer，最多 64 字节；`latest` 必须省略或为 `null` |
-| `clientIdentifier`、`clientMode`、`targetOs`、`targetArch` | 必填，各为 1～64 字节可见 ASCII，不含空白或控制字符 |
-
-```json
-{"versionMode":"latest","clientVersion":null,"clientIdentifier":"grok-shell","clientMode":"headless","targetOs":"linux","targetArch":"x86_64"}
-```
-
-配置作用于 Client Key 的 xAI 模型请求和压缩请求，影响 `x-grok-client-version`、`x-grok-client-identifier`、
-`x-grok-client-mode` 与 User-Agent；OAuth、后台目录和额度查询使用 Provider 内置官方画像。
-User-Agent 使用 `grok-shell/<版本> (<系统>; <架构>)`，其中 `arm64` 按官方规则展示为 `aarch64`。
-`clientIdentifier` 只控制对应请求头，不替换 User-Agent 中的 `grok-shell` 产品名。
-每个请求开始时解析并冻结身份，重试和换号沿用该身份；保存后新请求生效，密钥独立配置优先于通用设置
-
-自动版本通过官方 npm 检查稳定版本，周期 24 小时；检查失败保留当前进程最近有效版本，重启以内置基线开始。
-固定版本不受后台更新影响。预览返回配置、来源、最终身份字段、`userAgent`、`versionSource`、`verifiedAt`、
-`checkedAt` 和 `error`；固定版本不附带官方核验时间。Dashboard 展示已保存的通用身份
-
 ### 账号错误保护
 
-`accountErrorProtection` 是设置替换请求的必填对象，按管理员定义的上游错误规则累计失败，达到阈值后暂停该账号后续调度。
-不预设错误类型，不改变原始错误交付、认证与额度状态、重试资格或续接规则，新安装默认关闭且规则为空
-
-| 字段 | 默认值 | 约束与含义 |
-| --- | --- | --- |
-| `enabled` | `false` | 启用时至少有一条有效规则 |
-| `rules` | `[]` | 最多 32 条，任意规则命中后累计同一账号计数 |
-| `threshold` | `12` | 2～1,000，按普通请求的实际 attempt 计数 |
-| `windowSeconds` | `600` | 60～3,600，每次匹配失败续期的计数有效期 |
-| `durationSeconds` | `7200` | 300～604,800，冻结及探测失败后等待的秒数 |
-| `probeEnabled` | `true` | 到期后要求探测成功才解除保护 |
-| `probeModel` | `null` | 1～128 字符的探测模型名，留空选账号首个可用模型 |
-
-规则形状为 `{ id, name, conditions }`，`id` 必须唯一，`id` 和 `name` 是 1～128 字符的无首尾空白、无控制字符文本。
-每条规则有 1～8 个条件，条件全部满足才命中，至少含一个非 Provider 条件。每个条件为
-`{ field, operator, values, ignoreCase }`，候选值之间为 OR，`ignoreCase` 默认 `false`
-
-| `field` | `operator` | `values` 内容 |
-| --- | --- | --- |
-| `provider` | `equals` | Provider 标识 |
-| `status` | `equals` | 100～599 的三位数字字符串，如 `"400"` |
-| `code`、`type` | `equals` | 原始结构化错误码或错误类型 |
-| `message` | `equals`、`contains` | 原始结构化错误信息 |
-
-每个条件有 1～16 个候选值，每个 message 候选最多 1,024 字符，其余最多 256 字符。
-规则标识、名称、候选文本与探测模型的 UTF-8 字节总量不超过 64 KiB，超限整次保存失败。
-`null` 候选显式匹配字段缺失，与空字符串不同；`contains` 仅支持非空白文本，不接受 `null`。
-`equals` 去除两端空白后比较，`ignoreCase: true` 仅忽略 ASCII 大小写，不使用正则或全文响应扫描。
-message 的包含比较只检查 UTF-8 安全截断的前 8 KiB，等值比较针对完整字段
-
-HTTP 拒绝使用原始上游状态码；SSE 或 WS 流内失败只使用错误事件明确携带的状态码，没有则缺失，
-不会用握手成功的 200/101 或网关投影后的状态补齐。规则不匹配请求正文、普通输出、本地超时、连接失败或插件 RPC 故障。
-探测和预热不参与计数，同一 attempt 命中多条规则只累计一次，真实重试属于新的 attempt
-
-完整成功的普通调用清除尚未形成冻结的同期证据，未匹配错误不续期也不清零；计数口径不是严格的“最近 N 秒事件数”。
-规则或保护参数改变后重新累计，无关设置变更保留计数。已有冻结保存触发规则与恢复参数，不被后续编辑改写。
-无探测时到期恢复，有探测时到期仍阻止调度，探测失败按冻结时的时长顺延。关闭保护或探测后，已有冻结等待当前冷却结束再解除。
-保护到期或探测解除不清除独立的上游限流或模型冷却；账号手动恢复沿用强制清除本地状态的语义，使旧在途反馈和旧探测失效
-
-设置更新必须包含 `accountErrorProtection`，不接受未知字段；已有部署或备份的配置处理见[升级前检查](../deploy/README.md#升级前检查)
+此功能已移除：没有错误匹配规则、账号冻结或恢复探测。Prompt 内容判断、上游策略反馈和会话解锁统一进入 [Prompt 审查](#prompt-审查)；429、额度、认证和网络故障继续由 Provider 处理。
 
 ### Windows 客户端下载
 
@@ -2450,8 +2520,13 @@ Desktop 三段 SemVer 门禁，也不会自动回写最低版本设置。门禁�
 
 全部备份端点位于 `/api/admin/settings/backups/*`，使用管理接口响应信封，字段为 camelCase，响应带 `Cache-Control: no-store`
 
-归档为 `.sql.gz` 业务备份，包含账号、Key、设置、插件、已用额度和已发布用量汇总，不包含请求明细与诊断/审计日志。
+归档为 `.sql.gz` 业务备份，包含账号、Key、设置、已用额度和已发布用量汇总，不包含请求明细与诊断/审计日志。
 汇总范围和离线恢复限制见 [备份内容与限制](../deploy/README.md#备份内容与限制)；没有在线恢复端点
+
+Claude 隐私存储（veil 映射卷）已初始化时，同一条记录在数据库导出完成后再生成映射库快照，以同名
+`.veil.tar.gz` 对象一并上传，两个对象都通过远端校验后记录才进入 `completed`。映射卷从未初始化时只上传数据库归档；
+已初始化但无法生成快照时，整条备份以 `backup.privacy_store_failed` 失败，不产出缺少映射的备份。
+快照归档不含 veil 主密钥，恢复步骤见 [Claude 隐私存储恢复](../deploy/README.md#claude-隐私存储恢复)
 
 统计重建或时间桶尚未发布完成时，任务以 `backup.analytics_not_ready` 失败；统计就绪后重新创建备份
 
@@ -2463,7 +2538,7 @@ Desktop 三段 SemVer 门禁，也不会自动回写最低版本设置。门禁�
 | `POST` | `/api/admin/settings/backups/schedule/update` | 调度配置 | 更新 Cron 与保留策略 |
 | `GET` | `/api/admin/settings/backups/records` | 查询参数 | 分页查询备份记录 |
 | `POST` | `/api/admin/settings/backups/create` | `{ expiresInDays? }` | 创建手动备份，返回 `202 Accepted`；`expiresInDays` 为过期天数（0 或缺省表示不过期） |
-| `POST` | `/api/admin/settings/backups/download-url` | `{ backupId }` | 创建 5 分钟有效预签名下载地址（仅 completed） |
+| `POST` | `/api/admin/settings/backups/download-url` | `{ backupId, artifact? }` | 创建 5 分钟有效预签名下载地址（仅 completed）；`artifact` 为 `database`（缺省）或 `privacyStore`，记录不含隐私存储时请求后者返回 `404` |
 | `POST` | `/api/admin/settings/backups/delete` | `{ backupId }` | 请求删除（进入 `deleting`，由 Worker 收敛硬删除） |
 
 读取设置响应（Secret 以明文返回）：
@@ -2503,9 +2578,12 @@ page, pageSize, status, trigger
 `status` 可取 `queued/dumping/uploading/completed/failed/deleting`；`trigger` 可取 `manual/scheduled`。记录响应字段：
 
 ```text
-id, triggerKind, status, scheduledAt, objectKey, sizeBytes, sha256, attemptCount,
+id, triggerKind, status, scheduledAt, objectKey, sizeBytes, sha256, privacyStore, attemptCount,
 errorCode, errorMessage, startedAt, completedAt, expiresAt, createdAt, updatedAt
 ```
+
+`privacyStore` 为 `{ objectKey, sizeBytes, sha256 }` 或 `null`，在进入 `uploading` 时与数据库归档的大小和摘要一起写入。
+删除记录时先删除隐私存储对象，再删除数据库归档，任一对象删除失败都保留记录等待下一轮重试
 
 记录中的时间点同时返回对应的 `*Display` 字段
 
@@ -2539,8 +2617,8 @@ Dashboard 的当前账号摘要包含 `upstream`，结构与账号列表一致�
 
 | 方法 | 路由 | 说明 |
 | --- | --- | --- |
-| `GET` | `/api/admin/dashboard/summary` | Dashboard 汇总；支持 `kind` 与统一时间范围参数 |
-| `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage\|latency\|errors` |
+| `GET` | `/api/admin/dashboard/summary` | Dashboard 汇总；支持 `kind`、`provider` 与统一时间范围参数 |
+| `GET` | `/api/admin/dashboard/trend` | Dashboard 趋势；`kind=usage\|latency\|errors`，可按 `provider` 筛选 |
 | `GET` | `/api/admin/usage/records` | 请求记录分页列表 |
 | `GET` | `/api/admin/usage/records/detail` | 按 `id` 查询请求详情 |
 | `GET` | `/api/admin/usage/records/summary` | 当前筛选条件的请求汇总 |
@@ -2554,6 +2632,10 @@ Dashboard 的当前账号摘要包含 `upstream`，结构与账号列表一致�
 
 用量汇总的 `averageLatencyMsValue` 为可空毫秒数，前端按持续时长格式化；无延迟样本时为 `null`，
 `averageLatencyMs` 保留为兼容展示字段
+
+Dashboard summary / trend 的 `provider` 可取 `openai` 或 `anthropic`，省略时查询全部供应商；筛选贯通对比、趋势、健康、最近请求、账号与配额、容量及客户端身份。
+请求数按根请求统计，不把内部重试另算用户请求；零 attempt 拒绝仅在已有真实候选供应商时记录归属，未知归属不根据模型名猜测。未知费用与无首 Token 样本保持缺失语义，不记成零。
+统计页的时间和供应商作用于整页，Key、账号文本、模型与成功状态只筛选明细，不额外影响上方统计卡片。
 
 ### Dashboard 趋势指标
 
@@ -2605,7 +2687,7 @@ Dashboard 的 `accountUsage[]` 返回稳定指标 `metric=requests|tokens`、可
 Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7d`，范围参数遵循[页面时间合同](#页面时间合同)。
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
-请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountName`、`model` 和 `status`。
+请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountSearch`、`model` 和 `status`。旧参数 `accountName` 返回 `400`。
 汇总和洞察接受时间范围与 `provider`；性能和成本另要求 `metric`，诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
@@ -2661,8 +2743,10 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 管理端请求列表与详情保留 `requestedModel`（客户端请求）与 `upstreamModel`（网关发送）
 
-请求明细的 `clientApiKeyName`、`accountName` 按字面量包含匹配请求保存的历史名称快照，区分大小写，
-不解析为 ID，也不依赖当前配置是否存在。`model` 按字面量包含匹配请求模型或上游模型，`%`、`_` 和 `\` 按普通字符处理
+请求明细的 `clientApiKeyName` 搜索历史 Key 名称，`accountSearch` 搜索请求发生时的账号名称或邮箱快照，同时适用于 Codex 和 Claude。
+输入去除首尾空白后按字面量包含匹配，区分大小写；`%`、`_` 和 `\` 按普通字符处理。缺少邮箱的记录仍可按名称匹配，账号后来改名或删除不改变历史结果。
+明细、分页总数及其内部聚合计数使用相同条件；时间、平台、状态及授权范围仍同时生效。前端修改筛选会清空旧结果并回到第一页，顶部统计卡片仍只按时间和平台查询。
+Key 自助页的 Key 范围由服务端固定，不开放账号文本搜索。`model` 按同样的字面量包含规则匹配请求模型或上游模型
 
 运维错误列表的 `search` 使用字面量包含匹配，`%`、`_` 和 `\` 按普通字符处理，不支持密钥值或可见前缀搜索。
 请求详情通过 `/api/admin/usage/records/detail?id=...` 查询
@@ -2728,7 +2812,7 @@ OpenAI 推理强度优先取 `input` 中最后一条 `type: "configuration_updat
 `firstTokenLatencyMs` 与它使用同一计时起点，首字边界由 Provider 协议定义。
 OpenAI Responses 在 HTTP SSE 收到首个非空且非 `[DONE]` 的 `data` 载荷、
 或 WebSocket 收到首个非空响应消息时记录首字，不要求实际输出内容；
-xAI 采用首个非空文本、推理或工具参数输出。对应事件缺失时保留未知，不用其他事件补齐首字。
+Anthropic 采用首个文本或工具参数输出。对应事件缺失时保留未知，不用其他事件补齐首字。
 请求级首字统一通过 `firstTokenLatencyMs` 返回，由前端格式化。
 `latencyDetails` 的首事件、首推理和首正文时间也使用请求级起点，首推理与首正文仍要求实际内容，
 连接、响应头等传输阶段耗时独立计量，不能直接相加作为总耗时
@@ -2783,7 +2867,7 @@ OpenAI 账号队满或超时后的重选记录为 `account.queue.reselect`；绑
 首次认领、临时分流和失败重选不记录为绑定迁移
 
 `attempt.failed.data.recovery` 保存 Provider 的重放安全性和恢复意图；`retry.decided` 保存当时
-实际参与决策的门槛、剩余预算和发送状态，`retry.policy` 保存宿主及插件策略的停止事实。
+实际参与决策的门槛、剩余预算和发送状态，`retry.policy` 保存宿主策略的停止事实。
 已有的 `provider.precommit.released` 数据保留释放原因、预取字节数与等待时间，不等同于下游已提交
 
 Trace v3 为路由、账号选择、失败、重试、响应边界及终态事实预留独立的 64 KiB 预算，
@@ -2820,13 +2904,9 @@ OAuth 字段依据 CPR 导出结构及官方 Codex `TokenData`，不按 `token /
 
 ### 费用与服务档位
 
-OpenAI 与 xAI 的本地费用估算按实际发送给上游的请求模型（`upstreamModel`）查价，结合响应中的实际
+OpenAI 与 Anthropic 的本地费用估算按实际发送给上游的请求模型（`upstreamModel`）查价，结合响应中的实际
 用量计算；客户端请求 A、路由后发送 B 时按 B 计价，响应返回 C 不改变计价模型。实际发送模型缺少
 定价时不估算，也不借用响应模型的价格。Provider 明确上报的已计费金额仍优先于本地估算
-
-xAI 的 `cost_in_usd_ticks=0` 表示上游没有报告费用，不证明请求免费；正数才作为上游账单。
-未报告时，只有已知价格且能覆盖本次费用的请求才使用本地估算，未知价格或无法覆盖的托管工具费用保持未知。
-动态 latest 与 beta/internal 别名不借用具体型号的内置价格；显式配置的模型价格仍可用于估算
 
 OpenAI Responses 用量记录的 `serviceTier` 与本地费用估算统一采用 Provider 最终发给上游的请求
 `service_tier`，不使用响应档位覆盖或回退。例如发送 `priority`、响应回显 `default` 时，仍显示
@@ -2847,6 +2927,10 @@ Provider metadata 分别保留 `requestedServiceTier` 与 `upstreamServiceTier` 
 `billing.image` 返回 `inputAmountDisplay`、`cacheReadAmountDisplay`、`inputPriceDisplay` 和
 `cacheReadPriceDisplay`；存在该字段时，普通输入与缓存字段仅表示文本输入，输出字段表示图像输出
 
+Anthropic 请求的 `metadata.billingKind` 为 `api_equivalent_estimate`，`rawUsage` 保存原始计数与缓存 TTL 细分，
+`pricing` 保存当次计价依据，`costBreakdown` 保存同精度费用项。输入总量包含普通输入及缓存读写；独立 total_tokens 未报告时保持未知。
+5 分钟／1 小时混合写入不投影为单一官方单价，附加工具费或未知速度价目无法确认时不生成完整总费用；订阅剩余额度另从真实窗口观测
+
 ## 11. 版本、更新与重启
 
 | 方法 | 路由 | 主要 query/body | 说明 |
@@ -2857,8 +2941,7 @@ Provider metadata 分别保留 `requestedServiceTier` 与 `upstreamServiceTier` 
 | `POST` | `/api/admin/system/update` | `{ targetVersion, channel? }` | 受理后台在线更新，返回 `202` |
 | `GET` | `/api/admin/system/update/status` | 无 | 查询当前更新或回滚状态 |
 | `POST` | `/api/admin/system/rollback` | 无 | 回滚到保留的上一版本 |
-| `GET` | `/api/admin/system/restart/check` | 无 | 只读检查重启目标与启用插件 |
-| `POST` | `/api/admin/system/restart` | `{ confirmation? }` | 复核兼容性风险确认并重启，保留插件启用配置 |
+| `POST` | `/api/admin/system/restart` | 无 | 受理重启 |
 
 在线更新遵循[版本命名与升级规则](../deploy/README.md#版本命名与升级规则)。版本接口的
 `updateChannel` 由当前版本推导，取值为 `stable`、`alpha`、`beta`、`rc`、`exp`，无法识别时为 `unknown`。
@@ -2882,14 +2965,7 @@ Provider metadata 分别保留 `requestedServiceTier` 与 `upstreamServiceTier` 
 执行，结果通过 `/update/status` 的 `operation` 查询：`status` 为 `idle`、`running`、`succeeded` 或 `failed`，
 终态包含 `finishedAt`，失败原因在 `error` 中。SSE 的 `operationId` 用于关联进度；终态事件发出前状态已落盘。
 连接中断不取消已受理任务；响应丢失时先查询状态，不自动重复提交。打开更新页面时也会恢复最近一次任务。
-下载并解包后校验发行身份，插件版本不匹配不阻止更新或回滚，兼容性风险在重启前提示。
-两条路径在文件交换前后复核全局配置版本，文件替换失败或取消时成组恢复二进制、Web 资源和官方插件目录
-
-客户端重启前调用 `restart/check`，返回 `targetVersion`、`releaseManifestSha256`、`configRevision` 和 `incompatiblePlugins`，
-每项包含 `instanceId`、`name`、`reason`，检查不修改插件状态。源码运行的目标版本与发行摘要为空，检查当前宿主兼容性。
-存在不兼容插件时，客户端展示列表并取得确认后，将完整检查结果作为 `confirmation` 提交重启请求。
-服务端在重启锁内重新检查，目标或配置变化返回 `40901`，须重新检查并确认。确认后保留启用配置，重启时不兼容实例保持未启动，不挂载能力或故障占位；插件额外认证和拦截停止生效，宿主原生认证继续执行。
-没有兼容性风险时可省略确认，不切换插件版本、接受其他制品或改写配置版本
+下载并解包后校验发行身份；文件替换失败或取消时成组恢复二进制与 Web 资源。
 
 重启受理后，旧服务拒绝更新、回滚和重复重启，返回 `40901`；客户端等待新进程就绪后重新连接
 
@@ -2901,372 +2977,3 @@ Provider metadata 分别保留 `requestedServiceTier` 与 `upstreamServiceTier` 
 Host 关闭或任务取消会记录失败终态；状态查询会收敛无执行锁的遗留 `running`。
 异常退出留下的锁仍遵循 30 分钟过期规则，未过期前不会抢占其他进程的操作。
 实例升级和仓库发版见 [部署文档](../deploy/README.md#镜像升级与源码构建)
-
-## 12. 插件管理
-
-除明确标注的公开入口外，以下接口需要管理身份。图标读取及 12.2 中标注的原始响应接口直接返回资源、插件响应
-或模型响应，其余接口使用统一管理响应信封。制品按摘要记录用户的完整信任决定；首次安装某个插件时会尝试创建默认配置，
-配置完整则启用，缺少必填项则保留为待配置。操作流程见 [插件使用](plugins.md)，开发合同见
-[SDK](../backend/crates/gateway-plugin/sdk/README.md)。不提供官方商店或第三方市场订阅接口
-
-插件通过类型化公开服务维护请求明细、聚合统计并试算费用，接口与数值合同见 [SDK 用量维护与计价](../backend/crates/gateway-plugin/sdk/docs/usage-data.md)。聚合参与原生总量与趋势，不增加请求明细列表条目
-
-### 安装包与来源
-
-| 方法 | 路径 | 行为 |
-| --- | --- | --- |
-| GET | `/api/admin/plugins/artifacts` | 列出制品的 `metadata`、固定 `source`、`installedAt` 与可为 `null` 的 `acceptedAt` |
-| GET | `/api/admin/plugins/artifacts/{sha256}/icon?theme=light\|dark` | 管理身份；按不可变制品摘要读取已校验图标；无图标返回 404 |
-| POST | `/api/admin/plugins/artifacts/upload` | 上传原始 tar.gz 包体，最多 32 MiB；查询参数 `sha256` 必须固定已解析的包；确认信任并完成安装 |
-| POST | `/api/admin/plugins/artifacts/upload/verify` | 同样接收原始包体，只读解析并校验，返回 `metadata` 与 `source`，不安装 |
-| POST | `/api/admin/plugins/artifacts/install` | 从 URL 或固定 GitHub Release 下载、校验，确认信任并完成安装 |
-| POST | `/api/admin/plugins/artifacts/verify` | 按远程来源只读解析并校验完整包，返回 `metadata` 与固定 `source`，不持久化或启动插件 |
-| POST | `/api/admin/plugins/artifacts/accept` | 严格请求 `{ "sha256": "<小写 SHA-256>" }`，确认信任已导入制品并完成安装 |
-| POST | `/api/admin/plugins/artifacts/delete` | 请求 `{ "sha256": "<小写 SHA-256>" }`，删除未被引用的制品 |
-| POST | `/api/admin/plugins/releases/query` | 查询指定 GitHub 仓库的最新稳定版或明确 tag |
-| POST | `/api/admin/plugins/updates/check` | 按插件已保存的来源和策略查询 Release，只读，不下载或切换实例 |
-| GET / POST | `/api/admin/plugins/source-credentials` | 列出公开授权范围，或创建独立下载凭据 |
-| POST | `/api/admin/plugins/source-credentials/delete` | 请求 `{ "id": "<凭据 ID>" }`，删除未被来源引用的下载凭据 |
-| GET / POST | `/api/admin/plugins/update-sources` | 查询或显式改变插件后续安装的允许来源及更新检查策略 |
-
-删除制品时，同一事务会清理该制品使用过且已无任何制品引用的下载凭据；删除插件的最后一个版本时，
-同时清理其来源规则、更新检查策略及出站代理引用。其他版本共享的凭据、代理本身和审计记录保留，
-独立创建但未被该制品使用的下载凭据不会被顺带删除。完整卸载后重新安装不受旧来源规则限制
-
-#### 包信息
-
-安装包使用的版本与字段规则见 [SDK 清单](../backend/crates/gateway-plugin/sdk/docs/manifest.md)。
-插件 ID 由 `publisher + "." + name` 派生；`displayName` 和可选 `author` 仅用于展示
-
-制品 `metadata` 返回 `pluginId`、`name`、`displayName`、`publisher`、可为 `null` 的 `author`、`version`、
-`description`、`license`、`sha256`、`platforms`、可为 `null` 的 `icon`、`contributes`、
-`configurationSchema`、`secretFields` 和 `stateNamespaces`。`contributes` 是以稳定 snake_case capability 为 key 的对象；每个值包含
-`id`、`version`、`stages`、`inputFormats` 和 `outputFormats`。`id` 是实例绑定引用的完整贡献项 ID，客户端必须通过
-当前制品的 `contributes` 映射确定其 capability，不能解析 ID 文本推测能力
-
-#### 图标读取
-
-`metadata.icon` 为清单中的包内路径或 `{ "light": "...", "dark": "..." }` 对象；未声明时为 `null`。
-配置示例、支持格式与文件限制见 [SDK 插件图标](../backend/crates/gateway-plugin/sdk/docs/manifest.md#插件图标)
-
-读取浅色主题图标使用 `GET /api/admin/plugins/artifacts/{sha256}/icon?theme=light`：
-
-- `sha256` 为制品的 64 位小写十六进制摘要；`theme` 必填，值为 `light` 或 `dark`。单路径图标在两种主题下返回相同内容
-- 成功返回图片原始字节，`Content-Type` 为清单声明的 MIME，不使用 JSON 信封、不转换图片格式。制品不存在或未提供图标时返回 `404`
-- 响应包含 `X-Content-Type-Options: nosniff` 和 `Cache-Control: private, max-age=31536000, immutable`；缓存按制品摘要与主题区分
-- SVG 使用 sandbox CSP 隔离，允许内联样式和 data 图片，禁止脚本执行与外部资源请求
-
-客户端应将接口地址用于 `<img src="…">`，不内联 SVG，也不把清单路径拼成文件系统路径或公开 URL。
-没有图标时由客户端显示通用图标
-
-#### 解析与确认安装
-
-本地包先调用 `artifacts/upload/verify`，远程包先调用 `artifacts/verify`。校验只返回包信息与来源，
-不保存、不确认信任、不启动插件，也不代表实例配置或私有状态已经兼容。
-修改文件、地址、Release、摘要、凭据或代理选择后必须重新校验；确认安装时固定校验返回的身份、版本与摘要
-
-远程解析请求包含 `location`、可选 `credentialIds` 和 `outboundProxyId`，不需要预先提供 ID 或版本。
-更新已有插件时可传 `expectedPluginId` 锁定预期身份；首次安装从包内清单读取身份，并按该身份复核已保存的来源绑定。
-URL 与 GitHub 的 `location.sha256` 在解析时均可省略，由服务端计算实际包摘要；提供摘要时必须通过匹配检查
-
-确认安装时，将解析返回的 `metadata.pluginId`、`metadata.version` 和 `metadata.sha256` 分别填入
-`pluginId`、`version`、`location.sha256`，与原来的来源、凭据和代理选择一起提交 `artifacts/install`。
-这三个字段在远程安装时必填，确保实际安装内容与确认的包相同。清单身份、版本、平台、摘要和包结构
-必须通过校验；宿主范围与能力版本的兼容提醒见[创建与更新](#创建与更新)。
-来源类型、地址或代理选择变化返回冲突，需要先显式修改更新来源。相同包及来源重复安装为幂等操作；
-同一插件版本的平台产物不允许替换成不同内容。安装新版本保留已安装旧版本
-
-```json
-{
-  "pluginId": "acme.example",
-  "version": "1.0.0",
-  "credentialIds": [],
-  "outboundProxyId": null,
-  "location": {
-    "kind": "url",
-    "url": "https://downloads.example.org/plugin.tar.gz",
-    "sha256": "<64 位小写十六进制摘要>"
-  }
-}
-```
-
-上传、远程安装和 `artifacts/accept` 成功响应均为平铺对象：
-
-```json
-{
-  "artifact": {
-    "metadata": {},
-    "source": { "kind": "upload" },
-    "installedAt": "2026-09-22T00:00:00Z",
-    "acceptedAt": "2026-09-22T00:00:01Z"
-  },
-  "configRevision": 2,
-  "defaultInstanceId": "<实例 UUID 或 null>",
-  "configurationRequired": false
-}
-```
-
-接受制品时，若该插件没有任何实例，服务端使用稳定的 creation ID 创建一份默认实例：普通配置取 schema 默认值，
-敏感字段不复制默认值；按下文[能力绑定规则](#能力绑定与范围)为适用贡献项及阶段建立空范围默认 binding。
-缺少必填项时 `configurationRequired=true` 且实例保持停用；配置完整且版本兼容时直接启用，宿主范围或能力版本不匹配时保留停用，等待手动确认。
-非法 schema、类型错误或把敏感字段放入普通配置会拒绝安装。已有该插件实例时不额外创建或切换实例，
-`defaultInstanceId=null`。相同摘要的接受和默认实例创建可重试，不产生副本
-
-宿主发行目录导入的制品只写入不可变包和来源，`acceptedAt=null`；确认来源与版本后调用 `artifacts/accept`。未接受制品不能用于创建、更新或启用实例
-
-GitHub 的 `location` 使用 `kind: "github"`、`repository: "owner/repo"`、`tag`、`asset`、
-`allow_prerelease` 和 `sha256`。解析时优先使用显式摘要或 GitHub 的 SHA-256，缺失时读取同一 Release 的
-`checksums.txt`；都未提供时计算下载内容的摘要供确认安装使用。显式摘要与 GitHub 摘要冲突时拒绝下载。
-摘要用于内容一致性检查，不证明发布者身份，只应安装可信来源的插件
-
-#### GitHub Release 查询
-
-查询请求为 `{ "query": { "repository": "owner/repo", "tag": null, "allowPrerelease": false }, "credentialIds": [], "outboundProxyId": null }`。
-`tag: null` 查询最新稳定版；预发行版须指定 tag 并允许预发行。响应包含固定 tag、产物列表、`queriedAt`
-和 `expiresAt`。显式查询刷新成功结果，同一批并发查询共享结果；下载固定 tag 的产物可复用 1 小时内的元数据，失败缓存 30 秒；限流返回错误，不转换成空列表
-
-#### 下载认证与代理
-
-下载凭据创建字段为 `name`、`origin`、`pathPrefix`、`purposes`、`authentication`。
-`purposes` 可选 `metadata`、`artifact`；`authentication.kind` 可选 `github`、`bearer`、`basic`、`header`，
-分别携带 `token`、`token`、`username/password`、`name/value`。列表与创建响应只返回 ID 和授权范围。
-每次重定向都按 origin、路径段边界和用途重新匹配凭据，重叠授权拒绝执行。
-来源 URL 使用 HTTPS，不包含用户信息、查询参数或片段；回环地址允许 HTTP，供本机来源使用
-
-查询、校验和远程安装的 `outboundProxyId` 指向已保存的出站代理，与下载凭据独立，公开来源也可选择代理。
-省略或 `null` 表示直连，不继承进程环境代理；代理失败不会回退直连。查询与下载期间代理配置变化时返回 `409`，需重新操作。
-查询缓存与限流按凭据及代理身份隔离。制品历史 `source.outbound_proxy` 只保存下载时的 `{ id, revision }`，不返回代理地址或认证信息。
-仍被更新来源或制品引用的代理不能删除；修改后续来源不会清除已安装制品的历史引用
-
-#### 更新来源与检查
-
-修改更新来源请求为 `{ "pluginId": "acme.example", "source": { "kind": "github", "repository": "owner/repo" }, "policy": { "kind": "stable" }, "outboundProxyId": null }`；
-其他可选来源为 `upload` 或带 `url` 的 `url`。`policy` 省略时为 `manual`；GitHub 还支持 `stable`（最新稳定版）和
-`{ "kind": "pinned", "tag": "v2.0.0-rc.1", "allow_prerelease": true }`。其他来源只支持 `manual`。
-来源、策略和代理选择一同持久化与审计；代理字段省略或 `null` 明确保存为直连。`upload` 和 `builtin` 不接受代理。
-变更不改变已安装包的历史来源，不自动下载、接受制品或切换实例版本
-
-检查更新请求为 `{ "pluginId": "acme.example", "credentialIds": [] }`，返回 `binding` 和 `release`。
-服务端使用已保存的来源、策略和代理，不接受临时替换仓库或代理；查询期间来源变更返回 `409`，不可访问或限流仍返回错误。
-`release` 仅是来源元数据，不表示插件包已完成身份、版本、平台和摘要校验或兼容风险检查；选择产物后仍须显式调用安装接口，
-安装成功也不会自动修改现有实例的固定制品。手动策略和不支持 Release 查询的来源返回明确错误，不伪装为没有更新
-
-### 12.1 运行实例
-
-| 方法 | 路径 | 行为 |
-| --- | --- | --- |
-| GET | `/api/admin/plugins/instances` | 列出实例配置、功能绑定、配置完整性及发布状态，不返回 secret 值 |
-| POST | `/api/admin/plugins/instances` | 创建实例，返回 `id` 和 `configRevision` |
-| POST | `/api/admin/plugins/instances/update` | 请求 `{ "id": "<实例 ID>", "instance": { ...配置字段 } }`，整体更新实例 |
-| GET | `/api/admin/plugins/instances/version-plan?id=<实例 ID>&artifactSha256=<目标摘要>` | 只读生成版本设置草稿，不启动插件、不返回密钥值 |
-| POST | `/api/admin/plugins/instances/switch-version` | 请求 `{ "id": "<实例 ID>", "target": { "artifactSha256": "<已安装目标摘要>", "expectedRevision": 1 } }`，准备后切换版本 |
-| GET | `/api/admin/plugins/instances/rollback-plan?id=<实例 ID>` | 只读列出当前版本、实例 revision 与按语义版本降序排列的已安装、已接受且有配置快照的旧版候选，不启动插件 |
-| POST | `/api/admin/plugins/instances/rollback` | 请求 `{ "id": "<实例 ID>", "target": { "artifactSha256": "<已安装且已接受旧版摘要>", "expectedRevision": 1 } }`，校验后回滚 |
-| POST | `/api/admin/plugins/instances/disable` | 请求 `{ "id": "<实例 ID>" }`，停用实例并发布新集合 |
-| POST | `/api/admin/plugins/instances/delete` | 请求 `{ "id": "<实例 ID>" }`，删除已停用实例 |
-
-#### 创建与更新
-
-创建与更新的配置字段为 `name`、`artifactSha256`、`enabled`、`configuration` 和必填的 `bindings`，
-`secrets` 可选。输入严格拒绝未知字段。`artifactSha256` 必须指向
-已接受的制品。`configuration` 是匹配插件 schema 的 JSON 对象；敏感字段必须
-放入 `secrets`，按字段更新：字符串设置对应值，`null` 清除对应字段，未出现的字段保留。省略 `secrets` 或传空对象均不修改密钥
-同版本编辑以当前值为基础；跨版本编辑优先以目标版本快照的密钥为基础，没有快照则使用当前值。创建以空集合为基础，密钥值不会返回给管理端
-
-创建可传 `creationId`（标准小写 UUID），同一草稿重试复用该 ID，已保存且内容不同则返回 409，不创建副本或覆盖旧配置。
-相同内容的重试仍会重新准备并发布，不保证配置 revision 不变。更新可传 `expectedRevision`，与实例列表的 `revision`
-不一致时返回 409，管理员应重新加载后确认。创建不能传 `expectedRevision`，更新不能传 `creationId`。
-删除实例会一并删除其 secret、私有状态与版本配置快照，停用则保留这些数据
-
-保存启用配置时，可传 `replaceInstances: [{ "id": "<旧配置 ID>", "expectedRevision": 1 }]`，
-明确确认同时停用的同插件配置（最多 256 项，不得包含当前配置或重复 ID）。同一插件最多启用一个实例，省略且已有其他启用配置时返回 409。
-不能将已有实例切换成另一个插件。
-目标配置准备通过后，停用旧配置与保存目标在同一事务提交，旧配置及其密钥、私有状态保留。
-待停用配置必须仍启用且 revision 与确认时一致，否则返回 409，重新读取并确认后再提交
-
-列表项包含 `id`、`name`、`artifactSha256`、`enabled`、`configurationRequired`、`configuration`、
-`secretFields`、`bindings`、`revision`、`running`、`publishedRevision`、`runtime`、`compatibilityWarning`、`loadError` 和 `apiDeprecations`。
-`compatibilityWarning` 表示宿主范围或已声明能力版本不匹配，不自动启动；手动确认后可尝试本次启动，成功运行后仍保留提醒。
-`loadError` 表示包结构、清单、RPC 或平台等加载检查失败，非空时拒绝启用且不能通过确认覆盖；两项无对应问题时为 `null`，停用实例也返回检查结果。运行故障通过 `runtime.failure` 返回，不改写 `enabled`。
-未通过启动准入的实例没有执行贡献或故障占位。恢复诊断使用 `runtime.failure.code=version_incompatible`（可确认尝试）或 `package_unloadable`（不能加载），`running=false`，不改写 `enabled`
-
-手动启动软不兼容实例时，先读取该实例及目标包的 `version-plan`，向管理员展示 `compatibilityWarning`。
-确认后通过 `instances/update` 提交 `enabled=true` 和原样返回的 `compatibilityConfirmation`，其中包含 `hostFingerprint`、`instanceId`、`instanceRevision` 和 `artifactSha256`。
-服务端复核宿主、实例配置版本和目标包，缺少确认或确认过期返回 409；包无法加载返回 400。确认仅放行本次目标实例，不持久化，不放行其他实例，下次宿主启动重新检查。
-创建软不兼容实例时先保存为停用，再读取计划确认启动；停用请求不接受确认信息
-
-`configurationRequired` 由当前制品 schema 与已保存的普通/敏感配置实时派生，不写入数据库；它只表示仍缺少必填值。停用实例也不能保存
-类型错误、非法 schema 或把敏感字段混入普通配置
-
-`apiDeprecations` 为仍受支持的旧接口提示数组，包含 `capability`、`version`、`replacementVersion`、`introducedIn`、`remainingReleases` 和 `migration`。
-`introducedIn` 在首次正式发布前为 `null`；`remainingReleases` 表示还会支持的后续正式版本数，不计预发行。提示不改变启停状态或阻止安装，无弃用提示时为空数组
-
-#### 版本切换与私有状态
-
-私有状态通过 [SDK 回调](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#状态日志与迁移)访问，不提供任意读写的管理 HTTP 接口。
-升级若需要迁移，实例可能暂时停用；迁移失败且发生并发配置变更时保持停用，不覆盖管理员的新配置。
-版本切换只接受同一插件已安装且已接受的制品，`expectedRevision` 必须等于实例列表中的 `revision`，过期请求返回 409。
-`version-plan` 返回 `instanceRevision`、`artifactSha256`、`configuration`、`secretFields`、`bindings`、`restored`、`compatibilityWarning`、`compatibilityConfirmation` 和 `loadError`。
-`restored` 表示使用了目标版本的配置快照，兼容字段适用于当前包和版本切换目标；无软不兼容时确认信息为 `null`。没有快照时只补充缺失的 schema 默认值，保留当前显式值；功能范围按能力与阶段映射到目标声明，
-新能力使用默认绑定，已关闭的既有能力继续关闭，客户端认证仍须显式身份映射。草稿不代表已通过校验
-
-`switch-version` 重新生成草稿并执行准备与提交，名称和启停状态保持不变。不兼容设置返回 400，启用软不兼容目标但缺少风险确认返回 409，当前设置不变；
-可读取草稿并通过 `instances/update` 携带原 `expectedRevision` 提交修正。不会推断字段改名或丢弃未知参数与密钥
-
-每个实例、制品摘要保存一份最近启用时提交的配置快照，包含普通配置、secret 与 binding，停用草稿不覆盖快照。
-`rollback` 只接受有快照的较早语义版本，恢复该版本设置并重新检查平台、配置与私有状态，保留当前名称与启停状态。
-快照与实例修改共享事务，不从审计日志重建，也不恢复私有业务数据；删除实例或制品时删除对应快照
-
-#### 完整信任与受管资源
-
-安装并启用插件意味着完整信任其代码与行为，安全由安装者承担。清单与握手不包含权限声明，宿主回调不按访问域或阶段授权，参见[插件信任说明](plugins.md#完整信任)
-
-回调保持类型、期限、取消、实例 revision、资源归属和事务一致性检查。模型调用可显式选择 Key，按所选 Key 的准入、预算、用量与计费合同执行；省略 Key 时继承现有模型父请求身份
-
-受管 HTTP 不限制插件目标地址段。宿主解析 DNS，连接保留原始 Host 与 TLS 域名校验；出口可继承调用范围、指定账号或按代理 ID 选择，连接失败不自动回退直连，重定向不自动跟随。
-显式代理选择与目录查询见 [SDK 网络回调](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#网络)
-
-#### 能力绑定与范围
-
-`bindings` 通过 `contribution` 指定清单已声明的贡献项，并包含该贡献项声明支持的 `stage`、顺序和失败策略；
-尚未声明、尚未注册或阶段不匹配的贡献项不能启用。
-首次安装生成的默认实例会为适用贡献项的每个声明阶段创建 binding；`observer` 分别创建完成与 WebSocket 两类事件绑定。
-默认 `order=0`、所有范围数组为空；观察阶段使用 `observe`，重试阶段使用 `delegate`，其他阶段使用 `reject`。
-`model_catalog`、`management`、`command_line` 和 `maintenance` 按清单声明注册，不接受 binding；
-`frontend_authentication` 必须由管理员显式配置身份映射，也不自动创建
-
-`middleware` v6 可绑定 `http`、`websocket`、`service`、`request`、`attempt` 和 `outbound`，按声明的挂载阶段分别配置。
-`http`、`websocket` 和 `service` 不使用 Key、分组、Provider 或模型范围，这些数组必须为空；插件在处理器内匹配路径、消息或服务操作。
-`request` 与 `routing` 支持 Key、分组和公开模型范围，Provider 范围必须为空；`attempt`、`outbound`、`upstream`、`scheduling`、`retry` 与 `observation` 可使用 Provider 范围
-
-`outbound` 准备原生 Provider 交给 transport 的请求，覆盖 OpenAI Responses HTTP / WS、Images、Search、Live 创建及 xAI 生成与压缩。
-它使用最终上游模型匹配范围，下一层返回准备后的请求，不执行发送；字节、headers、HTTP 方法和目标的合同见 [SDK 出站请求准备](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#上游出站准备)。
-该阶段不包括 OAuth、额度刷新等后台请求，也不包括由 `upstream_adapter` 自行执行的发送
-
-`observer` 固定使用 `observation/observe`，必填 `event` 为 `request_completed` 或 `websocket_response`。
-每种事件最多一条绑定，可分别设置请求范围；同一实例两类事件的 `order` 必须相同。其他能力不接受非空 `event`。
-完成事件完整提供终态、用量、费用与耗时，订阅不裁剪字段
-
-```json
-{
-  "contribution": "acme.request-observer.observer",
-  "stage": "observation",
-  "event": "request_completed",
-  "order": 10,
-  "failurePolicy": "observe",
-  "clientKeyIds": [],
-  "accountGroupIds": [],
-  "providerIds": [],
-  "models": []
-}
-```
-
-范围数组缺省或为空表示不限制该维度；同一数组中的条件取并集，不同维度取交集，全部为空表示全局。
-`clientKeyIds` 和 `accountGroupIds` 引用已有资源 ID，保存启用实例时校验存在性；引用被删除后仍可停用实例，
-保留原绑定供管理员修订，重新启用前必须修正引用。账号组范围使用请求开始时
-Client Key 已冻结的绑定组（含绑定但禁用的组），不按最终选中账号重新解释；全账号 Key 没有绑定组。
-Provider 范围匹配最终实际尝试的 Provider；未进入 Provider 的拒绝不会命中有限 Provider 范围。
-模型范围匹配客户端请求的公开模型 ID。配置发布不改变在途请求的匹配范围，同一实例不会因命中多个组而重复调用
-
-`frontend_authentication` binding 只能使用 `authentication` 阶段、`reject` 或 `delegate` 失败策略，并通过
-`identityBindings: [{ "principal": "...", "clientKeyId": "..." }]` 明确映射外部身份；其他范围数组必须为空。
-普通 binding 不能携带 `identityBindings`。已停用、删除或不再授权的 Key 不会因映射恢复访问
-
-实例不为管理页面或命令行预绑定模型执行 Key。管理页面经 12.2 的模型桥在每次调用时显式提交 `clientKeyId`；
-CLI 插件也须在具体调用中选择当前 Key。管理员身份本身不提升为推理身份；模型桥用 Key ID 选择身份，不在桥参数中传递 Key 明文
-
-观察失败只记录诊断，不改变响应、路由、标准 Usage 或账单。完成事件最多派发一次；上游 WebSocket 事件按请求保序，
-原始帧通过独立载荷传递，完成通知不等待消息队列排空。过载可能丢弃事件，不承诺进程崩溃后的持久投递。
-尚未通过重新鉴权、未建立冻结请求上下文的失败不触发完成观察；下游消息改写使用 `websocket` 中间件，普通响应流改写使用请求中间件
-
-#### 发布状态
-
-启用或修改时先准备候选进程及目录，再提交和发布；失败不替换正在运行的集合。
-切换后在途请求保留原版本，其引用排空后回收旧进程
-
-| 字段 | 含义 |
-| --- | --- |
-| `enabled` | 期望启用状态 |
-| `publishedRevision` | 当前已发布的全局配置版本 |
-| `running` | `runtime.status == "running"` 的派生值；不代表插件业务或外部服务健康 |
-| `runtime.status` | 当前进程观察到的运行状态，独立于期望启用和发布版本 |
-| `runtime.actualRevision` / `actualArtifactSha256` | 当前发布集合持有的实例版本与制品摘要，无对应会话时为 `null` |
-| `runtime.failure` | 脱敏后的 `{ code, message }`；没有已知失败时为 `null` |
-| `runtime.drainingRevisions` | 仍被在途工作持有的旧实例版本 |
-| `runtime.load` | 当前发布会话的资源采样；无对应会话或诊断不可用时为 `null` |
-
-`runtime.status` 包括 `disabled`、`awaiting_publication`、`preparing`、`running`、`blocked`、
-`preparation_failed`、`faulted`、`draining` 和 `unknown`。`running` 要求配置匹配、当前会话就绪且发布集合可服务。
-已启用实例缺少运行诊断时返回 `unknown`，不根据发布版本推断运行正常，也不制造失败原因；已停用配置仍可确定为 `disabled`
-
-`runtime.load` 与 `actualRevision`、`actualArtifactSha256` 指向同一会话，不汇总其他排空版本。
-以下计数来自现有调用表和容量资源，采样不是原子快照，各项可能重叠，不能相加作为调用总数：
-
-| 字段 | 含义 |
-| --- | --- |
-| `activeCalls` | 总在途名额，包含排队、等待取消确认及仍由响应流持有的调用 |
-| `executingCalls` | 首结果前占用的执行名额 |
-| `queuedCalls` | 等待首次执行的名额 |
-| `resumingCalls` | 已挂起、正在等待恢复授权的调用 |
-| `pendingCallbacks` | 驻留回调，包含已返回但插件尚未消费的结果 |
-| `activeStreams` | 已交付首结果、尚未收到 End 的流；End 后仍待消费的缓冲继续计入 `activeCalls` |
-
-### 12.2 管理扩展页面与原始 API
-
-`GET /api/admin/plugins/extensions` 需要管理身份，返回统一信封，`data` 为当前已发布的扩展数组。
-每项包含 `target: { instanceId, artifactSha256, revision }`、`name`、`configurationSchema`、
-`pages`、`routes`、`resources` 和 `callbacks`。schema 不是实例配置，不包含 secret 值。
-页面目录的 `pages[].title` 与 `pages[].description` 分别用于宿主页面标题、副标题；未声明副标题时为 `null`。
-目录来自冻结的插件注册结果，并与当前持久化实例复验；停用、换包或修改实例后旧目录项立即不再可用
-
-以下用 `{target}` 表示 `{instanceId}/{artifactSha256}/{revision}`，`{path}` 表示包内已声明的相对路径：
-
-| 方法 | 路径 | 身份与响应 |
-| --- | --- | --- |
-| 已注册方法 | `/api/admin/plugins/extensions/{target}/api/{path}` | 管理身份；插件原始响应，不套管理信封 |
-| GET | `/api/admin/plugins/extensions/{target}/resources/{path}` | 管理身份；已校验的静态字节 |
-| POST | `/api/admin/plugins/extensions/{target}/models/responses?clientKeyId=<ID>` | 管理身份；原生 Responses JSON 或 SSE，不套管理信封 |
-| POST | `/api/admin/plugins/extensions/{target}/callback-tickets` | 管理身份；统一信封中的一次性回调票据 |
-| GET | `/plugins/resources/{target}/{path}` | 无须登录，但资源须声明公开且制品已被接受 |
-| GET | `/plugins/callbacks/{target}/{path}` | 无须登录，但必须携带有效且未消费的 `state` 票据 |
-
-实例目标失效返回 409，调用方应刷新扩展目录，不重放原操作。尚无可用发布视图时返回 503。
-所有入口都要求当前实例仍启用、制品已接受且版本匹配；公开资源与回调按插件注册内容开放。
-公开入口不是读取任意包文件的路径。
-单项静态资源最多 1 MiB，总量最多 8 MiB；资源必须同时出现在制品清单和注册结果中
-
-管理 API 转交方法、相对路径、查询字符串、完整请求头、宿主请求关联与原始正文，保留 Cookie、认证头、
-重复头与非 UTF-8 值。仅接受注册的方法、路径和内容类型；查询最多 8 KiB，正文最多 1 MiB 且受运行帧预算约束，
-GET/HEAD 不接受正文。响应状态码为 200–599，内容类型元数据须在注册列表内，204/304 不允许正文；
-插件返回的完整响应头在 HTTP 语法校验后覆盖默认值。插件操作失败可能发生在副作用之后，不自动重试
-
-插件原始响应与模型协议响应带宿主保留的 `X-CPR-Plugin-Response: 1`，插件不能覆盖此字段。
-宿主管理错误不带此标记；页面桥据此区分管理信封与插件正文，仅宿主 `40101` 触发[统一会话恢复](#统一登录与会话)
-
-动态 API 与登录回调设置 `Cache-Control: no-store`。静态资源成功响应设置 `private, no-cache` 与内容 ETag，
-浏览器可保存正文，但每次复用前必须重新校验管理员身份（公开资源除外）、实例版本和资源授权；
-`If-None-Match` 匹配时返回无正文的 `304`。停用、版本或授权变更后，旧目标仍被拒绝，不返回缓存命中。
-两类响应默认设置 nosniff、no-referrer 与限制性 CSP，动态处理器可显式覆盖默认响应头。管理端页面使用隔离 iframe，
-仅允许脚本，不具有父页面同源权限；联网、弹窗、表单、嵌套页面和顶层导航均不开放。
-插件页面可通过宿主桥请求打开 HTTPS 外链，管理员在宿主确认后才打开新标签页。
-页面访问已声明管理路由须经过固定目标的宿主桥，不能指定其他实例或版本。插件页面作者合同见
-[SDK 管理 API 与页面](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#管理页面公开入口与-cli)
-
-模型桥只接受严格的 `clientKeyId` 查询参数和 Responses JSON 正文；传输正文与解压后的正文均最多 8 MiB。
-服务端先复核固定目标与实例 revision，再按 ID 查询当前 Client Key，并使用普通 Responses HTTP/SSE 执行链；
-因此仍执行当前 Key 的准入、账号范围、预算、用量、计费与请求插件链，包括发起页面所属插件自己的适用 hook。
-这不是嵌套的宿主模型回调，管理身份本身也不提供推理身份，Key 明文不会离开宿主
-
-等待首帧、非流式生成和流式正文交付期间约每秒复核一次固定目标与实例 revision。实例停用、制品或 revision
-变化以及访问资格失效会取消底层执行并停止响应。成功或协议错误沿用 Responses 内容类型，并返回可检索的
-`x-request-id` 与 `x-gateway-request-id`。模型插件读取完整请求头，响应头不按插件身份裁剪；
-页面桥传递浏览器 `Headers` 可读取的全部字段，浏览器自身对 Cookie 等字段的规则仍适用。
-内置页面桥最多并发 4 个模型请求，每次拉取最多 64 KiB，总期限 10 分钟；页面在已收到响应后 30 秒不继续拉取会取消，
-等待首个响应本身不受该空闲计时误杀
-
-票据请求为 `{ "path": "oauth", "ttlSeconds": 60 }`，有效期只允许 1–600 秒；响应数据为
-`{ "state": "<一次性不透明票据>", "expiresAtMs": 0 }`。state 绑定签发管理身份、实例、制品、版本与路径，
-不得记录或截图。公开回调只接受无正文的 GET，查询参数必须恰好包含一个 `state`；过期、错路径、跨实例、
-并发重复或已消费票据均拒绝。宿主在执行前原子消费票据，因此超时或插件失败后不能重放。
-公开调用使用 `public_management` 阶段，插件可以使用宿主回调；票据仍用于关联和消费一次登录流程。
-票据用于受控接收第三方返回结果，不代替敏感管理操作的身份校验

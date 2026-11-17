@@ -24,7 +24,6 @@ pub struct RuntimeSettings {
     pub request_profiles:
         BTreeMap<gateway_core::routing::ProviderKind, gateway_core::account::OpaqueProviderData>,
     pub config_revision: Revision,
-    pub account_error_protection_revision: Revision,
     pub admin_api_key: Option<String>,
     pub rotation_strategy: String,
     pub model_mappings: BTreeMap<String, String>,
@@ -151,13 +150,12 @@ impl RuntimeSettingsRepository for PgRuntimeSettingsRepository {
 
 pub(crate) async fn load_runtime_settings_from_pool(pool: &PgPool) -> StoreResult<RuntimeSettings> {
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
-            "select provider_request_profiles_json, config_revision, admin_api_key, refresh_margin_seconds, request_location_json, request_location_enabled, codex_privacy_policy_json,
+            "select prompt_guard_json, claude_public_url, provider_request_profiles_json, config_revision, admin_api_key, refresh_margin_seconds, anthropic_model_mappings_json, request_location_json, request_location_enabled, codex_privacy_policy_json,
                     refresh_concurrency, max_concurrent_per_account,
-                    rotation_strategy, smart_scheduling_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
+                    rotation_strategy, smart_scheduling_json, quota_reset_window_weights_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
                     audit_retention_days, min_codex_desktop_version,
-                    min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
-                    account_error_protection_json, account_error_protection_revision,
-                    account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent
+                    min_codex_cli_version, min_claude_code_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, anthropic_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours, anthropic_session_affinity_ttl_hours,
+                    account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota
              from runtime_settings where id = 1",
         )
     .fetch_optional(pool)
@@ -195,6 +193,30 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
             Ok(claimed)
         })
     }
+    fn load_request_profile<'a>(
+        &'a self,
+        provider: &'a gateway_core::routing::ProviderKind,
+    ) -> futures::future::BoxFuture<
+        'a,
+        Result<Option<gateway_core::account::OpaqueProviderData>, ProviderStoreError>,
+    > {
+        Box::pin(async move {
+            let document = sqlx::query_scalar::<
+                _,
+                Option<sqlx::types::Json<serde_json::Map<String, serde_json::Value>>>,
+            >(
+                "select provider_request_profiles_json -> $1 from runtime_settings where id = 1",
+            )
+            .bind(provider.as_str())
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| {
+                crate::provider_unavailable("load Provider request profile", source)
+            })?;
+            Ok(document.map(|document| gateway_core::account::OpaqueProviderData::new(document.0)))
+        })
+    }
+
     fn initialize_request_profile<'a>(
         &'a self,
         provider: &'a gateway_core::routing::ProviderKind,
@@ -229,7 +251,7 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
     > {
         Box::pin(async move {
             // 单条语句共享一个 MVCC 快照：先核对候选 revision，再只投影配置对象；
-            // Client Key 明文与其它策略字段不会进入插件准备边界
+            // 运行时凭据仅进入对应的原生能力边界
             let rows = sqlx::query_as::<_, (i64, Option<sqlx::types::Json<serde_json::Value>>)>(
                 "select settings.config_revision, profiles.profile
                  from runtime_settings settings
@@ -296,7 +318,7 @@ impl ProviderRuntimePolicyPort for PgRuntimeSettingsRepository {
                 .map_err(|source| crate::provider_unavailable("load warmup policy", source))?;
             ProviderWarmupPolicy::try_new(
                 settings.values.account_warmup_enabled,
-                settings.values.account_warmup_cron,
+                &settings.values.account_warmup_cron,
                 settings.values.account_warmup_model,
             )
         })
@@ -307,13 +329,12 @@ pub(crate) async fn load_runtime_settings_in_transaction(
     transaction: &mut Transaction<'_, Postgres>,
 ) -> StoreResult<RuntimeSettings> {
     let row = sqlx::query_as::<_, RuntimeSettingsRow>(
-        "select provider_request_profiles_json, config_revision, admin_api_key, refresh_margin_seconds, request_location_json, request_location_enabled, codex_privacy_policy_json,
+        "select prompt_guard_json, claude_public_url, provider_request_profiles_json, config_revision, admin_api_key, refresh_margin_seconds, anthropic_model_mappings_json, request_location_json, request_location_enabled, codex_privacy_policy_json,
                 refresh_concurrency, max_concurrent_per_account,
-                rotation_strategy, smart_scheduling_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
+                rotation_strategy, smart_scheduling_json, quota_reset_window_weights_json, model_mappings_json, usage_retention_days, ops_event_retention_days,
                 audit_retention_days, min_codex_desktop_version,
-                min_codex_cli_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours,
-                account_error_protection_json, account_error_protection_revision,
-                account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent
+                min_codex_cli_version, min_claude_code_version, updated_at, responses_max_decompressed_body_bytes, max_waiting_per_key, max_waiting_per_account, key_queue_timeout_seconds, account_queue_timeout_seconds, switch_account_on_queue_failure, max_retry_after_seconds, openai_guardian_reserved_concurrency, openai_account_affinity, anthropic_account_affinity, max_account_rotations, openai_session_affinity_ttl_hours, anthropic_session_affinity_ttl_hours,
+                account_warmup_enabled, account_warmup_cron, account_warmup_model, reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota
          from runtime_settings where id = 1",
     )
     .fetch_optional(&mut **transaction)
@@ -332,8 +353,8 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     update: &RuntimeSettingsUpdate,
 ) -> StoreResult<Revision> {
     update.validate()?;
-    let previous_reset_settings: (i32, Option<i32>) = sqlx::query_as(
-        "select reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent from runtime_settings where id = 1 for update",
+    let previous_reset_settings: (i32, Option<i32>, bool) = sqlx::query_as(
+        "select reset_credit_lead_minutes, reset_credit_max_weekly_remaining_percent, reset_credit_on_low_weekly_quota from runtime_settings where id = 1 for update",
     )
     .fetch_one(&mut **transaction)
     .await
@@ -374,26 +395,32 @@ pub(crate) async fn update_runtime_settings_in_transaction(
                      max_waiting_per_key = $11,
                      max_waiting_per_account = $12,
                      key_queue_timeout_seconds = $13,
-                     account_error_protection_revision = case when account_error_protection_json is distinct from $14::jsonb then config_revision + 1 else account_error_protection_revision end,
-                     account_error_protection_json = $14,
-                     request_location_json = $15,
-                     request_location_enabled = $16,
-                     responses_max_decompressed_body_bytes = $17,
-	                 provider_request_profiles_json = (provider_request_profiles_json - $18::text[]) || $19::jsonb,
-                     account_warmup_enabled = $20,
-                     account_warmup_cron = $21,
-                     account_warmup_model = $22,
-                     smart_scheduling_json = $23,
-                     openai_guardian_reserved_concurrency = $24,
-                     openai_account_affinity = $25,
-                     max_account_rotations = $26,
-                     openai_session_affinity_ttl_hours = $27,
-                     codex_privacy_policy_json = $28,
-                     reset_credit_lead_minutes = $29,
-                     reset_credit_max_weekly_remaining_percent = $30,
-                     max_retry_after_seconds = $31,
-                     account_queue_timeout_seconds = $32,
-                     switch_account_on_queue_failure = $33,
+                     request_location_json = $14,
+                     request_location_enabled = $15,
+                     responses_max_decompressed_body_bytes = $16,
+	                 provider_request_profiles_json = (provider_request_profiles_json - $17::text[]) || $18::jsonb,
+                     account_warmup_enabled = $19,
+                     account_warmup_cron = $20,
+                     account_warmup_model = $21,
+                     smart_scheduling_json = $22,
+                     openai_guardian_reserved_concurrency = $23,
+                     openai_account_affinity = $24,
+                     max_account_rotations = $25,
+                     openai_session_affinity_ttl_hours = $26,
+                     codex_privacy_policy_json = $27,
+                     reset_credit_lead_minutes = $28,
+                     reset_credit_max_weekly_remaining_percent = $29,
+                     max_retry_after_seconds = $30,
+                     account_queue_timeout_seconds = $31,
+                     switch_account_on_queue_failure = $32,
+                     prompt_guard_json = $33,
+                     claude_public_url = $34,
+                     anthropic_account_affinity = $35,
+                     anthropic_session_affinity_ttl_hours = $36,
+                     anthropic_model_mappings_json = $37,
+                     reset_credit_on_low_weekly_quota = $38,
+                     quota_reset_window_weights_json = $39,
+                     min_claude_code_version = $40,
 	                 updated_at = now()
 	             where id = 1
 	             returning config_revision",
@@ -411,7 +438,6 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(i64::from(update.values.max_waiting_per_key))
     .bind(i64::from(update.values.max_waiting_per_account))
     .bind(i64::from(update.values.key_queue_timeout_seconds))
-    .bind(sqlx::types::Json(&update.values.account_error_protection))
     .bind(sqlx::types::Json(
         update.values.request_location
             .clone()
@@ -439,6 +465,14 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     .bind(i64::from(update.values.max_retry_after_seconds))
     .bind(i64::from(update.values.account_queue_timeout_seconds))
     .bind(update.values.switch_account_on_queue_failure)
+    .bind(sqlx::types::Json(update.values.prompt_guard.to_storage()))
+    .bind(&update.values.claude_public_url)
+    .bind(update.values.anthropic_account_affinity.as_str())
+    .bind(i64::from(update.values.anthropic_session_affinity_ttl_hours))
+    .bind(sqlx::types::Json(&update.values.anthropic_model_mappings))
+    .bind(update.values.reset_credit_on_low_weekly_quota)
+    .bind(sqlx::types::Json(update.values.quota_reset_window_weights))
+    .bind(update.values.min_claude_code_version.as_deref())
     .fetch_optional(&mut **transaction)
     .await
     .map_err(|source| postgres_unavailable("update runtime settings in transaction", source))?
@@ -449,6 +483,7 @@ pub(crate) async fn update_runtime_settings_in_transaction(
     })?;
     // 自动使用配置变化只唤醒本地计划重算，不触发账号全量上游查询
     if i64::from(previous_reset_settings.0) != i64::from(update.values.reset_credit_lead_minutes)
+        || previous_reset_settings.2 != update.values.reset_credit_on_low_weekly_quota
         || previous_reset_settings.1.map(i64::from)
             != update
                 .values
@@ -502,6 +537,9 @@ pub(crate) async fn update_admin_api_key_in_transaction(
 
 #[derive(sqlx::FromRow)]
 struct RuntimeSettingsRow {
+    anthropic_model_mappings_json: sqlx::types::Json<BTreeMap<String, String>>,
+    prompt_guard_json: sqlx::types::Json<gateway_admin::model::prompt_guard::PromptGuardConfig>,
+    claude_public_url: String,
     provider_request_profiles_json: sqlx::types::Json<
         std::collections::BTreeMap<String, serde_json::Map<String, serde_json::Value>>,
     >,
@@ -511,6 +549,7 @@ struct RuntimeSettingsRow {
     refresh_concurrency: i64,
     max_concurrent_per_account: i64,
     smart_scheduling_json: sqlx::types::Json<gateway_core::account::SmartSchedulingConfig>,
+    quota_reset_window_weights_json: sqlx::types::Json<gateway_core::account::ResetWindowWeights>,
     rotation_strategy: String,
     codex_privacy_policy_json:
         sqlx::types::Json<gateway_core::settings::privacy::CodexPrivacyPolicy>,
@@ -522,6 +561,7 @@ struct RuntimeSettingsRow {
     audit_retention_days: i64,
     min_codex_desktop_version: Option<String>,
     min_codex_cli_version: Option<String>,
+    min_claude_code_version: Option<String>,
     updated_at: DateTime<Utc>,
     max_waiting_per_key: i64,
     max_waiting_per_account: i64,
@@ -531,14 +571,15 @@ struct RuntimeSettingsRow {
     max_retry_after_seconds: i64,
     openai_guardian_reserved_concurrency: i64,
     openai_account_affinity: String,
+    anthropic_account_affinity: String,
     max_account_rotations: i64,
     openai_session_affinity_ttl_hours: i64,
+    anthropic_session_affinity_ttl_hours: i64,
     responses_max_decompressed_body_bytes: i64,
-    account_error_protection_revision: i64,
-    account_error_protection_json: sqlx::types::Json<gateway_core::account::AccountErrorProtection>,
     account_warmup_enabled: bool,
     account_warmup_cron: String,
     account_warmup_model: Option<String>,
+    reset_credit_on_low_weekly_quota: bool,
     reset_credit_lead_minutes: i32,
     reset_credit_max_weekly_remaining_percent: Option<i32>,
 }
@@ -560,18 +601,19 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
     Ok(RuntimeSettings {
         request_profiles,
         config_revision: Revision::new(to_u64(row.config_revision)?)?,
-        account_error_protection_revision: Revision::new(to_u64(
-            row.account_error_protection_revision,
-        )?)?,
         admin_api_key: row.admin_api_key,
         rotation_strategy: row.rotation_strategy,
         model_mappings: row.model_mappings_json.0,
         updated_at: row.updated_at,
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            anthropic_model_mappings: row.anthropic_model_mappings_json.0,
+            prompt_guard: row.prompt_guard_json.0,
+            claude_public_url: row.claude_public_url,
             refresh_margin_seconds: to_u64(row.refresh_margin_seconds)?,
             refresh_concurrency: to_u32(row.refresh_concurrency)?,
             max_concurrent_per_account: to_u32(row.max_concurrent_per_account)?,
             smart_scheduling: row.smart_scheduling_json.0,
+            quota_reset_window_weights: row.quota_reset_window_weights_json.0,
             codex_privacy_policy: row.codex_privacy_policy_json.0,
             request_location_enabled: row.request_location_enabled,
             request_location: row
@@ -584,6 +626,7 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
             audit_retention_days: to_u32(row.audit_retention_days)?,
             min_codex_desktop_version: row.min_codex_desktop_version,
             min_codex_cli_version: row.min_codex_cli_version,
+            min_claude_code_version: row.min_claude_code_version,
             max_waiting_per_key: to_u32(row.max_waiting_per_key)?,
             max_waiting_per_account: to_u32(row.max_waiting_per_account)?,
             key_queue_timeout_seconds: to_u32(row.key_queue_timeout_seconds)?,
@@ -600,14 +643,23 @@ fn runtime_settings_from_row(row: RuntimeSettingsRow) -> StoreResult<RuntimeSett
                 source: None,
             })?,
             max_account_rotations: to_u32(row.max_account_rotations)?,
+            anthropic_account_affinity: gateway_core::account::AccountAffinity::parse(
+                &row.anthropic_account_affinity,
+            )
+            .ok_or_else(|| StoreError::InvalidData {
+                entity: "runtime settings",
+                message: "invalid anthropic account affinity".to_owned(),
+                source: None,
+            })?,
+            anthropic_session_affinity_ttl_hours: to_u32(row.anthropic_session_affinity_ttl_hours)?,
             openai_session_affinity_ttl_hours: to_u32(row.openai_session_affinity_ttl_hours)?,
             responses_max_decompressed_body_bytes: to_u64(
                 row.responses_max_decompressed_body_bytes,
             )?,
-            account_error_protection: row.account_error_protection_json.0,
             account_warmup_enabled: row.account_warmup_enabled,
             account_warmup_cron: row.account_warmup_cron,
             account_warmup_model: row.account_warmup_model,
+            reset_credit_on_low_weekly_quota: row.reset_credit_on_low_weekly_quota,
             reset_credit_lead_minutes: u32::try_from(row.reset_credit_lead_minutes)
                 .map_err(|_| invalid_numeric())?,
             reset_credit_max_weekly_remaining_percent: row

@@ -20,7 +20,7 @@ function parseJson(value: string): unknown {
 }
 
 function splitAccountDocuments(entry: AccountImportDocument): AccountImportDocument[] {
-  // xAI 的整份文档承担 RT 去重，必须保留在 Provider 的刷新边界内
+  // 非 OpenAI 文档由所属 Provider 校验身份和整批去重
   if (entry.provider !== 'openai')
     return [entry]
   const document = entry.document
@@ -109,7 +109,7 @@ export function accountImportDocuments(provider: string, mode: string, text: str
     }))
   }
   const value = parseJson(text)
-  // 原生快捷入口保留 CPR 文件展开，插件文档的字段含义由插件自己解释。
+  // 原生快捷入口保留 CPR 文件展开。
   if (isSupportedProvider(provider) && isRecord(value) && Array.isArray(value.documents)) {
     const documents = mixedImportDocuments(text).filter(entry => entry.provider === provider)
     if (!documents.length) {

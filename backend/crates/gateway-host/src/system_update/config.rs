@@ -12,7 +12,7 @@ use crate::ConfigError;
 
 const APP_BINARY_NAME: &str = "codex-proxy-rs";
 const DEFAULT_GITHUB_API_BASE: &str = "https://api.github.com/repos";
-const DEFAULT_UPDATE_REPOSITORY: &str = "zyycn/codex-proxy-rs";
+const DEFAULT_UPDATE_REPOSITORY: &str = "Gululu8023/codex-proxy-rs";
 
 /// 系统更新与重启配置；所有字段只由 Host 解释
 #[derive(Debug, Clone, Deserialize, PartialEq, Eq)]
@@ -131,15 +131,6 @@ impl SystemUpdateConfig {
         env::current_exe()
             .and_then(fs::canonicalize)
             .map_err(|error| internal("无法确定当前程序位置").with_source(error))
-    }
-
-    pub(crate) fn official_plugins_dir(&self) -> Result<PathBuf, OperationError> {
-        let executable = self.executable_path()?;
-        let parent = executable
-            .parent()
-            .filter(|path| !path.as_os_str().is_empty())
-            .ok_or_else(|| internal("无法确定官方插件安装目录"))?;
-        Ok(parent.join("plugins").join("official"))
     }
 
     pub(crate) fn web_dist_dir(&self) -> Result<&Path, OperationError> {

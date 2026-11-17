@@ -32,7 +32,6 @@
       "started": "Update has started"
     },
     "errors": {
-      "preRestartCheck": "Pre-restart check failed",
       "restart": "Restart failed, please check again",
       "unconfirmed": "Update task has not been confirmed, check its status and try again",
       "updateFailed": "Update failed",
@@ -65,16 +64,8 @@
     "actions": {
       "check": "Check for updates",
       "install": "Download update",
-      "continueRestart": "Continue restart",
       "restart": "Restart now"
     },
-    "plugins": {
-      "title": "Plugin compatibility notice",
-      "description": "Incompatible plugins will remain stopped",
-      "incompatible": "Incompatible plugins",
-      "requestErrorHelp": "Data and settings are kept, retry from the plugins page"
-    },
-    "versionAfterRestart": "Version after restart",
     "logs": {
       "live": "Live",
       "disconnectedState": "Disconnected",

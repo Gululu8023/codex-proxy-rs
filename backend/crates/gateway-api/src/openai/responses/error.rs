@@ -152,6 +152,21 @@ impl RequestDecodeError {
     }
 }
 
+impl From<crate::request_body::RequestBodyDecodeError> for RequestDecodeError {
+    fn from(error: crate::request_body::RequestBodyDecodeError) -> Self {
+        use crate::request_body::RequestBodyDecodeError;
+        match error {
+            RequestBodyDecodeError::MalformedBody => Self::MalformedJson,
+            RequestBodyDecodeError::TooLarge { limit_bytes } => {
+                Self::DecompressedBodyTooLarge { limit_bytes }
+            }
+            RequestBodyDecodeError::UnsupportedEncoding { encoding } => {
+                Self::UnsupportedContentEncoding { encoding }
+            }
+        }
+    }
+}
+
 /// OpenAI Responses 原生 wire 转发错误
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum ResponseEncodeError {

@@ -36,21 +36,19 @@ const providerOptions = computed(() => props.providers.map(value => ({
 <template>
   <div class="mb-3 shrink-0">
     <div class="flex flex-wrap items-center gap-2">
+      <div v-if="providerOptions.length" class="min-w-0 max-w-full overflow-x-auto">
+        <ZSegmented
+          v-model="provider"
+          :aria-label="t('settings.pricing.modelProvider')"
+          :options="providerOptions"
+          :disabled="saving"
+        />
+      </div>
       <ZInput v-model="search" class="w-full sm:w-72" :placeholder="t('settings.pricing.searchModel')" :aria-label="t('settings.pricing.searchModelId')">
         <template #prefix>
           <Search class="size-4" />
         </template>
       </ZInput>
-      <div v-if="providerOptions.length" class="min-w-0 max-w-full overflow-x-auto">
-        <ZSegmented
-          v-model="provider"
-          :aria-label="t('settings.pricing.modelProvider')"
-          display="icon"
-          :style="{ width: `${providerOptions.length * 40 + 4}px` }"
-          :options="providerOptions"
-          :disabled="saving"
-        />
-      </div>
       <ZSelect v-model="source" class="w-32" :aria-label="t('settings.pricing.priceSource')" :options="[{ label: t('settings.pricing.allSources'), value: 'all' }, { label: sourceLabels.custom, value: 'custom' }, { label: sourceLabels.synced, value: 'synced' }, { label: sourceLabels.builtin, value: 'builtin' }]" />
       <div v-if="selectedCount" class="ml-auto flex w-full flex-wrap items-center justify-end gap-2 sm:w-auto" role="group" :aria-label="t('settings.pricing.batchOperation')">
         <span class="inline-flex h-z-control w-full items-center gap-1 whitespace-nowrap text-z text-z-text-secondary sm:mr-1 sm:w-auto" aria-live="polite">

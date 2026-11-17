@@ -32,8 +32,6 @@ const options = computed(() => ([
       <ZSegmented
         v-model="provider"
         :aria-label="t('common.providers.filter')"
-        display="icon"
-        :style="{ width: `${options.length * 40 + 4}px` }"
         :options="options"
         :disabled="disabled"
       />

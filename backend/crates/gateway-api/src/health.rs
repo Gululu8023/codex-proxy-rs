@@ -34,6 +34,11 @@ struct HealthFailure {
 }
 
 impl HealthStatus {
+    pub(crate) fn observation_buffer_health(
+        &self,
+    ) -> Option<gateway_core::diagnostics::ObservationBufferHealth> {
+        self.diagnostics.observation_buffer_health()
+    }
     #[must_use]
     pub(crate) fn new(
         probes: Vec<Arc<dyn HealthProbe>>,

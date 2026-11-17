@@ -59,13 +59,14 @@ const groupOptions = computed(() => [
     :aria-label="t('accounts.filters.label')"
   >
     <div
-      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 sm:grid-cols-[minmax(0,1fr)_minmax(0,1fr)_7.75rem] xl:flex xl:w-auto xl:flex-none xl:flex-wrap xl:gap-3"
+      class="grid w-full min-w-0 grid-cols-2 items-center gap-2 xl:flex xl:w-auto xl:flex-none xl:flex-wrap xl:gap-3"
     >
+      <ProviderFilter v-model="provider" class="col-span-2 min-w-0 xl:w-auto xl:shrink-0" />
       <ZInput
         v-model="search"
         :aria-label="t('accounts.filters.searchLabel')"
         :placeholder="t('accounts.filters.searchLabel')"
-        class="col-span-2 min-w-0 sm:col-span-3 xl:w-80 xl:flex-none"
+        class="col-span-2 min-w-0 xl:w-80 xl:flex-none"
       >
         <template #prefix>
           <Search class="size-4.5 text-z-text-tertiary" />
@@ -85,11 +86,6 @@ const groupOptions = computed(() => [
         :disabled="groupsLoading"
         :aria-label="t('accounts.filters.groupLabel')"
         class="w-full min-w-0 xl:w-40 xl:shrink-0"
-      />
-
-      <ProviderFilter
-        v-model="provider"
-        class="col-span-2 w-full sm:col-span-1 xl:w-auto xl:shrink-0"
       />
     </div>
 

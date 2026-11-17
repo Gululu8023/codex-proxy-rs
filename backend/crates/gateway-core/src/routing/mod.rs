@@ -1,7 +1,6 @@
 //! Provider、模型目录、精确模型映射与请求级候选计划
 
 mod catalog;
-pub mod extensions;
 pub mod request_settings;
 pub mod snapshot;
 
@@ -11,9 +10,9 @@ pub use crate::account::scope::{
 };
 pub use crate::identity::ProviderKind;
 pub use catalog::{
-    ContributedModel, ContributedModelAlias, ProviderCatalogGeneration, ProviderCatalogPort,
-    ProviderCatalogUnavailable, ProviderModelCapabilities, ProviderModelContent,
-    ProviderModelDescriptor, PublicModelDescriptor,
+    ProviderCatalogGeneration, ProviderCatalogPort, ProviderCatalogUnavailable,
+    ProviderModelCapabilities, ProviderModelContent, ProviderModelDescriptor,
+    PublicModelDescriptor,
 };
 pub use snapshot::RuntimeSnapshot;
 
@@ -573,8 +572,6 @@ impl ProviderCandidate {
 /// 一次请求冻结的 Provider 尝试顺序
 #[derive(Debug, Clone)]
 pub struct RoutingPlan {
-    account_error_protection: Arc<crate::account::CompiledAccountErrorProtection>,
-    account_error_protection_revision: u64,
     request_body_limit: usize,
     max_retry_after: std::time::Duration,
     pricing: Arc<crate::metering::PricingOverrides>,
@@ -589,16 +586,6 @@ pub struct RoutingPlan {
 }
 
 impl RoutingPlan {
-    #[must_use]
-    pub const fn account_error_protection_revision(&self) -> u64 {
-        self.account_error_protection_revision
-    }
-
-    #[must_use]
-    pub fn account_error_protection(&self) -> Arc<crate::account::CompiledAccountErrorProtection> {
-        Arc::clone(&self.account_error_protection)
-    }
-
     /// 本次请求接受的单次 Retry-After 等待上限
     #[must_use]
     pub const fn max_retry_after(&self) -> std::time::Duration {
@@ -626,10 +613,16 @@ impl RoutingPlan {
         self.privacy.clone()
     }
 
-    /// 本次请求冻结的全局位置，重试时沿用同一份配置
+    /// Codex 与 Claude 共用本次请求冻结的全局位置，重试不读取更新后的配置。
     #[must_use]
-    pub const fn request_location(&self) -> Option<&crate::account::RequestLocation> {
-        self.request_location.as_ref()
+    pub fn request_location(
+        &self,
+        provider: &ProviderKind,
+    ) -> Option<&crate::account::RequestLocation> {
+        match provider.as_str() {
+            "openai" | "anthropic" => self.request_location.as_ref(),
+            _ => None,
+        }
     }
 
     #[must_use]

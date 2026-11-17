@@ -6,14 +6,10 @@ use gateway_core::{engine::probe::AccountProbe, runtime::SnapshotControl};
 
 use crate::{
     AccountsService, AdminBundle, AdminConfig, AdminRuntimePorts, AdminServices, ClientConfig,
-    ClientKeyService, CredentialsService, PluginDistributionPorts, PluginManagementService,
-    PluginsService, SettingsService, UsageDataService, backup, freeze_recovery,
+    CredentialsService, SettingsService, UsageDataService, backup,
     model::AdminError,
-    ports::{
-        self, plugin_accounts::PluginAccountAccess, plugin_client_keys::PluginClientKeyAccess,
-        provider::ProviderAdminRegistry, store::AdminStorePorts,
-    },
-    public_service, reset_credit_worker, use_case,
+    ports::{self, provider::ProviderAdminRegistry, store::AdminStorePorts},
+    reset_credit_worker, use_case,
     use_case::{
         account_groups::DefaultAccountGroupService,
         accounts::DefaultAccountsService,
@@ -33,41 +29,14 @@ use crate::{
 ///
 /// 配置非法或默认管理员初始化失败时返回错误
 pub async fn initialize(
-    config: AdminConfig,
-    client_config: ClientConfig,
-    store: AdminStorePorts,
-    runtime: AdminRuntimePorts,
-) -> Result<AdminBundle, AdminError> {
-    initialize_inner(config, client_config, store, runtime, None).await
-}
-
-/// 使用组合根已绑定给 Runtime 的同一账号窄端口，避免为完整 Admin 重建第二实例
-pub async fn initialize_with_plugin_accounts(
-    config: AdminConfig,
-    client_config: ClientConfig,
-    store: AdminStorePorts,
-    runtime: AdminRuntimePorts,
-    plugin_accounts: Arc<dyn PluginAccountAccess>,
-) -> Result<AdminBundle, AdminError> {
-    initialize_inner(config, client_config, store, runtime, Some(plugin_accounts)).await
-}
-
-async fn initialize_inner(
     mut config: AdminConfig,
     mut client_config: ClientConfig,
     store: AdminStorePorts,
     runtime: AdminRuntimePorts,
-    plugin_accounts: Option<Arc<dyn PluginAccountAccess>>,
 ) -> Result<AdminBundle, AdminError> {
     let AdminRuntimePorts {
         upstream_info,
         timezone,
-        service_middleware,
-        plugin_preparation,
-        plugin_management,
-        published_snapshot,
-        plugin_distribution,
-        plugin_inspector,
         pricing_source,
         providers,
         snapshot,
@@ -116,14 +85,9 @@ async fn initialize_inner(
         backup_ports.dump(),
         backup_ports.object_store(),
     )
+    .with_privacy_store(backup_ports.privacy_store())
     .with_timezone(timezone);
-    let system_preflight = Arc::new(
-        use_case::system_preflight::PluginSystemUpdatePreflight::new(
-            store.plugins(),
-            plugin_inspector.clone(),
-        ),
-    );
-    let system = Arc::new(DefaultSystemService::new(system, system_preflight));
+    let system = Arc::new(DefaultSystemService::new(system));
     let observations: Arc<dyn ports::store::ObservabilityStore> = Arc::new(
         use_case::observability::CachedObservabilityStore::new(store.observability()),
     );
@@ -134,6 +98,7 @@ async fn initialize_inner(
         observations.clone(),
         system.clone(),
         timezone,
+        store.settings(),
     ));
     let credentials = Arc::new(CredentialsService::new(
         providers.clone(),
@@ -142,14 +107,6 @@ async fn initialize_inner(
         snapshot.clone(),
         upstream_info.clone(),
     ));
-    let plugin_accounts = plugin_accounts.unwrap_or_else(|| {
-        initialize_plugin_accounts(
-            providers.clone(),
-            store.accounts(),
-            snapshot.clone(),
-            upstream_info.clone(),
-        )
-    });
     let import_tasks = use_case::import_tasks::DefaultImportTasksService::new(credentials.clone());
     let import_task = use_case::import_tasks::ImportTaskWorker(import_tasks.clone());
     let settings = initialize_settings(
@@ -159,10 +116,6 @@ async fn initialize_inner(
         pricing_source,
     );
     let usage_data = initialize_usage_data(store.usage_data(), store.settings(), providers.clone());
-    let mut public_services = public_service::Registry::new(service_middleware);
-    public_services.register_settings(&settings)?;
-    public_services.register_accounts(&accounts)?;
-    public_services.register_usage_data(&usage_data)?;
     let services = AdminServices {
         peer_link: Arc::new(use_case::peer_link::DefaultPeerLinkService::new(
             store.client_keys(),
@@ -171,21 +124,6 @@ async fn initialize_inner(
             providers.clone(),
         )),
         timezone,
-        public_services: Arc::new(public_services),
-        plugin_management: Arc::new(PluginManagementService::new(
-            plugin_management,
-            store.plugins(),
-            published_snapshot.clone(),
-        )),
-        plugins: Arc::new(PluginsService::new(
-            store.plugins(),
-            plugin_inspector,
-            PluginDistributionPorts::new(plugin_distribution, store.proxies()),
-            snapshot.clone(),
-            plugin_preparation,
-            published_snapshot,
-            store.plugin_state(),
-        )),
         key_usage,
         proxies: Arc::new(use_case::proxies::DefaultProxiesService::new(
             store.proxies(),
@@ -221,21 +159,12 @@ async fn initialize_inner(
         usage_data,
         system,
         credentials,
-        _plugin_accounts: plugin_accounts,
         import_tasks,
         backups,
     };
-    let freeze_recovery =
-        freeze_recovery::FreezeRecoveryTask::new(freeze_recovery::FreezeRecoveryDeps {
-            accounts: Arc::clone(&accounts) as Arc<dyn AccountsService>,
-            store: store.accounts(),
-            runtime: store.account_runtime(),
-            settings: store.settings(),
-        });
     let worker_contributions = vec![
         backup_task.into_worker()?,
         import_task.into_worker()?,
-        freeze_recovery.into_worker()?,
         reset_credit_worker::ResetCreditAutomationTask {
             accounts,
             store: store.accounts(),
@@ -247,50 +176,6 @@ async fn initialize_inner(
         services,
         worker_contributions,
     })
-}
-
-/// CLI 只组合账号用例，不初始化管理员、管理服务或后台任务；写入仍复用同一事务与审计
-pub fn initialize_plugin_accounts(
-    providers: ports::provider::ProviderAdminRegistry,
-    accounts: Arc<dyn ports::store::AccountStore>,
-    snapshot: Arc<dyn gateway_core::runtime::SnapshotControl>,
-    upstream_info: Option<Arc<dyn ports::peer::PeerUpstreamService>>,
-) -> Arc<dyn PluginAccountAccess> {
-    Arc::new(use_case::plugin_accounts::DefaultPluginAccountAccess::new(
-        providers,
-        accounts,
-        snapshot,
-        upstream_info,
-    ))
-}
-
-/// 为 Runtime 创建代理目录与当前出口解析的窄端口
-#[must_use]
-pub fn initialize_plugin_proxies(
-    store: Arc<dyn ports::proxy::ProxyStore>,
-) -> Arc<dyn ports::proxy::PluginProxyAccess> {
-    Arc::new(use_case::proxies::DefaultPluginProxyAccess { store })
-}
-
-/// 为 Runtime 创建非秘密 Client Key 目录与预算重置的窄端口
-#[must_use]
-pub fn initialize_plugin_client_keys(
-    providers: ports::provider::ProviderAdminRegistry,
-    store: Arc<dyn ports::store::ClientKeyStore>,
-    snapshot: Arc<dyn SnapshotControl>,
-) -> Arc<dyn PluginClientKeyAccess> {
-    let service: Arc<dyn ClientKeyService> =
-        Arc::new(DefaultClientKeyService::new(store, snapshot, providers));
-    Arc::new(use_case::plugin_client_keys::DefaultPluginClientKeyAccess::new(service))
-}
-
-/// 为 Runtime 组合实例自有资源写入；权限和归属在同一存储事务复核
-#[must_use]
-pub fn initialize_plugin_resources(
-    store: Arc<dyn ports::plugin_resources::PluginResourceStore>,
-    snapshot: Arc<dyn SnapshotControl>,
-) -> Arc<dyn ports::plugin_resources::PluginResourceAccess> {
-    Arc::new(use_case::plugin_resources::DefaultPluginResourceAccess { store, snapshot })
 }
 
 /// 服务端与 CLI 复用账号用例，不随命令启动后台调度
@@ -336,7 +221,7 @@ pub fn initialize_settings(
     ))
 }
 
-/// HTTP、插件及 CLI 共用的用量领域用例，宿主提供已验证的调用主体
+/// 用量领域用例，宿主提供已验证的调用主体
 #[must_use]
 pub fn initialize_usage_data(
     store: Arc<dyn ports::usage_data::UsageDataStore>,

@@ -266,33 +266,14 @@ impl CodexProvider {
         let account_selection_wait_ms =
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let operation = Operation::ProviderHttp(request);
-        let provider_kind = ProviderKind::new(PROVIDER_NAME)
-            .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
-        let account_id = lease.account_id().clone();
-        let provider = Arc::clone(&self);
-        let terminal_context = context.clone();
-        context
-            .execute_middleware(
-                operation,
-                provider_kind,
-                Some(upstream_model.as_str().to_owned()),
-                account_id,
-                Box::new(move |operation, middleware_headers| {
-                    Box::pin(async move {
-                        provider
-                            .execute_selected_live_call(
-                                terminal_context,
-                                operation,
-                                upstream_model,
-                                middleware_headers,
-                                lease,
-                                account_selection_wait_ms,
-                            )
-                            .await
-                    })
-                }),
-            )
-            .await
+        self.execute_selected_live_call(
+            context,
+            operation,
+            upstream_model,
+            lease,
+            account_selection_wait_ms,
+        )
+        .await
     }
 
     async fn execute_selected_live_call(
@@ -300,7 +281,6 @@ impl CodexProvider {
         context: AttemptContext,
         operation: Operation,
         upstream_model: UpstreamModelId,
-        middleware_headers: Vec<MiddlewareHeader>,
         mut lease: CodexCredentialLease,
         account_selection_wait_ms: u64,
     ) -> Result<ProviderStream, ProviderError> {
@@ -310,11 +290,8 @@ impl CodexProvider {
                 UpstreamSendState::NotSent,
             ));
         };
-        let session_affinity = derive_live_session_affinity(
-            &request,
-            &middleware_headers,
-            context.client_api_key_ref(),
-        );
+        let session_affinity =
+            derive_live_session_affinity(&request, &[], context.client_api_key_ref());
         if !context.is_diagnostic_required_account() {
             self.selector
                 .validate_translated_selection(
@@ -330,11 +307,6 @@ impl CodexProvider {
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
-        let outbound_middleware = context.outbound_middleware(
-            provider_kind.clone(),
-            Some(upstream_model.as_str().to_owned()),
-            lease.account_id().clone(),
-        );
         let metadata = ProviderCallMetadata::new(
             provider_kind,
             upstream_model.clone(),
@@ -365,12 +337,10 @@ impl CodexProvider {
             .collect::<Vec<_>>();
         let events = cold_live_call_stream(ColdLiveCall {
             client: self
-                .client_for_request(&context)?
+                .client_for_request(&context, lease.account())?
                 .for_account(lease.account())
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, None).error)?
-                .with_responses_api_base_url(lease.authentication().responses_api_base_url())
-                .with_middleware_headers(middleware_headers)
-                .with_outbound_middleware(outbound_middleware),
+                .with_responses_api_base_url(lease.authentication().responses_api_base_url()),
             registry: Arc::clone(&self.live_registry),
             response_origin: self.live_calls_url.clone(),
             endpoint_query: request.query().map(str::to_owned),
@@ -422,7 +392,6 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
-            cyber_policy_scope: None,
             allows_account_state_mutation,
             upstream_model: None,
         };
@@ -471,7 +440,7 @@ fn cold_live_call_stream(request: ColdLiveCall) -> EventStream {
                 &request.protocol_headers,
                 request.body.clone(),
                 request_context,
-            ) => response.map_err(CodexHandshakeAttemptError::Client),
+            ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
         };
         if let Err(CodexHandshakeAttemptError::Client(error)) = &attempt {
             log_client_upstream_error(

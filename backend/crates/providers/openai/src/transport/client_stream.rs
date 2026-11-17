@@ -33,8 +33,8 @@ use crate::transport::{
     response_meta,
     websocket::{
         CodexWebSocketConnection, CodexWebSocketExchangeError, CodexWebSocketPoolKey,
-        DEFAULT_STREAM_IDLE_TIMEOUT, WEBSOCKET_FAST_PATH_BUDGET, WebSocketFastPath,
-        execute_prepared_response_create_request_stream, post_send_ambiguous,
+        DEFAULT_STREAM_IDLE_TIMEOUT, PreviousResponseUnavailableReason, WEBSOCKET_FAST_PATH_BUDGET,
+        WebSocketFastPath, execute_prepared_response_create_request_stream, post_send_ambiguous,
         prepare_response_create_request_with_pool, websocket_audit_dir,
         write_websocket_audit_artifact_from_env,
     },
@@ -82,6 +82,7 @@ impl CodexBackendClient {
             context.installation_id,
         );
         self.apply_privacy(&mut upstream_body, &mut headers)?;
+        self.check_prompt_guard(&upstream_body).await?;
         let body =
             serde_json::to_vec(&upstream_body).map_err(CodexClientError::RequestBodyEncode)?;
         let trace = context
@@ -92,11 +93,7 @@ impl CodexBackendClient {
         if let Some(body) = upstream_body.as_object() {
             super::diagnostics::evidence::record_request(
                 &trace,
-                if self.outbound_middleware.is_some() {
-                    "provider.request.native"
-                } else {
-                    "provider.request.outbound"
-                },
+                "provider.request.outbound",
                 body,
                 "http_sse",
                 Some(&headers),
@@ -274,14 +271,11 @@ impl CodexBackendClient {
         super::correlation::scope_request(&mut body, &mut headers, context.installation_id);
         let original_headers = self.privacy.as_ref().map(|_| headers.clone());
         self.apply_privacy(&mut body, &mut headers)?;
+        self.check_prompt_guard(&body).await?;
         if let Some(body) = body.as_object() {
             super::diagnostics::evidence::record_request(
                 &context.trace.cloned().unwrap_or_default(),
-                if self.outbound_middleware.is_some() {
-                    "provider.request.native"
-                } else {
-                    "provider.request.outbound"
-                },
+                "provider.request.outbound",
                 body,
                 "websocket",
                 Some(&headers),
@@ -307,8 +301,7 @@ impl CodexBackendClient {
         .map_err(CodexClientError::WebSocketEncode)?;
         websocket_create.connection.outbound_proxy = self.outbound_proxy.clone();
         websocket_create.connection.connection_budget = self.connection_budget.clone();
-        let (websocket_create, outbound_profile) =
-            self.prepare_websocket_request(websocket_create).await?;
+        let websocket_create = self.prepare_websocket_request(websocket_create).await?;
         context.trace.cloned().unwrap_or_default().headers(
             "upstream.request.headers",
             serde_json::json!({"transport": "websocket", "phase": "prepared_opening"}),
@@ -324,10 +317,7 @@ impl CodexBackendClient {
             let artifact = websocket_audit_artifact_from_attempt(
                 &websocket_request,
                 websocket_create.connection().opening_audit_snapshot(),
-                // 插件准备后只由受控 wire capture 记录实际正文，不把原生 JSON 冒充最终帧
-                self.outbound_middleware
-                    .is_none()
-                    .then(|| websocket_payload_audit_snapshot(&websocket_request)),
+                Some(websocket_payload_audit_snapshot(&websocket_request)),
             );
             if let Err(error) =
                 write_websocket_audit_artifact_from_env(&artifact, self.timezone).await
@@ -335,14 +325,18 @@ impl CodexBackendClient {
                 tracing::warn!(error = %error, "Failed to write Codex WebSocket audit artifact");
             }
         }
-        let mut connection_profile = websocket_connection_profile(
-            &headers,
-            &self.middleware_headers,
-            original_headers.as_ref(),
-        );
-        if let Some(profile) = outbound_profile {
-            connection_profile.push('\0');
-            connection_profile.push_str(&profile);
+        let mut connection_profile =
+            websocket_connection_profile(&headers, original_headers.as_ref());
+        // 上游按握手继承整条路径，不能把本轮请求交给其他路径建立的连接
+        if let Some((_, route)) = websocket_create
+            .connection()
+            .headers()
+            .iter()
+            .find(|(name, _)| name == gateway_protocol::peer::ROUTE_HEADER)
+        {
+            use sha2::{Digest, Sha256};
+            connection_profile.push_str("\0peer:");
+            connection_profile.push_str(&hex::encode(Sha256::digest(route.as_bytes())));
         }
         let pool_key =
             self.websocket_pool_key(request, context, pool_account_id, &connection_profile);
@@ -373,26 +367,11 @@ impl CodexBackendClient {
             TransportRequirement::HttpRequired => None,
         };
         let prepare_started_at = Instant::now();
-        let opening_origin_key = self.outbound_middleware.as_ref().map(|_| {
-            format!(
-                "{}\0{}",
-                websocket_origin_key(
-                    &websocket_create
-                        .connection()
-                        .endpoint()
-                        .replacen("wss://", "https://", 1)
-                        .replacen("ws://", "http://", 1)
-                ),
-                self.egress_key
-            )
-        });
         let prepared = prepare_response_create_request_with_pool(
             &websocket_create,
             pool,
             &self.websocket_origin_breaker,
-            opening_origin_key
-                .as_deref()
-                .unwrap_or(&self.websocket_origin_key),
+            &self.websocket_origin_key,
             fast_path_budget,
             requirement.requires_websocket(),
             Some(DEFAULT_STREAM_IDLE_TIMEOUT),
@@ -448,6 +427,51 @@ impl CodexBackendClient {
             }
             Err(error) => return Err(websocket_exchange_error_to_client_error(error)),
         };
+        // 按最终出站帧的 UTF-8 字节数判断，握手上限只属于当前物理连接
+        if let Some(limit) = prepared.max_message_bytes()
+            && websocket_create.payload_text().len() > limit
+        {
+            let metrics = CodexTransportMetrics {
+                decision: Some(CodexTransportDecision::Http2WebSocketMessageTooLarge),
+                ws_connect_ms: prepared.connect_elapsed().map(elapsed_duration_millis),
+                transport_decision_wait_ms: Some(elapsed_duration_millis(
+                    prepared.decision_wait_elapsed(),
+                )),
+                ..CodexTransportMetrics::default()
+            };
+            prepared.discard().await;
+            let error = match requirement {
+                TransportRequirement::ExactWebSocketContinuation => {
+                    Some(CodexWebSocketExchangeError::ContinuationUnavailable {
+                        reason: PreviousResponseUnavailableReason::PayloadTooLarge,
+                    })
+                }
+                TransportRequirement::ExplicitWebSocketWarmup => {
+                    Some(CodexWebSocketExchangeError::MessageTooLarge)
+                }
+                TransportRequirement::HttpRequired
+                | TransportRequirement::WebSocketNewChain
+                | TransportRequirement::PersistedContinuation
+                | TransportRequirement::ExternalUnknown
+                | TransportRequirement::NewChain => None,
+            };
+            if let Some(error) = error {
+                return Err(websocket_exchange_error_to_client_error(error));
+            }
+            context.trace.cloned().unwrap_or_default().record(
+                "transport.fallback",
+                serde_json::json!({
+                    "to": "http_sse", "reason": "websocket_message_too_large",
+                    "requirement": requirement.as_str(), "limitBytes": limit,
+                    "payloadBytes": websocket_create.payload_text().len(),
+                }),
+            );
+            return Ok(PreparedResponseTransport {
+                requirement,
+                route: PreparedResponseRoute::Http,
+                metrics,
+            });
+        }
         let decision = websocket_success_decision(requirement, &prepared);
         context.trace.cloned().unwrap_or_default().record(
             "transport.prepared",
@@ -614,7 +638,6 @@ fn is_websocket_replayable_prelude(frame: &[u8]) -> bool {
 
 fn websocket_connection_profile(
     headers: &HeaderMap,
-    middleware_headers: &[gateway_core::engine::middleware::MiddlewareHeader],
     original_headers: Option<&HeaderMap>,
 ) -> String {
     let mut profile = [
@@ -634,19 +657,6 @@ fn websocket_connection_profile(
             .unwrap_or_default()
     })
     .join("\0");
-    if !middleware_headers.is_empty() {
-        use sha2::{Digest, Sha256};
-
-        let mut digest = Sha256::new();
-        for header in middleware_headers {
-            digest.update(header.name().len().to_le_bytes());
-            digest.update(header.name().as_bytes());
-            digest.update(header.value().len().to_le_bytes());
-            digest.update(header.value());
-        }
-        profile.push('\0');
-        profile.push_str(&hex::encode(digest.finalize()));
-    }
     if let Some(original) = original_headers {
         use sha2::{Digest, Sha256};
         let names: std::collections::BTreeSet<_> = original

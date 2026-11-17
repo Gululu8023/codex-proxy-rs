@@ -75,7 +75,7 @@ impl PendingResponse {
         loop {
             match &mut self {
                 Self::Waiting(response, error_encoder) => {
-                    // 心跳只轮询同一个 future，不取消重建首帧等待或插件调用
+                    // 心跳只轮询同一个 future，不取消重建首帧等待
                     let response = tokio::select! {
                         biased;
                         response = response => response,
@@ -112,11 +112,7 @@ impl PendingResponse {
 
 async fn stream_failure(response: Response, error_encoder: Option<fn(&Value) -> Bytes>) -> Body {
     let status = response.status();
-    let retry_after = response
-        .headers()
-        .get(header::RETRY_AFTER)
-        .and_then(|value| value.to_str().ok())
-        .map(ToOwned::to_owned);
+    let response_headers = response.headers().clone();
     let bytes = to_bytes(response.into_body(), usize::MAX)
         .await
         .unwrap_or_default();
@@ -141,18 +137,7 @@ async fn stream_failure(response: Response, error_encoder: Option<fn(&Value) -> 
                 }),
             )
         });
-    // HTTP 头已提交，按官方 SSE 错误合同保留允许下发的重试建议
-    if let Some(retry_after) = retry_after
-        && let Some(error) = data["response"]["error"].as_object_mut()
-        && let Some(headers) = error
-            .entry("headers")
-            .or_insert_with(|| serde_json::json!({}))
-            .as_object_mut()
-    {
-        headers
-            .entry("retry-after")
-            .or_insert(Value::String(retry_after));
-    }
+    crate::openai::error::attach_sse_error_headers(&mut data, &response_headers);
     let mut event = match error_encoder {
         Some(encode) => encode(&data).to_vec(),
         None => encode_sse_event("response.failed", &data.to_string()).into_bytes(),

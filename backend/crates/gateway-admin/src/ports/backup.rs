@@ -17,9 +17,10 @@ use crate::model::Revision;
 use crate::model::{
     MutationContext,
     backup::{
-        BackupError, BackupObjectMetadata, BackupRecord, BackupRecordListQuery, BackupRecordPage,
-        BackupRecordSeed, BackupSettings, BackupStatusTransition, BackupStorageConfig,
-        ConnectionTestResult, UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
+        BackupError, BackupObject, BackupObjectMetadata, BackupRecord, BackupRecordListQuery,
+        BackupRecordPage, BackupRecordSeed, BackupSettings, BackupStatusTransition,
+        BackupStorageConfig, ConnectionTestResult, UpdateBackupScheduleCommand,
+        UpdateBackupStorageCommand,
     },
 };
 use crate::ports::store::AdminStoreResult;
@@ -29,6 +30,8 @@ use crate::ports::store::AdminStoreResult;
 pub struct StatusTransitionUpdate {
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
+    /// 一次写入隐私存储对象；已有值不会被覆盖或清除
+    pub privacy_store: Option<BackupObject>,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
     pub completed_at: Option<DateTime<Utc>>,
@@ -159,6 +162,24 @@ pub trait DatabaseDumpPort: Send + Sync {
     async fn cleanup_staging(&self, backup_id: &str) -> Result<(), BackupError>;
 }
 
+/// Claude 隐私存储（veil 映射卷）快照与本地暂存端口
+///
+/// 快照必须在数据库导出之后执行：映射只增不删，后取的快照覆盖数据库快照引用的全部映射。
+/// 归档不含主密钥；主密钥由运维单独保管
+#[async_trait]
+pub trait PrivacyStoreSnapshotPort: Send + Sync {
+    /// 生成并暂存快照归档；映射卷从未初始化时返回 `Ok(None)`，
+    /// 已初始化但无法生成一致快照时返回错误，不能产出缺少映射的备份
+    async fn snapshot(&self, request: DumpRequest) -> Result<Option<DumpArtifact>, BackupError>;
+
+    /// 检查暂存目录是否存在完整快照归档
+    async fn inspect_staging(&self, backup_id: &str)
+    -> Result<Option<StagedArtifact>, BackupError>;
+
+    /// 清理暂存目录中该备份的快照文件
+    async fn cleanup_staging(&self, backup_id: &str) -> Result<(), BackupError>;
+}
+
 /// 一次 `pg_dump` 请求
 #[derive(Debug, Clone)]
 pub struct DumpRequest {
@@ -238,6 +259,7 @@ pub struct UploadObjectRequest {
 pub struct BackupStorePorts {
     repository: Arc<dyn BackupRepository>,
     dump: Arc<dyn DatabaseDumpPort>,
+    privacy_store: Arc<dyn PrivacyStoreSnapshotPort>,
     object_store: Arc<dyn BackupObjectStorePort>,
 }
 
@@ -252,8 +274,22 @@ impl BackupStorePorts {
         Self {
             repository,
             dump,
+            privacy_store: Arc::new(NoPrivacyStore),
             object_store,
         }
+    }
+
+    /// 接入隐私存储快照；组合根在 Store 之外持有 veil 运行时，因此单独注入
+    #[must_use]
+    pub fn with_privacy_store(mut self, privacy_store: Arc<dyn PrivacyStoreSnapshotPort>) -> Self {
+        self.privacy_store = privacy_store;
+        self
+    }
+
+    /// 隐私存储快照与暂存
+    #[must_use]
+    pub fn privacy_store(&self) -> Arc<dyn PrivacyStoreSnapshotPort> {
+        self.privacy_store.clone()
     }
 
     /// 备份任务/配置仓储
@@ -281,6 +317,7 @@ impl BackupStorePorts {
         Self {
             repository: Arc::new(UnavailableBackupRepository),
             dump: Arc::new(UnavailableDumpPort),
+            privacy_store: Arc::new(NoPrivacyStore),
             object_store: Arc::new(UnavailableObjectStore),
         }
     }
@@ -411,6 +448,25 @@ impl DatabaseDumpPort for UnavailableDumpPort {
     }
     async fn cleanup_staging(&self, _backup_id: &str) -> Result<(), BackupError> {
         Err(disabled_infra())
+    }
+}
+
+/// 未接入隐私存储的部署：没有需要随备份保存的映射卷
+pub(crate) struct NoPrivacyStore;
+
+#[async_trait]
+impl PrivacyStoreSnapshotPort for NoPrivacyStore {
+    async fn snapshot(&self, _request: DumpRequest) -> Result<Option<DumpArtifact>, BackupError> {
+        Ok(None)
+    }
+    async fn inspect_staging(
+        &self,
+        _backup_id: &str,
+    ) -> Result<Option<StagedArtifact>, BackupError> {
+        Ok(None)
+    }
+    async fn cleanup_staging(&self, _backup_id: &str) -> Result<(), BackupError> {
+        Ok(())
     }
 }
 

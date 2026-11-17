@@ -4,7 +4,7 @@
 # 版本严格一致。升级数据库版本时只需同步修改这里与 deploy/compose.yaml。
 ARG POSTGRES_IMAGE=postgres:18-bookworm@sha256:bbf83594798e144bff365a9c191c5d779f181fb3135902064ab8ff11918020fc
 
-FROM node:26.13.0-bookworm-slim@sha256:add5c17c14752c54d2f3d519ec46a3815684d41c33f198bcb09fb998f7dcbf68 AS frontend-builder
+FROM node:26.13.1-bookworm-slim@sha256:5df79989ed685e09f0a98019db4cebfb22fb9df1a53c0161664a011f7ff6b0f1 AS frontend-builder
 
 WORKDIR /app/frontend
 COPY frontend/package.json frontend/pnpm-lock.yaml frontend/pnpm-workspace.yaml ./
@@ -26,6 +26,10 @@ ENV CPR_VERSION=${CPR_VERSION}
 ENV CPR_GIT_SHA=${CPR_GIT_SHA}
 ENV CPR_BUILD_TIME=${CPR_BUILD_TIME}
 ENV CPR_BUILD_TYPE=${CPR_BUILD_TYPE}
+ENV VEIL_SKIP_UI_BUILD=1
+COPY scripts/prepare-veil.sh /app/scripts/prepare-veil.sh
+COPY scripts/patches/veil-library.patch /app/scripts/patches/veil-library.patch
+RUN sh /app/scripts/prepare-veil.sh
 COPY backend/Cargo.toml backend/Cargo.lock ./
 COPY backend/apps ./apps
 COPY backend/crates ./crates
@@ -89,9 +93,5 @@ ARG CPR_PREBUILT_DIR=dist/docker
 
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/codex-proxy-rs /app/bin/codex-proxy-rs
 COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/web/dist ./web/dist
-COPY --chown=cpr:cpr ${CPR_PREBUILT_DIR}/linux-${TARGETARCH}/plugins/official /app/bin/plugins/official
-RUN chmod +x /app/bin/codex-proxy-rs \
-    && find /app/bin/plugins/official -type f -exec chmod 0444 '{}' + \
-    && chmod 0555 /app/bin/plugins/official \
-    && chmod 0755 /app/bin/plugins
+RUN chmod +x /app/bin/codex-proxy-rs
 USER cpr

@@ -1,4 +1,4 @@
-//! Images 混合账号池的模型权限、亲和、重试与中间件改写回归
+//! Images 混合账号池的模型权限、亲和与重试回归
 
 use super::*;
 use gateway_core::account::{AccountAffinity, AccountModelAccess, AccountModelAccessMode};
@@ -31,34 +31,18 @@ fn scope(first: AccountModelAccess, second: AccountModelAccess) -> Arc<FrozenAcc
 }
 
 fn attempt(accounts: AccountAttemptContext) -> AttemptContext {
-    configured_attempt(accounts, AccountAffinity::Strict, 1, None)
+    configured_attempt(accounts, AccountAffinity::Strict, 1)
 }
 
 fn configured_attempt(
     accounts: AccountAttemptContext,
     affinity: AccountAffinity,
     index: u32,
-    middleware: Option<Arc<dyn MiddlewarePlan>>,
 ) -> AttemptContext {
-    let middleware = middleware.map(|plan| {
-        FrozenMiddlewarePlan::new(
-            plan,
-            ExtensionSetReference::new(
-                ExtensionSetId::new("image-access".to_owned()).unwrap(),
-                Arc::new(TestExtensionLease),
-            ),
-        )
-    });
     AttemptContext::new(
         RequestAttemptContext::new(
             ModelRequestId::new("req_image_access").unwrap(),
             ClientApiKeyId::new("key_openai_contract").unwrap(),
-        )
-        .with_middleware(
-            middleware,
-            Arc::from([]),
-            "/v1/images/generations".to_owned(),
-            ClientTransport::HttpJson,
         ),
         NonZeroU32::new(index).unwrap(),
         SystemTime::now() + Duration::from_secs(30),
@@ -110,7 +94,6 @@ async fn images_do_not_use_forbidden_accounts_when_pinned_or_after_failover() {
                                 .with_account_scope(scope),
                             AccountAffinity::Strict,
                             index,
-                            None,
                         ),
                     )
                     .await
@@ -237,7 +220,6 @@ async fn image_model_access_overrides_existing_session_affinity() {
                     ),
                     mode,
                     1,
-                    None,
                 ),
             )
             .await
@@ -260,7 +242,6 @@ async fn image_model_access_overrides_existing_session_affinity() {
                     ),
                     mode,
                     1,
-                    None,
                 ),
             )
             .await
@@ -271,72 +252,6 @@ async fn image_model_access_overrides_existing_session_affinity() {
         );
         assert!(server.received_requests().await.unwrap().is_empty());
     }
-}
-
-#[tokio::test]
-async fn final_image_model_after_middleware_must_be_allowed_by_the_selected_account() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"data":[]})))
-        .mount(&server)
-        .await;
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, CPA_ACCOUNT).await;
-    let provider = provider_with_base_url(&store, server.uri());
-    for kind in [ImageRequestKind::Generation, ImageRequestKind::Edit] {
-        for (replacement, allowed) in [
-            (json!("forbidden"), false),
-            (Value::Null, false),
-            (json!("gpt-image-future"), true),
-        ] {
-            let scope = scope(
-                AccountModelAccess::new(
-                    AccountModelAccessMode::Allowlist,
-                    vec!["gpt-image-2".to_owned(), "gpt-image-future".to_owned()],
-                )
-                .unwrap(),
-                AccountModelAccess::all(),
-            );
-            let middleware = Arc::new(RecordingMiddleware {
-                observed: Arc::default(),
-                replacement: ("model".to_owned(), replacement.clone()),
-                request_headers: Vec::new(),
-            });
-            let result = provider
-                .clone()
-                .execute(
-                    planned_provider_endpoint_request("openai", image_operation(kind, IMAGE_BODY)),
-                    configured_attempt(
-                        AccountAttemptContext::new(BTreeSet::new(), None, None)
-                            .with_account_scope(scope),
-                        AccountAffinity::Strict,
-                        1,
-                        Some(middleware),
-                    ),
-                )
-                .await;
-            if allowed {
-                let mut stream = result.unwrap();
-                while let Some(event) = stream.next().await {
-                    event.unwrap();
-                }
-                assert_eq!(
-                    captured_request_body(
-                        server.received_requests().await.unwrap().last().unwrap()
-                    )["model"],
-                    replacement
-                );
-            } else {
-                let error = result
-                    .err()
-                    .expect("rewriting cannot escape account policy");
-                assert_eq!(error.kind(), ProviderErrorKind::NoEligibleAccount);
-                assert_eq!(error.send_state(), UpstreamSendState::NotSent);
-                assert!(error.retry_is_prohibited());
-            }
-        }
-    }
-    assert_eq!(server.received_requests().await.unwrap().len(), 2);
 }
 
 fn image_operation(kind: ImageRequestKind, body: &[u8]) -> Operation {

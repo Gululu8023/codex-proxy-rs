@@ -6,18 +6,21 @@ import { Box, CheckCircle2, Monitor, RefreshCw, ShieldCheck, Terminal, TriangleA
 
 import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { formatProviderLabel, isSupportedProvider, providerIcon } from '@/utils/providers'
+import { compareProviders, formatProviderLabel, isSupportedProvider, providerIcon } from '@/utils/providers'
 
 const props = defineProps<{
   profiles: DashboardWireProfile[]
+  provider?: string
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
 const activeProvider = shallowRef('')
 
+const orderedProfiles = computed(() => [...props.profiles].sort((left, right) => compareProviders(left.provider, right.provider)))
+
 const providerOptions = computed(() =>
-  props.profiles.map(profile => ({
+  orderedProfiles.value.map(profile => ({
     label: formatProviderLabel(profile.provider),
     value: profile.provider,
     icon: providerIcon(profile.provider),
@@ -25,7 +28,9 @@ const providerOptions = computed(() =>
 )
 
 const profile = computed(
-  () => props.profiles.find(item => item.provider === activeProvider.value) ?? props.profiles[0] ?? null,
+  () => props.provider
+    ? orderedProfiles.value.find(item => item.provider === props.provider) ?? null
+    : orderedProfiles.value.find(item => item.provider === activeProvider.value) ?? orderedProfiles.value[0] ?? null,
 )
 
 const versionParts = computed(() => {
@@ -51,6 +56,14 @@ const releaseLabel = computed(() => {
 
 const releaseStatus = computed(() => {
   const current = profile.value
+  if (current?.attributes.some(item => item.key === 'client_mode' && item.value === 'follow')) {
+    return {
+      label: t('dashboard.clientIdentity.followClient'),
+      title: t('dashboard.clientIdentity.followClientDescription'),
+      tone: 'bg-z-info-container text-z-info-on-container',
+      icon: ShieldCheck,
+    }
+  }
   if (!current?.release) {
     return {
       label: current?.attributes.some(item => item.key === 'version_policy' && item.value === 'fixed')
@@ -109,24 +122,11 @@ const checkedLabel = computed(() => {
     : undefined
 })
 
-function toPascalCase(value: string) {
-  return value
-    .split(/[^a-z0-9]+/i)
-    .filter(Boolean)
-    .map(part => `${part.charAt(0).toUpperCase()}${part.slice(1).toLowerCase()}`)
-    .join('')
-}
-
 const clientIdentity = computed(() => {
   const current = profile.value
   if (!current)
     return '—'
-  const value = current.attributes.find(attribute => attribute.key === 'client_identifier')?.value
-  if (!value)
-    return '—'
-  return current.provider === 'xai'
-    ? toPascalCase(value)
-    : value
+  return current.attributes.find(attribute => attribute.key === 'client_identifier')?.value ?? '—'
 })
 
 const attributeLabels = computed<Record<string, string>>(() => ({
@@ -153,13 +153,6 @@ const identityAttributes = computed(() => {
       }))
 })
 
-const authProtocol = computed(() => {
-  const value = profile.value?.attributes.find(attribute => attribute.key === 'token_auth')?.value
-  if (!value)
-    return '—'
-  return toPascalCase(value)
-})
-
 const runtimeEnvironment = computed(() => {
   const target = profile.value?.target
   if (!target)
@@ -175,7 +168,7 @@ const runtimeEnvironment = computed(() => {
 })
 
 watch(
-  () => props.profiles,
+  orderedProfiles,
   (profiles) => {
     if (!profiles.some(item => item.provider === activeProvider.value))
       activeProvider.value = profiles[0]?.provider ?? ''
@@ -187,17 +180,15 @@ watch(
 <template>
   <ZCard as="article" class="flex min-h-95 w-full flex-col">
     <template #header>
-      <div class="flex min-w-0 flex-wrap items-start justify-between gap-3">
+      <div class="flex min-w-0 flex-col items-start gap-3">
         <h2 class="m-0 pt-0.5 text-xl leading-[1.15] font-heavy text-z-text text-balance">
           {{ t('dashboard.clientIdentity.title') }}
         </h2>
-        <div v-if="providerOptions.length > 1" class="min-w-0 max-w-full overflow-x-auto">
+        <div v-if="!provider && providerOptions.length > 1" class="min-w-0 max-w-full overflow-x-auto">
           <ZSegmented
             v-model="activeProvider"
             :aria-label="t('dashboard.clientIdentity.provider')"
             :options="providerOptions"
-            :style="{ width: `${providerOptions.length * 40 + 4}px` }"
-            display="icon"
           />
         </div>
       </div>
@@ -256,16 +247,6 @@ watch(
           </div>
 
           <dl class="m-0 flex min-w-0 flex-wrap gap-x-7 gap-y-5">
-            <div v-if="profile.provider === 'xai'" class="min-w-0 flex-auto">
-              <dt class="flex items-center gap-1.5 text-[10px] leading-none font-bold text-z-text-quaternary">
-                <ShieldCheck class="size-3.25 text-z-text-tertiary" />
-                {{ t('dashboard.clientIdentity.authProtocol') }}
-              </dt>
-              <dd class="mt-2 mb-0 font-mono text-z-lg leading-snug font-bold wrap-anywhere tabular-nums text-z-text">
-                {{ authProtocol }}
-              </dd>
-            </div>
-
             <div class="min-w-0 flex-auto">
               <dt class="flex items-center gap-1.5 text-[10px] leading-none font-bold text-z-text-quaternary">
                 <Monitor class="size-3.25 text-z-text-tertiary" />

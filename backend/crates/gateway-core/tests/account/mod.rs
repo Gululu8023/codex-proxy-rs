@@ -8,8 +8,6 @@ mod selection;
 mod selection_diagnostics;
 mod smart_scheduling;
 
-mod error_protection;
-
 use std::collections::{BTreeMap, BTreeSet};
 use std::num::NonZeroU32;
 use std::sync::Arc;
@@ -53,6 +51,7 @@ fn candidate(id: &str, in_flight: u32, remaining: Option<u64>) -> AccountCandida
         inherited_concurrency: None,
         account: account(id),
         signals: AccountRuntimeSignals {
+            quota_reset_windows: None,
             in_flight,
             last_started_at: None,
             quota_reset_at: None,
@@ -225,6 +224,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
             None,
         ),
         signals: AccountRuntimeSignals {
+            quota_reset_windows: None,
             in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
@@ -244,6 +244,7 @@ fn diagnostic_selection_bypasses_all_local_account_eligibility() {
             None,
         ),
         signals: AccountRuntimeSignals {
+            quota_reset_windows: None,
             in_flight: 0,
             last_started_at: None,
             quota_reset_at: None,
@@ -638,6 +639,7 @@ fn provider_quota_overlay_should_preserve_store_concurrency_facts() {
     let reset_at = SystemTime::now() + Duration::from_secs(60);
     let last_started_at = SystemTime::now();
     let signals = AccountRuntimeSignals {
+        quota_reset_windows: None,
         in_flight: 2,
         last_started_at: Some(last_started_at),
         quota_reset_at: None,
@@ -1060,35 +1062,6 @@ fn elapsed_quota_reset_does_not_fabricate_recovery() {
         .select(&candidates, &context(RotationStrategy::Smart))
         .expect("healthy candidate available");
     assert_eq!(selected.candidate().account.id().as_str(), "acct_healthy");
-}
-
-#[test]
-fn due_probe_freeze_blocks_scheduling_and_remains_visible_as_rate_limited() {
-    use gateway_core::account::{AccountCooldown, AccountCooldownKind};
-    let mut candidates = [
-        weighted_candidate("acct_frozen", 100, 0),
-        weighted_candidate("acct_ready", 1, 0),
-    ];
-    let selection = context(RotationStrategy::Smart);
-    candidates[0].signals.cooldown = Some(AccountCooldown {
-        until: selection.now - Duration::from_secs(120),
-        kind: AccountCooldownKind::CapacityFreezeProbe,
-    });
-    let projection = candidates[0]
-        .account
-        .status_projection(selection.now, candidates[0].signals.cooldown);
-    assert_eq!(projection.status, AccountStatus::RateLimited);
-    assert!(
-        projection
-            .cooldown
-            .expect("freeze details")
-            .kind
-            .requires_probe()
-    );
-    let selected = AccountSelector
-        .select(&candidates, &selection)
-        .expect("available account");
-    assert_eq!(selected.candidate().account.id().as_str(), "acct_ready");
 }
 
 #[test]

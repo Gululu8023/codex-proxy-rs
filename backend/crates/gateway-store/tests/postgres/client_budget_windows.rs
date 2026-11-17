@@ -7,8 +7,8 @@ use super::{
 use chrono::{Duration, Utc};
 use gateway_admin::{
     model::client_keys::{
-        ClientKeyBudgetMutationOrigin, ClientKeyBudgetPeriod, ClientKeyBudgetWindowPeriod,
-        ExplicitClientKeyBudgetWindow, ResetClientKeyBudget, SetClientKeyBudgetWindow,
+        ClientKeyBudgetPeriod, ClientKeyBudgetWindowPeriod, ExplicitClientKeyBudgetWindow,
+        ResetClientKeyBudget, SetClientKeyBudgetWindow,
     },
     ports::store::{AdminStoreErrorKind, ClientKeyStore as _},
 };
@@ -44,11 +44,7 @@ async fn explicit_window_retries_preserve_spending_and_reject_obsolete_operation
     let command = window(0, now - Duration::hours(1), now + Duration::hours(1));
     assert_eq!(
         admin
-            .set_client_key_budget_window(
-                command.clone(),
-                ClientKeyBudgetMutationOrigin::Admin,
-                &context()
-            )
+            .set_client_key_budget_window(command.clone(), &context())
             .await
             .unwrap(),
         1
@@ -56,11 +52,7 @@ async fn explicit_window_retries_preserve_spending_and_reject_obsolete_operation
     budgets.settle(charge("key", "after", "3")).await.unwrap();
     assert_eq!(
         admin
-            .set_client_key_budget_window(
-                command.clone(),
-                ClientKeyBudgetMutationOrigin::Admin,
-                &context()
-            )
+            .set_client_key_budget_window(command.clone(), &context())
             .await
             .unwrap(),
         1
@@ -73,7 +65,7 @@ async fn explicit_window_retries_preserve_spending_and_reject_obsolete_operation
     changed.window.as_mut().unwrap().ends_at += Duration::hours(1);
     assert_eq!(
         admin
-            .set_client_key_budget_window(changed, ClientKeyBudgetMutationOrigin::Admin, &context())
+            .set_client_key_budget_window(changed, &context())
             .await
             .unwrap_err()
             .kind(),
@@ -83,16 +75,8 @@ async fn explicit_window_retries_preserve_spending_and_reject_obsolete_operation
     let b = window(1, now - Duration::minutes(30), now + Duration::hours(3));
     let mutation_context = context();
     let (a, b) = tokio::join!(
-        admin.set_client_key_budget_window(
-            a,
-            ClientKeyBudgetMutationOrigin::Admin,
-            &mutation_context
-        ),
-        admin.set_client_key_budget_window(
-            b,
-            ClientKeyBudgetMutationOrigin::Admin,
-            &mutation_context
-        )
+        admin.set_client_key_budget_window(a, &mutation_context),
+        admin.set_client_key_budget_window(b, &mutation_context)
     );
     assert_ne!(a.is_ok(), b.is_ok());
     assert_eq!(
@@ -101,7 +85,7 @@ async fn explicit_window_retries_preserve_spending_and_reject_obsolete_operation
     );
     assert_eq!(
         admin
-            .set_client_key_budget_window(command, ClientKeyBudgetMutationOrigin::Admin, &context())
+            .set_client_key_budget_window(command, &context())
             .await
             .unwrap_err()
             .kind(),
@@ -129,11 +113,7 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
     let start = now - Duration::hours(2);
     let end = now - Duration::hours(1);
     admin
-        .set_client_key_budget_window(
-            window(0, start, end),
-            ClientKeyBudgetMutationOrigin::Admin,
-            &context(),
-        )
+        .set_client_key_budget_window(window(0, start, end), &context())
         .await
         .unwrap();
     assert_eq!(
@@ -163,11 +143,7 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
         "2"
     );
     admin
-        .set_client_key_budget_window(
-            window(1, end, now + Duration::hours(1)),
-            ClientKeyBudgetMutationOrigin::Admin,
-            &context(),
-        )
+        .set_client_key_budget_window(window(1, end, now + Duration::hours(1)), &context())
         .await
         .unwrap();
     assert_eq!(
@@ -178,7 +154,7 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
     let mut release = window(2, end, now + Duration::hours(1));
     release.window = None;
     admin
-        .set_client_key_budget_window(release, ClientKeyBudgetMutationOrigin::Admin, &context())
+        .set_client_key_budget_window(release, &context())
         .await
         .unwrap();
     let released = admin
@@ -191,7 +167,6 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
     admin
         .set_client_key_budget_window(
             window(3, now + Duration::hours(1), now + Duration::hours(2)),
-            ClientKeyBudgetMutationOrigin::Admin,
             &context(),
         )
         .await
@@ -212,7 +187,6 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
                 period: ClientKeyBudgetWindowPeriod::Weekly,
                 window: None,
             },
-            ClientKeyBudgetMutationOrigin::Admin,
             &context(),
         )
         .await
@@ -237,7 +211,6 @@ async fn explicit_expiry_never_rolls_and_late_settlement_uses_completion_time() 
                 id: key_id("key"),
                 period: ClientKeyBudgetPeriod::Weekly,
             },
-            ClientKeyBudgetMutationOrigin::Admin,
             &context(),
         )
         .await
@@ -262,11 +235,7 @@ async fn failed_window_mutation_rolls_back_receipt_and_manual_reset_invalidates_
         .execute(&database.pool).await.unwrap();
     assert!(
         admin
-            .set_client_key_budget_window(
-                command.clone(),
-                ClientKeyBudgetMutationOrigin::Admin,
-                &context()
-            )
+            .set_client_key_budget_window(command.clone(), &context())
             .await
             .is_err()
     );
@@ -284,11 +253,7 @@ async fn failed_window_mutation_rolls_back_receipt_and_manual_reset_invalidates_
         .unwrap();
     assert_eq!(
         admin
-            .set_client_key_budget_window(
-                command.clone(),
-                ClientKeyBudgetMutationOrigin::Admin,
-                &context()
-            )
+            .set_client_key_budget_window(command.clone(), &context())
             .await
             .unwrap(),
         1
@@ -299,7 +264,6 @@ async fn failed_window_mutation_rolls_back_receipt_and_manual_reset_invalidates_
                 id: key_id("key"),
                 period: ClientKeyBudgetPeriod::Weekly,
             },
-            ClientKeyBudgetMutationOrigin::Admin,
             &context(),
         )
         .await
@@ -312,7 +276,7 @@ async fn failed_window_mutation_rolls_back_receipt_and_manual_reset_invalidates_
     assert_eq!(current.revision, 2);
     assert_eq!(
         admin
-            .set_client_key_budget_window(command, ClientKeyBudgetMutationOrigin::Admin, &context())
+            .set_client_key_budget_window(command, &context())
             .await
             .unwrap_err()
             .kind(),
@@ -343,7 +307,6 @@ async fn explicit_window_admission_counts_pending_cost_once() {
     admin
         .set_client_key_budget_window(
             window(0, now - Duration::hours(1), now + Duration::hours(1)),
-            ClientKeyBudgetMutationOrigin::Admin,
             &context(),
         )
         .await

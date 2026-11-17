@@ -242,6 +242,7 @@ fn selector_with_runtime(
             http.clone(),
             OFFICIAL_CODEX_BASE_URL.to_owned(),
             crate::support::catalog_cache(),
+            crate::support::runtime_policy(),
         ),
     );
     let quota = Arc::new(CodexCredentialQuotaService::new(
@@ -263,6 +264,7 @@ fn selector_with_runtime(
         cooldowns,
         account_feedback,
         CodexCookiePolicy::official().expect("official cookie policy"),
+        store.clone(),
     )
 }
 
@@ -795,8 +797,8 @@ fn selector_does_not_retry_invalid_credential_data() {
     assert!(leases.requests.lock().expect("lease requests").is_empty());
 }
 
-#[test]
-fn selector_round_robin_cursor_advances_across_requests() {
+#[tokio::test]
+async fn selector_round_robin_cursor_advances_across_requests() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_first", "at-first");
     create_account(&store, "acct_second", "at-second");
@@ -1624,6 +1626,7 @@ fn native_continuation_surfaces_the_original_accounts_quota_signal_to_the_coordi
     });
     let observed_at = SystemTime::now();
     let outcome = block_on(store.compare_and_swap_quota(QuotaObservation {
+        quota_pause: None,
         expected_connection: None,
         plan_type: None,
         account_id: original.id().clone(),

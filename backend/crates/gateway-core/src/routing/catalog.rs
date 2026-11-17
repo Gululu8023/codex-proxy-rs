@@ -12,32 +12,6 @@ use super::{
     ModelCapabilities, ModelPresentation, PublicModelId, PublicModelProfile, UpstreamModelId,
 };
 
-/// 扩展集合持有的直接模型别名；执行与元数据仍归属内置 Provider
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContributedModelAlias {
-    pub owner: String,
-    pub id: PublicModelId,
-    pub provider: ProviderKind,
-    pub target: UpstreamModelId,
-}
-
-/// 适配模型的冻结账号支持事实；没有选择账号或改写请求的能力
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ContributedModel {
-    pub owner: String,
-    pub id: PublicModelId,
-    pub provider: ProviderKind,
-    pub accounts: BTreeSet<ProviderAccountId>,
-    pub capabilities: ModelCapabilities,
-    pub presentation: ModelPresentation,
-}
-
-impl ContributedModel {
-    pub(crate) fn public_profile(&self) -> PublicModelProfile {
-        PublicModelProfile::new(self.id.clone(), self.presentation.clone())
-    }
-}
-
 /// Provider 客户端目录条目；缺少原生协议正文时使用已编译的通用画像
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderModelDescriptor {
@@ -62,18 +36,13 @@ pub enum PublicModelDescriptor {
 }
 
 impl ProviderModelContent {
-    pub(crate) fn for_public_model(
-        &self,
-        model: PublicModelId,
-        contributed: &BTreeMap<&PublicModelId, &ModelPresentation>,
-    ) -> PublicModelDescriptor {
+    pub(crate) fn for_public_model(&self, model: PublicModelId) -> PublicModelDescriptor {
         match self {
             Self::Native(payload) => PublicModelDescriptor::Native {
                 model,
                 payload: payload.clone(),
             },
             Self::Adapted(presentation) => {
-                let presentation = contributed.get(&model).copied().unwrap_or(presentation);
                 PublicModelDescriptor::Adapted(PublicModelProfile::new(model, presentation.clone()))
             }
         }

@@ -10,10 +10,7 @@ use gateway_core::{
     routing::{AccountGroupId, ProviderKind},
 };
 
-use super::{
-    AdminModelError, Revision, account_groups::AccountGroupRef,
-    plugin_resources::PluginResourceOwner,
-};
+use super::{AdminModelError, Revision, account_groups::AccountGroupRef};
 
 pub type ProviderRequestProfileOverrides =
     BTreeMap<ProviderKind, gateway_core::account::OpaqueProviderData>;
@@ -289,13 +286,6 @@ pub struct UpdateClientKeyBudgetLimits {
     pub id: ClientApiKeyId,
     pub daily_limit_usd: Option<gateway_core::metering::Decimal>,
     pub weekly_limit_usd: Option<gateway_core::metering::Decimal>,
-}
-
-/// 预算变更的调用来源；插件身份由 Runtime 给出，不能从插件请求反序列化
-#[derive(Debug, Clone)]
-pub enum ClientKeyBudgetMutationOrigin {
-    Admin,
-    Plugin(PluginResourceOwner),
 }
 
 /// 删除 Client Key

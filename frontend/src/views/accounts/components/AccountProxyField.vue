@@ -34,9 +34,8 @@ const options = computed(() => [
       ]
     : []),
   {
-    label: t('accounts.proxy.directConnection'),
+    label: t('accounts.proxy.direct'),
     value: 'direct',
-    description: t('accounts.proxy.notUsingProxy'),
   },
   ...proxies.value.map(proxy => ({
     label: `${proxy.name.trim() || proxy.endpoint}${!proxy.enabled
@@ -77,12 +76,12 @@ const selectedProxy = computed(() => proxies.value.find(proxy => proxy.id === se
 const testTarget = computed(() => {
   if (props.disabled)
     return null
-  // 禁用代理的账号实际走直连，不把该代理自身的测试结果当成账号出口
+  // 禁用代理的账号使用直连出口，不把该代理自身的测试结果当成账号出口
   if (selection.value === 'direct' || selectedProxy.value?.enabled === false)
     return 'direct' as const
   return selectedProxy.value ?? null
 })
-const { result, directResult, testing, test } = useAccountProxyTest({
+const { result, defaultResult, testing, test } = useAccountProxyTest({
   target: () => testTarget.value,
   accountId: () => props.accountId,
   onConflict: loadProxies,
@@ -92,16 +91,16 @@ const { result, directResult, testing, test } = useAccountProxyTest({
       : proxy)
   },
 })
-// 代理复用目录中的最近测试，直连结果只保留在当前账号的编辑过程
+// 代理复用目录中的最近测试，直连出口结果只保留在当前账号的编辑过程
 const optionTests = computed<Record<string, OutboundProxyTest | null>>(() => ({
   ...Object.fromEntries(proxies.value.map(proxy => [
     proxy.id,
     proxy.enabled ? proxy.lastTest : null,
   ])),
-  direct: directResult.value,
+  direct: defaultResult.value,
 }))
 const selectedTest = computed(() => result.value ?? (testTarget.value === 'direct'
-  ? directResult.value
+  ? defaultResult.value
   : optionTests.value[selection.value]))
 const testHint = computed(() => selectedProxy.value?.enabled === false
   ? t('accounts.proxy.disabledUsesDirect')
@@ -116,14 +115,14 @@ const testHint = computed(() => selectedProxy.value?.enabled === false
       <div class="flex min-w-0 gap-2">
         <div class="relative min-w-0 flex-1">
           <!-- 为框内测试结果预留空间，避免遮挡代理文本和下拉箭头 -->
-          <ZSelect v-model="selection" class="w-full" :class="{ '[&_[role=combobox]]:pr-28': selectedTest?.success }" :options="options" :disabled="disabled || loading" :aria-label="t('accounts.proxy.outboundTunnel')">
+          <ZSelect v-model="selection" class="w-full" :class="{ '**:[[role=combobox]]:pr-28': selectedTest?.success }" :options="options" :disabled="disabled || loading" :aria-label="t('accounts.proxy.outboundTunnel')">
             <template #option="{ option, selected }">
               <span class="min-w-0 truncate" :class="option.description ? 'max-w-1/2 shrink-0' : 'flex-1'">{{ option.label }}</span>
               <span v-if="option.description" class="min-w-0 flex-1 truncate font-normal" :class="option.disabled ? 'text-z-text-disabled' : 'text-z-text-tertiary'" :title="option.description">
                 {{ option.description }}
               </span>
               <AccountProxyTestBadge class="ml-auto" :result="optionTests[option.value]" in-option />
-              <span v-if="!selected" class="size-[15px] shrink-0" aria-hidden="true" />
+              <span v-if="!selected" class="size-3.75 shrink-0" aria-hidden="true" />
             </template>
           </ZSelect>
           <div v-if="selectedTest?.success" class="absolute inset-y-0 right-9 flex items-center">

@@ -24,7 +24,7 @@ use gateway_core::error::{
     ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind, ProviderError, ProviderErrorKind,
 };
 use gateway_core::event::{ProtocolWireEvent, ProviderEvent, ProviderResponseHeader};
-use gateway_core::operation::{ImageRequestKind, Operation, OperationKind};
+use gateway_core::operation::{ImageRequestKind, Operation};
 use gateway_core::routing::PublicModelId;
 use gateway_core::upstream::UpstreamSendState;
 use serde_json::{Value, json};
@@ -51,7 +51,6 @@ struct ImageExecution {
     committed_statuses: Arc<Mutex<Vec<u16>>>,
     error_statuses: Arc<Mutex<Vec<u16>>>,
     fail_with_upstream_response: bool,
-    middleware: Option<Arc<crate::openai::middleware::RequestMiddleware>>,
 }
 
 impl ImageExecution {
@@ -62,7 +61,6 @@ impl ImageExecution {
             committed_statuses: Arc::new(Mutex::new(Vec::new())),
             error_statuses: Arc::new(Mutex::new(Vec::new())),
             fail_with_upstream_response: false,
-            middleware: None,
         })
     }
 
@@ -73,7 +71,6 @@ impl ImageExecution {
             committed_statuses: Arc::new(Mutex::new(Vec::new())),
             error_statuses: Arc::new(Mutex::new(Vec::new())),
             fail_with_upstream_response: true,
-            middleware: None,
         })
     }
 
@@ -90,13 +87,6 @@ impl ImageExecution {
 }
 
 impl ExecutionService for ImageExecution {
-    fn middleware_plan(
-        &self,
-        _: &gateway_core::engine::execution::PreparedRootExecution,
-    ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan> {
-        self.middleware.as_ref().map(|plan| plan.frozen())
-    }
-
     fn authenticate(
         &self,
         plaintext: &str,
@@ -263,13 +253,7 @@ impl ExecutionSession for ImageSession {
 
 #[tokio::test]
 async fn image_json_routes_should_preserve_both_directions_without_decoding() {
-    let mut execution = ImageExecution::new();
-    let middleware = Arc::new(crate::openai::middleware::RequestMiddleware {
-        expected_operation: Some(OperationKind::GenerateImage),
-        committed_statuses: Some(execution.committed_statuses.clone()),
-        ..Default::default()
-    });
-    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware.clone());
+    let execution = ImageExecution::new();
     let router = api_router(execution.clone()).await;
     let cases = [
         (
@@ -308,7 +292,6 @@ async fn image_json_routes_should_preserve_both_directions_without_decoding() {
             .await
             .expect("image response");
         assert_eq!(response.status(), StatusCode::CREATED);
-        assert_eq!(response.headers()["x-request-middleware"], "applied");
         assert_eq!(response.headers()["x-request-id"], "req_images_test");
         assert_eq!(
             response.headers()["x-gateway-request-id"],
@@ -326,10 +309,6 @@ async fn image_json_routes_should_preserve_both_directions_without_decoding() {
 
     let captured = execution.captured();
     assert_eq!(captured.len(), cases.len());
-    assert_eq!(
-        *middleware.endpoints.lock().unwrap(),
-        vec!["/v1/images/generations", "/v1/images/edits"]
-    );
     for (captured, (endpoint, kind, _, body)) in captured.iter().zip(cases.iter()) {
         assert_eq!(captured.provider, "openai");
         assert_eq!(captured.endpoint, *endpoint);

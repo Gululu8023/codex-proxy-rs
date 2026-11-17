@@ -1,6 +1,6 @@
 //! Codex OAuth 搜索历史缺少工具声明时的临时兼容
 
-use gateway_core::engine::middleware::MiddlewareHeader;
+use gateway_core::engine::middleware::RequestHeader;
 use gateway_protocol::openai::X_OPENAI_INTERNAL_CODEX_RESPONSES_LITE_HEADER;
 use serde_json::{Map, Value, json};
 
@@ -12,7 +12,7 @@ use super::search_tools::tools_declare_search;
 pub(super) fn normalize_search_history(
     body: &mut Map<String, Value>,
     responses_lite: bool,
-    middleware_headers: &[MiddlewareHeader],
+    middleware_headers: &[RequestHeader],
     request_id: &str,
 ) {
     // 按最终请求头选择声明位置，中间件可以覆盖入站 Lite 标记

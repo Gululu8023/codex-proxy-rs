@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import type { AccountErrorReason, AccountProtectionRule, AccountStatus } from '@/api'
+import type { AccountErrorReason, AccountQuota, AccountStatus } from '@/api'
 
 import { ZPopover, ZScrollbar } from '@codex-proxy/ui'
 import { computed } from 'vue'
@@ -10,13 +10,11 @@ import { useStatusClock } from './useStatusClock'
 
 const props = withDefaults(
   defineProps<{
+    quota?: AccountQuota
     status: AccountStatus
     errorReason?: AccountErrorReason | null
     errorMessage?: string | null
     rateLimitRecoveryDisplay?: string | null
-    rateLimitReason?: 'upstream_rate_limit' | 'error_protection' | null
-    protectionRules?: AccountProtectionRule[]
-    recoveryProbeRequired?: boolean
     nextRefreshAt?: string | null
     nextRefreshAtDisplay?: string | null
     variant?: 'inline' | 'pill'
@@ -25,9 +23,6 @@ const props = withDefaults(
     errorReason: null,
     errorMessage: null,
     rateLimitRecoveryDisplay: null,
-    rateLimitReason: null,
-    protectionRules: () => [],
-    recoveryProbeRequired: false,
     nextRefreshAt: null,
     nextRefreshAtDisplay: null,
     variant: 'inline',
@@ -39,13 +34,11 @@ const { t } = useI18n({ useScope: 'global' })
 const now = useStatusClock()
 const presentation = computed(() =>
   resolveAccountStatusPresentation({
+    quota: props.quota,
     status: props.status,
     errorReason: props.errorReason,
     errorMessage: props.errorMessage,
     rateLimitRecoveryDisplay: props.rateLimitRecoveryDisplay,
-    rateLimitReason: props.rateLimitReason,
-    protectionRules: props.protectionRules,
-    recoveryProbeRequired: props.recoveryProbeRequired,
     nextRefreshAt: props.nextRefreshAt,
     nextRefreshAtDisplay: props.nextRefreshAtDisplay,
     now: now.value.getTime(),
@@ -113,33 +106,13 @@ const presentation = computed(() =>
           {{ presentation.description }}
         </p>
 
-        <div v-if="presentation.protectionRules.length" class="grid gap-1.5">
-          <span class="text-z-xs font-emphasis text-z-text-tertiary">{{ t('accounts.status.matchedProtectionRules') }}</span>
-          <ul class="m-0 list-none space-y-1 p-0 text-z-text">
-            <li v-for="rule in presentation.protectionRules" :key="rule.id" class="wrap-anywhere">
-              {{ rule.name }}
-            </li>
-          </ul>
-        </div>
-
         <div
-          v-if="presentation.rateLimitRecovery"
+          v-for="time in presentation.times"
+          :key="time.key"
           class="flex items-center justify-between gap-3 rounded-z bg-z-fill-quaternary px-3 py-2"
         >
-          <span class="font-heavy text-z-text-tertiary">{{ presentation.recoveryTimeLabel }}</span>
-          <span class="font-mono font-emphasis tabular-nums text-z-text">
-            {{ presentation.rateLimitRecovery }}
-          </span>
-        </div>
-
-        <div
-          v-if="presentation.nextRefreshDisplay"
-          class="flex items-center justify-between gap-3 rounded-z bg-z-fill-quaternary px-3 py-2"
-        >
-          <span class="font-heavy text-z-text-tertiary">{{ t('accounts.status.tryNextTime') }}</span>
-          <span class="font-mono font-emphasis tabular-nums text-z-text">
-            {{ presentation.nextRefreshDisplay }}
-          </span>
+          <span class="font-heavy text-z-text-tertiary">{{ time.label }}</span>
+          <span class="font-mono font-emphasis tabular-nums text-z-text">{{ time.value }}</span>
         </div>
 
         <div class="rounded-z bg-z-fill-quaternary px-3 py-2.5">

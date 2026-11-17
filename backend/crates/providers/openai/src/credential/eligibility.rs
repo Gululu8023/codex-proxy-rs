@@ -27,17 +27,6 @@ impl<'a> CodexSelectionModel<'a> {
             // Live 绑定 ChatGPT OAuth 身份；API Key 不套用 ChatGPT 套餐资格
             return !matches!(self, Self::Live(_));
         }
-        // API Key 兼容上游可以提供 Grok；ChatGPT OAuth 不能因共用 Provider 被选中
-        // 使用路由映射后的模型，不限制未知别名或尚未被目录收录的 OpenAI 模型
-        if self.model().is_some_and(|model| {
-            let model = model.rsplit('/').next().unwrap_or(model);
-            model.eq_ignore_ascii_case("grok")
-                || model
-                    .get(..5)
-                    .is_some_and(|prefix| prefix.eq_ignore_ascii_case("grok-"))
-        }) {
-            return false;
-        }
         // Images 与 Live 只排除明确的 Free，不把未知套餐推断为 Free
         // Images 对齐官方 Codex 的 image_generation_available
         // https://github.com/openai/codex/commit/0a0a9b6c8f

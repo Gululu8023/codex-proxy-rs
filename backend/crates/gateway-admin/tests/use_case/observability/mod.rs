@@ -1412,6 +1412,14 @@ impl SettingsStore for FixtureSettingsStore {
             rotation_strategy: RotationStrategy::Smart,
             updated_at: Utc::now(),
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                anthropic_model_mappings: Default::default(),
+                anthropic_account_affinity: Default::default(),
+                anthropic_session_affinity_ttl_hours: 24,
+                quota_reset_window_weights: Default::default(),
+                min_claude_code_version: None,
+                reset_credit_on_low_weekly_quota: false,
+                prompt_guard: Default::default(),
+                claude_public_url: String::new(),
                 codex_privacy_policy: Default::default(),
                 request_location_enabled: false,
                 request_location: Default::default(),
@@ -1435,7 +1443,6 @@ impl SettingsStore for FixtureSettingsStore {
                 usage_retention_days: 31,
                 ops_event_retention_days: 30,
                 audit_retention_days: 30,
-                account_error_protection: gateway_core::account::AccountErrorProtection::default(),
                 account_warmup_enabled: false,
                 account_warmup_cron: "0 8 * * *".to_owned(),
                 account_warmup_model: None,
@@ -1518,6 +1525,8 @@ fn total_record(
     now: DateTime<Utc>,
 ) -> UsageListRecord {
     UsageListRecord {
+        has_upstream_error: false,
+        upstream_status_code: None,
         provider_account_upstream_peer: None,
         error_code: None,
         error_message: None,

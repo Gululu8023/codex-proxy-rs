@@ -11,18 +11,10 @@ pub(crate) fn push_usage_filter(
     filter: &UsageRecordFilter,
     alias: &str,
 ) {
-    for (column, value) in [
-        ("client_api_key_name_snapshot", &filter.client_api_key_name),
-        (
-            "provider_account_name_snapshot",
-            &filter.provider_account_name,
-        ),
-    ] {
-        if let Some(value) = value {
-            query.push(format!(" and {alias}.{column} like "));
-            query.push_bind(literal_contains_pattern(value));
-            query.push(" escape '\\'");
-        }
+    if let Some(value) = &filter.client_api_key_name {
+        query.push(format!(" and {alias}.client_api_key_name_snapshot like "));
+        query.push_bind(literal_contains_pattern(value));
+        query.push(" escape '\\'");
     }
     if let Some(value) = &filter.client_api_key_ref {
         query.push(format!(" and {alias}.client_api_key_ref = "));
@@ -51,11 +43,24 @@ pub(crate) fn push_usage_filter(
         query.push_bind(value.clone());
         query.push(")");
     }
-    if let Some(value) = &filter.model_contains {
+    // 名称与邮箱只读取请求历史快照；不关联当前账号，确保改名或删除不改变历史结果
+    for (value, first, second) in [
+        (
+            &filter.provider_account_search,
+            "provider_account_name_snapshot",
+            "provider_account_email_snapshot",
+        ),
+        (
+            &filter.model_contains,
+            "requested_model_id",
+            "upstream_model_id",
+        ),
+    ] {
+        let Some(value) = value else { continue };
         let pattern = literal_contains_pattern(value);
-        query.push(format!(" and ({alias}.requested_model_id like "));
+        query.push(format!(" and ({alias}.{first} like "));
         query.push_bind(pattern.clone());
-        query.push(format!(" escape '\\' or {alias}.upstream_model_id like "));
+        query.push(format!(" escape '\\' or {alias}.{second} like "));
         query.push_bind(pattern);
         query.push(" escape '\\')");
     }
@@ -125,14 +130,18 @@ pub(crate) fn push_usage_filter(
 
 pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
     "select mr.id, mr.outcome, mr.provider_error_code as error_code, mr.error_message, mr.client_status_code, mr.client_api_key_name_snapshot as client_api_key_name, mr.endpoint, mr.client_transport, mr.requested_model_id,
-            mr.error_kind,
-            case when pg_input_is_valid(mr.error_details, 'jsonb') then
-              case when jsonb_typeof(mr.error_details::jsonb -> 'upstream') = 'string'
-                and pg_input_is_valid(mr.error_details::jsonb ->> 'upstream', 'jsonb') then
-                (select case when jsonb_array_length(codes) = 1 then codes ->> 0 end
-                 from jsonb_path_query_array((mr.error_details::jsonb ->> 'upstream')::jsonb,
-                   '$ ? (@.type == \"websocket.close\").code ? (@.type() == \"number\")') as codes)
-              end
+            mr.error_kind, mr.upstream_status_code,
+            exists (
+              select 1 from (values
+                (saved_error.body -> 'code'),
+                (saved_error.body -> 'type'),
+                (saved_error.body -> 'message')
+              ) as field(value)
+              where jsonb_typeof(field.value) = 'string' and field.value <> '\"\"'::jsonb
+            ) as has_upstream_error,
+            case when saved_upstream.body ->> 'type' = 'websocket.close'
+              and jsonb_typeof(saved_upstream.body -> 'code') = 'number'
+              then saved_upstream.body ->> 'code'
             end as websocket_close_code,
             mr.continuation_unavailable_reason, mr.upstream_connection_exit_reason,
             (mr.recovery_request_id is not null and mr.recovered_at is not null) as recovered,
@@ -155,7 +164,18 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             host(mr.client_ip) as client_ip, mr.user_agent,
             mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
             mr.started_at
-     from model_request_observations mr";
+     from model_request_observations mr
+     cross join lateral (
+       select case when pg_input_is_valid(mr.error_details, 'jsonb') then
+         case when jsonb_typeof(mr.error_details::jsonb -> 'upstream') = 'string'
+           and pg_input_is_valid(mr.error_details::jsonb ->> 'upstream', 'jsonb')
+           then (mr.error_details::jsonb ->> 'upstream')::jsonb
+         end
+       end as body
+     ) saved_upstream
+     cross join lateral (
+       select coalesce(saved_upstream.body -> 'error', saved_upstream.body #> '{response,error}') as body
+     ) saved_error";
 
 pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
     "select mr.id, mr.client_api_key_ref, mr.config_revision,
@@ -636,7 +656,7 @@ pub(crate) fn intermediate_attempt_from_row(
         upstream_transport: None,
         upstream_send_state: None,
         outcome: admin_observability::RequestOutcome::Failed,
-        downstream_committed: false,
+        downstream_committed: None,
         status_code: optional_status(row, "status_code")?,
         provider_error_code: get(row, "provider_error_code")?,
         failure_kind: get(row, "failure_kind")?,
@@ -673,7 +693,7 @@ pub(crate) fn final_attempt_from_request(request: &UsageRecord) -> UsageAttemptO
         upstream_transport: request.upstream_transport.clone(),
         upstream_send_state: Some(request.upstream_send_state.clone()),
         outcome: request.outcome.clone(),
-        downstream_committed: request.downstream_committed_at.is_some(),
+        downstream_committed: Some(request.downstream_committed_at.is_some()),
         status_code: request.upstream_status_code.or(request.client_status_code),
         provider_error_code: request.provider_error_code.clone(),
         failure_kind: request.error_kind.clone(),

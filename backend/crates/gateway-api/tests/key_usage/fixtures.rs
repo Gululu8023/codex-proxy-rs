@@ -100,6 +100,8 @@ pub(super) async fn fixture() -> AdminTestFixture {
 
 fn usage_record() -> UsageListRecord {
     UsageListRecord {
+        has_upstream_error: false,
+        upstream_status_code: None,
         provider_account_upstream_peer: None,
         error_code: None,
         error_message: None,

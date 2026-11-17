@@ -15,13 +15,14 @@ pub mod account_groups;
 pub mod accounts;
 pub mod auth;
 pub mod backups;
+mod claude;
 pub mod client_keys;
 mod compression;
 pub(crate) mod diagnostics;
 mod extract;
 pub mod observability;
-mod plugins;
 pub mod presenter;
+mod prompt_guard;
 pub mod proxies;
 pub mod settings;
 pub mod system;
@@ -35,7 +36,7 @@ pub use wire::{
 };
 
 pub(crate) fn model_router() -> Router<crate::ApiState> {
-    plugins::model_router().layer(middleware::map_response(no_store))
+    claude::router().layer(middleware::map_response(no_store))
 }
 
 /// 构造管理用例路由；模型执行桥由完整 API 组合单独装配
@@ -46,7 +47,6 @@ where
     Router::new()
         .merge(account_groups::router::<S>())
         .merge(proxies::router::<S>())
-        .merge(plugins::router::<S>())
         .merge(accounts::router::<S>())
         .merge(backups::router::<S>())
         .merge(client_keys::router::<S>())
@@ -61,7 +61,6 @@ where
                 .quality(CompressionLevel::Fastest)
                 .compress_when(compression::AdminJson),
         )
-        .merge(plugins::public_router().method_not_allowed_fallback(method_not_allowed))
         .layer(middleware::map_response(no_store))
 }
 

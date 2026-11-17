@@ -4,8 +4,6 @@ set -euo pipefail
 APP_NAME="codex-proxy-rs"
 VERSION_FILE="release/version.yaml"
 NOTES_FILE="release/notes.md"
-PLUGIN_DEPRECATIONS_FILE="backend/crates/gateway-plugin/runtime/plugin-api-deprecations.json"
-PLUGIN_COMPATIBILITY_FILE="backend/crates/gateway-plugin/runtime/plugin-host-compatibility.json"
 TAG_PREFIX="v"
 SIGNATURE="Co-authored-by: Codex <noreply@openai.com>"
 
@@ -152,20 +150,14 @@ if [[ "$local_head" != "$upstream_head" && "$merge_base" != "$upstream_head" ]];
 fi
 
 if [[ "$check_only" == true ]]; then
-  # 预检调用与正式更新相同的纯函数，不写回兼容窗口
-  ruby -r './backend/crates/gateway-plugin/runtime/plugin-api-lifecycle' -e '
-    deprecations, compatibility, version = ARGV
-    PluginApiLifecycle.advance(JSON.parse(File.read(deprecations)), JSON.parse(File.read(compatibility)), version)
-  ' "$PLUGIN_DEPRECATIONS_FILE" "$PLUGIN_COMPATIBILITY_FILE" "$version"
   echo "Preflight passed: $APP_NAME $version on $branch -> $repository ($remote_branch)"
   echo "No files, Git refs, or remote state changed. CI and release artifact validation still run after dispatch."
   exit 0
 fi
 
-ruby backend/crates/gateway-plugin/runtime/plugin-api-lifecycle.rb "$PLUGIN_DEPRECATIONS_FILE" "$PLUGIN_COMPATIBILITY_FILE" "$version"
 update_version_file "$version"
 
-git add -- "$VERSION_FILE" "$NOTES_FILE" "$PLUGIN_DEPRECATIONS_FILE"
+git add -- "$VERSION_FILE" "$NOTES_FILE"
 git commit \
   -m "chore: bump version to $version" \
   -m "$SIGNATURE"

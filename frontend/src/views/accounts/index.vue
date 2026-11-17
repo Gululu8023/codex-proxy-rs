@@ -22,6 +22,7 @@ import AccountConnectionTestModal from './components/AccountConnectionTestModal.
 import AccountEditModal from './components/AccountEditModal.vue'
 import AccountFilters from './components/AccountFilters.vue'
 import AccountIdentityCell from './components/AccountIdentityCell.vue'
+import AccountModelCatalogModal from './components/AccountModelCatalogModal.vue'
 import AccountOverviewCards from './components/AccountOverviewCards.vue'
 import AccountTableActions from './components/AccountTableActions.vue'
 import AccountUsagePanel from './components/AccountUsagePanel.vue'
@@ -36,6 +37,13 @@ import { accountColumns } from './constants'
 import { accountIdentityLabel } from './utils/accountIdentity'
 
 const { t } = useI18n({ useScope: 'global' })
+
+const catalogAccount = shallowRef<Account | null>(null)
+const showModelCatalog = shallowRef(false)
+function openModelCatalog(account: Account) {
+  catalogAccount.value = account
+  showModelCatalog.value = true
+}
 
 const concurrencyAccount = shallowRef<Account | null>(null)
 const showConcurrency = shallowRef(false)
@@ -313,13 +321,11 @@ const {
 
             <template #status="{ row }">
               <AccountStatusBadge
+                :quota="row.quota"
                 :status="row.status"
                 :error-reason="row.errorReason"
                 :error-message="row.errorMessage"
                 :rate-limit-recovery-display="row.quota.rateLimitRecoveryDisplay"
-                :rate-limit-reason="row.quota.rateLimitReason"
-                :protection-rules="row.quota.protectionRules"
-                :recovery-probe-required="row.quota.recoveryProbeRequired"
                 :next-refresh-at="row.nextRefreshAt"
                 :next-refresh-at-display="row.nextRefreshAtDisplay"
               />
@@ -357,6 +363,7 @@ const {
                 @edit="openAccountEdit"
                 @delete="requestDeleteAccount"
                 @download-model-catalog="handleDownloadModelCatalog"
+                @view-model-catalog="openModelCatalog"
                 @recover="handleRecover"
                 @refresh="handleRefresh"
                 @reauthorize="openReauthorizeAccount"
@@ -389,6 +396,7 @@ const {
     </ZCard>
 
     <AccountConcurrencyModal v-model="showConcurrency" :account="concurrencyAccount" />
+    <AccountModelCatalogModal v-model="showModelCatalog" :account="catalogAccount" />
 
     <AccountConnectionTestModal
       v-model="showConnectionTestModal"

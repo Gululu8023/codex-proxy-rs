@@ -13,7 +13,7 @@ fn source_selects_supported_providers_and_preserves_free_prices() {
             "invalid":{"modalities":{"output":["text"]},"cost":{"input":-1,"output":2}},
             "wrong-tier":{"modalities":{"output":["text"]},"cost":{"input":1,"output":2,"tiers":[{"tier":{"size":200000},"input":2,"output":4}]}}
         }},
-        "xai":{"models":{}},
+        "anthropic":{"models":{}},
         "unrelated":{"models":{"secret":{}}}
     });
     let result = decode_catalog(&serde_json::to_vec(&catalog).unwrap()).unwrap();
@@ -35,7 +35,7 @@ fn source_rejects_empty_partial_or_malformed_documents() {
     for document in [
         json!({}),
         json!({"openai":{"models":{}}}),
-        json!({"openai":{"models":{}},"xai":{"models":{}}}),
+        json!({"openai":{"models":{}},"anthropic":{"models":{}}}),
     ] {
         assert!(decode_catalog(&serde_json::to_vec(&document).unwrap()).is_err());
     }

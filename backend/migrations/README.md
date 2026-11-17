@@ -6,6 +6,16 @@ sqlx 在服务启动、监听请求之前按编号执行迁移，并把文件 ch
 迁移按递增编号组织，完整清单以本目录 SQL 文件和 `.frozen-sha256` 为准。
 业务状态与存储职责见[状态所有权](../../docs/architecture.md#8-状态所有权)，离线恢复见[部署文档](../../deploy/README.md#人工恢复数据库)
 
+## 二开初始化基线
+
+`0001_cprs_initial.sql` 是 CPRS 独立发行线的初始化基线，合并原 `0001`～`0042` 在空库上执行后的最终结构和必要初始数据。
+它只支持全新数据库，不兼容源仓库或旧定制版的 `_sqlx_migrations` 历史；切换时须重建数据库，不能通过改写 checksum 或删除迁移记录强行复用旧库。
+旧版完整数据库备份同样不能直接恢复给新基线程序使用，应配套旧版程序恢复。
+
+基线保留调用方的 `search_path`，供正常部署及隔离 schema 使用；不包含 SQLx 自己管理的迁移表、数据库所有者、权限或实际业务数据。
+初始化时间与互联节点 UUID 在建库时生成，不固定为合并时的值。历史数据回填已折叠为最终默认配置，不再读取旧迁移记录。
+后续变更从 `0002` 开始追加。CI 仅允许从旧 `0001_initial.sql` 到此基线的一次发行线切换；基线进入目标分支后恢复完整的只增不改校验。
+
 ## 命名约定
 
 - 表名使用小写 `snake_case`，实体集合使用复数，配置与单例状态使用自然语义，如 `runtime_settings`、`request_analytics_build_state`
@@ -34,26 +44,4 @@ sha256sum --check --strict .frozen-sha256
 
 ## 本地测试库
 
-`gateway-store` 的 PostgreSQL/Redis 集成测试使用以下环境变量；所需测试服务未配置时，本地相关测试跳过，CI 直接失败：
-
-```bash
-export CPR_TEST_DATABASE_URL='postgres://<user>:<password>@127.0.0.1:5432/<db>'
-export CPR_TEST_REDIS_URL='redis://:<password>@127.0.0.1:6379'
-```
-
-插件 Runtime 的真实子进程与持久化测试优先使用 `CPR_PLUGIN_TEST_DATABASE_URL` 和
-`CPR_PLUGIN_TEST_REDIS_URL`。设置插件数据库变量时必须同时提供对应 Redis 变量；未设置插件数据库变量时，
-使用上述标准测试服务。两种配置遵守相同的密码与隔离要求；缺少服务时的跳过和 CI 失败规则也相同
-
-测试自建随机 schema / key 前缀做隔离，但仍应使用专用开发或测试实例，不要连接生产库。
-凭据从自己的部署配置或 CI Secret 中读取，不要粘贴未脱敏的 `docker inspect` 输出。
-环境变量未设置导致的跳过不算数据库测试通过
-
-PostgreSQL 的临时 schema 测试连接使用异步提交，保留事务可见性、回滚和完整迁移检查
-需要验证数据库崩溃后的持久性时，使用独立数据库与生产连接配置，不复用这类 fixture
-
-运行包含 `StoreBundle` 初始化的完整集成测试时，两条测试 URL 都须包含密码，原始密码须满足
-[Store 密码要求](../../deploy/README.md#手动安装)，在测试 URL 中按 URL 规则编码。
-仅能连接数据库并不代表该初始化合同通过。专用服务使用对应测试密码，
-并在测试进程中清除 `CPR_DATABASE_URL`、`CPR_REDIS_URL`、`CPR_DATABASE_PASSWORD` 和
-`CPR_REDIS_PASSWORD`，避免启动配置被部署环境覆盖
+存储集成测试只连接专用 PostgreSQL 和 Redis，不能复用业务实例。测试从本目录的 CPRS 基线创建独立 schema，验证后清理自己的 schema；备份恢复另建临时数据库。所需环境变量、工具和运行命令见 [后端测试](../../docs/backend-testing.md)。

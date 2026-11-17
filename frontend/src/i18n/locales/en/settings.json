@@ -1,5 +1,9 @@
 {
   "settings": {
+    "cards": {
+      "codexOnly": "Codex only",
+      "reload": "Reload settings"
+    },
     "clientProfile": {
       "userAgent": "User agent",
       "clientIdentitySource": "Client identity source",
@@ -35,15 +39,7 @@
       "toBeChecked": "To be checked",
       "updateFailedUseLastVersion": "Update failed · Use the last version",
       "clientIdentityProvider": "Client identity provider",
-      "upstreamIdentityPlatform": "Upstream identity platform",
-      "clientId": "Client ID",
-      "operatingMode": "Operating mode",
-      "operatingSystem": "Operating system",
-      "cpuArchitecture": "CPU architecture",
-      "xaiClientIdentitySource": "xAI client identity source",
       "clientType": "Client type",
-      "grokCliVersion": "Grok CLI version",
-      "forExample": "For example: 1.0.13",
       "clientIdentity": "Client identity",
       "description": "Set the client type, version, and request headers the gateway sends upstream"
     },
@@ -150,6 +146,14 @@
       "unitLabel": "USD / 1M tokens"
     },
     "scheduling": {
+      "runtimeGroup": "Runtime signals",
+      "quotaGroup": "Quota",
+      "queueGroup": "Queue",
+      "windowMode": "Reset window weights",
+      "windowHelp": "Higher weights give a window more influence on the reset score; set a weight to 0 to ignore that window",
+      "fiveHour": "5 hours",
+      "weekly": "Weekly",
+      "monthly": "Monthly",
       "roundRobin": "Round robin",
       "autoReviewSlotsHelp": "Applies to Codex accounts only: with a regular concurrency limit of 10 and 3 auto review slots, up to 10 regular requests and 3 auto review requests can run independently",
       "autoReviewQueueHelp": "With dedicated slots, auto review uses a separate queue that may exceed account queue capacity, while total queue capacity, queue timeout, and API key limits still apply",
@@ -169,10 +173,12 @@
       },
       "enterValueFromToUpToOne": "Please enter a value from 0 to 10, up to one decimal place",
       "description": "Adjust account selection preferences",
-      "enabledHelp": "Applies when smart scheduling is enabled",
       "about": "About {label}",
       "zeroWeightHelp": "Set to 0 to exclude a factor from scoring",
       "weightsRequired": "At least one weight must be greater than 0"
+    },
+    "scopes": {
+      "label": "Settings scope"
     },
     "affinity": {
       "modes": {
@@ -181,7 +187,8 @@
         "strict": "Strict",
         "relaxedHelp": "Relaxed: use the scheduling policy without preferring the session's primary account",
         "preferredHelp": "Preferred: reuse the primary account, spill over during brief congestion, and migrate the session binding if disabled or persistently unavailable",
-        "strictHelp": "Strict: use one account per session, child threads wait and follow the parent thread's account switches"
+        "strictHelp": "Strict: use one account per session, child threads wait and follow the parent thread's account switches",
+        "claudeStrictHelp": "Strict: wait for the bound account when busy; rebind if it becomes ineligible. Requests without a session ID follow the scheduling policy."
       },
       "title": "Session affinity",
       "mode": "Mode",
@@ -200,13 +207,13 @@
       "description": "Try to start quota windows for idle Codex OAuth accounts",
       "enableWarmup": "Enable warmup",
       "cronExpression": "Cron expression",
-      "cronHelp": "Five fields: minute hour day month weekday",
+      "cronHelp": "Separate multiple Cron expressions with semicolons",
       "modelLabel": "Warmup model",
       "modelHelp": "Required when enabled, use an available model",
       "modelPlaceholder": "Enter model name",
       "helpTitle": "About account warmup",
       "help": "Sends a lightweight request to available Codex OAuth accounts, skipping exhausted quotas and confirmed active windows, accounts at 0% may be warmed up, activation is not guaranteed",
-      "cronExample": "Uses the deployment time zone, for example 0 8 * * MON-FRI runs at 08:00 on weekdays, at most once per minute"
+      "scheduleHelp": "Runs in the deployment time zone, once per matching minute"
     },
     "adminApiKey": {
       "adminApiKey": "Admin API key",
@@ -271,7 +278,9 @@
       "trySwitch": "Try another account",
       "autoReview": {
         "label": "Reserved auto review slots",
-        "description": "Extra slots per Codex account, 0 shares regular concurrency",
+        "cardDescription": "Reserve separate capacity for automatic reviews",
+        "slotsLabel": "Slots per account",
+        "description": "0 shares regular concurrency",
         "helpTitle": "About auto review concurrency"
       },
       "retryAfter": {
@@ -298,17 +307,21 @@
       "retentionDaysLabel": "History retention (d)"
     },
     "retentionDays": "Retention (d)",
-    "enterDays": "Please enter 1–31 days",
+    "enterDays": "Enter retention days",
     "day": "d",
     "location": {
       "requestLocationOverride": "Request location override",
-      "description": "Override time zone and location fields in Codex requests, custom locations on account proxies take precedence",
+      "description": "Shared by Codex and Claude. Overrides Codex location and time zone fields and native Claude web search location. Account or proxy locations take priority; the outbound IP does not change.",
       "enableLocationOverlay": "Enable location overlay"
     },
     "quotaReset": {
       "title": "Quota reset credits",
       "enableHelp": "Enable automatic use in the account's Quota reset panel",
-      "description": "Global settings for accounts with automatic use enabled",
+      "description": "How long before expiry to use a reset credit",
+      "timing": "When to use a credit",
+      "expiryMode": "Before expiry",
+      "weeklyMode": "By weekly quota",
+      "earlyThresholdHelp": "Use at or below this percentage, leave blank or enter 0 to wait until exhausted",
       "thresholdHelp": "Skip automatic use when the remaining quota exceeds this threshold, leave blank for no limit",
       "weeklyQuotaLimit": "Reset credit remaining weekly quota threshold"
     },
@@ -317,10 +330,10 @@
     "remainingWeeklyQuotaLimit": "Remaining weekly quota limit (%)",
     "responseLimit": {
       "requestBodyLimit": "Request body limit",
-      "description": "Limit decompressed request bodies for the Responses API",
-      "maximumSizeAfterDecompression": "Maximum size after decompression",
+      "description": "Codex and Claude share this limit; compressed bodies are measured after decompression and uncompressed bodies by their original size",
+      "maximumSizeAfterDecompression": "Maximum request body size",
       "sizeHelp": "Higher limits allow larger images and conversation history, increasing memory use",
-      "maxSizeLabel": "Maximum decompressed request body size"
+      "maxSizeLabel": "Maximum request body size"
     },
     "rotation": {
       "title": "Scheduling",
@@ -328,15 +341,15 @@
       "smartSchedulingSettings": "Smart scheduling settings",
       "smartLabel": "Smart",
       "smartDescription": "Adjustable weights for load, remaining quota, health, and latency",
-      "quotaResetLabel": "Soonest reset",
+      "quotaResetLabel": "Quota scheduling",
       "quotaResetDescription": "Use remaining quota on accounts closest to reset",
       "roundRobinLabel": "Round robin",
       "roundRobinDescription": "Cycle through available accounts in order",
       "stickyLabel": "Sticky",
-      "stickyDescription": "Reuse the most recent account until unavailable"
+      "stickyDescription": "Reuse the most recent account until unavailable",
+      "quotaResetPrioritySettings": "Quota scheduling settings"
     },
     "access": {
-      "accessRestrictions": "Access restrictions",
       "deleteAdminApiKey": "Delete Admin API key",
       "deleteKeyDescription": "External systems will lose admin API access through this key",
       "areYouSureYouWantToDelete": "Are you sure you want to delete the current administrator API key? This operation will take effect immediately"
@@ -359,12 +372,14 @@
       "exclusions": "Excludes request details and logs",
       "backupRecords": "Backup records",
       "backupScopeDescription": "Backup scope description",
-      "contents": "Includes accounts, API keys, settings, plugins, and consumed quota",
+      "contents": "Includes accounts, API keys, settings, and consumed quota",
       "usageRetentionHourSummary": "Usage retention hour summary",
       "creating": "Creating",
       "createBackup": "Create",
       "noBackupRecordYet": "No backup record yet",
       "downloadBackup": "Download backup",
+      "downloadPrivacyStore": "Download Claude privacy store",
+      "privacyStoreSummary": "When the Claude privacy store is initialized, the veil mapping store is backed up too (.veil.tar.gz). The master key is not included and must be kept separately",
       "deleteBackup": "Delete backup",
       "deleteWarning": "The remote object and backup record will be deleted, this cannot be undone",
       "deleteConfirmation": "Delete this backup?",
@@ -464,11 +479,14 @@
       "codexClientUpgrade": "Codex client upgrade",
       "guideDescription": "Select a client to view its installation and upgrade instructions",
       "clientVersionRestrictions": "Client version restrictions",
+      "description": "Set minimum versions separately for Codex and Claude using the original client version in each request; leave empty for no restriction",
       "openGuide": "View installation and upgrade instructions",
       "codexDesktopMinimumVersion": "Codex Desktop minimum version",
       "onlyCheckDesktopVersionEG": "Only check the desktop version, e.g. 26.825.51511",
       "codexCliMinimumVersion": "Codex CLI minimum version",
-      "minimumVersionHelp": "Official clients' Core version (CLI, IDE, SDK), e.g. 0.152.0"
+      "minimumVersionHelp": "Official clients' Core version (CLI, IDE, SDK), e.g. 0.152.0",
+      "claudeCodeMinimumVersion": "Claude Code minimum version",
+      "claudeCodeMinimumVersionHelp": "Check recognized Claude Code clients' original version for CLI and IDE; leave empty for no restriction"
     },
     "privacy": {
       "preview": {
@@ -486,6 +504,7 @@
       "blockRequestFromBeingSent": "Reject request",
       "privacyPolicy": "Privacy policy",
       "description": "Normalize or remove private information in Codex requests using rules",
+      "claudeDescription": "Redact every Claude request and restore placeholders in responses",
       "enableRequestRules": "Enable request rules",
       "addRule": "Add rule",
       "addFromPreset": "Add from preset",
@@ -611,14 +630,13 @@
       "invalidBodyLimit": "Responses decompression limit must be a positive integer in MiB",
       "invalidQuotaThreshold": "Remaining weekly quota threshold must be an integer from 0 to 100, leave blank for no limit",
       "invalidResetLeadTime": "Reset credit lead time must be an integer from 1 to 1,440 minutes",
-      "invalidRetention": "History retention must be an integer from 1 to 31 days",
+      "invalidRetention": "History retention must be a positive integer",
       "invalidQueueSettings": "Queue capacity must be an integer from 0 to 1,000 and timeout from 1 to 120 seconds",
-      "invalidProbeModel": "The probe model must be at most 128 characters without control characters",
       "invalidWarmupCron": "Enter a valid Cron expression",
+      "warmupCronTooLong": "Keep all rules within 255 bytes",
       "warmupModelRequired": "Select a model to enable warmup",
       "invalidWarmupModel": "Warmup model name must not exceed 128 characters",
       "settingsSaved": "Settings saved",
-      "invalidProtectionSettings": "Use a failure threshold of 2–1,000, count validity of 60–3,600 seconds, and a cooldown of 300–604,800 seconds",
       "invalidRetryAfterLimit": "Upstream retry wait limit must be an integer from 0 to 4,294,967,295"
     },
     "page": {
@@ -638,86 +656,24 @@
         "leave": "Discard and leave",
         "stay": "Keep editing"
       },
-      "saveChanges": "Save",
-      "basicSettings": "Basic settings"
+      "saveChanges": "Save"
     },
-    "errorProtection": {
-      "title": "Error protection",
-      "description": "Pause account scheduling when failures matching your rules reach the threshold",
-      "enable": "Enable error protection",
-      "failureCountThreshold": "Failure threshold",
-      "thresholdHelp": "Matching failures accumulate across all rules",
-      "times": "times",
-      "countValidity": "Count validity",
-      "windowHelp": "Each matching failure renews the count, a successful call clears it",
-      "countValiditySeconds": "Count validity in seconds",
-      "cooldownTime": "Cooldown duration",
-      "cooldownHelp": "A failed probe starts another cooldown",
-      "cooldownTimeInSeconds": "Cooldown duration in seconds",
-      "recoveryProbeModel": "Recovery probe model",
-      "probeModelHelp": "Leave blank to use the first available model",
-      "requireSuccessfulProbe": "Require a successful probe",
-      "modelPlaceholder": "Select automatically",
-      "rules": "Matching rules",
-      "anyRule": "Count failures matching any rule",
-      "matchingHelpTitle": "How matching works",
-      "matchingHelp": "All conditions in a rule must match, any candidate value can match a condition, each failed attempt counts only once",
-      "missingHelp": "Missing fields differ from empty text, equality trims surrounding whitespace, ignore case applies to ASCII letters",
-      "addRule": "Add rule",
-      "emptyRules": "No rules yet, add a rule to choose which failures count",
-      "unnamedRule": "Unnamed rule",
-      "editRule": "Edit rule: {name}",
-      "removeRule": "Remove rule: {name}",
-      "ruleName": "Rule name",
-      "ruleNamePlaceholder": "Name this rule",
-      "allConditions": "Match all conditions",
-      "addCondition": "Add condition",
-      "removeCondition": "Remove condition",
-      "and": "AND",
-      "or": "OR",
-      "andSeparator": " AND ",
-      "orSeparator": " OR ",
-      "field": "Field",
-      "operator": "Match",
-      "fields": {
-        "provider": "Platform",
-        "status": "Status code",
-        "code": "Error code",
-        "type": "Error type",
-        "message": "Error message"
-      },
-      "operators": {
-        "equals": "Equals",
-        "contains": "Contains"
-      },
-      "valuePlaceholder": "Enter a value",
-      "valueLabel": "Candidate value {index}",
-      "missing": "Field missing",
-      "emptyText": "Empty text",
-      "conditionOptions": "Match options",
-      "caseInsensitive": "Ignore case",
-      "addValue": "Add alternative value",
-      "removeValue": "Remove value {index}",
-      "ignoreCase": "Ignore ASCII case",
-      "valuesHelp": "Any candidate value can match",
-      "conditionSummary": "{field} {operator} {values}",
-      "ignoreCaseSummary": "{summary} (ignore case)",
-      "validation": {
-        "required": "Add at least one valid rule before enabling protection",
-        "rules": "Use up to {max} rules",
-        "values": "Use 1–{max} candidate values",
-        "contains": "Contains requires nonblank message text and cannot match a missing field",
-        "valueLength": "Candidate values must be at most {max} characters",
-        "status": "Enter a status code from 100 to 599 or choose field missing",
-        "name": "Use a name of 1–{max} characters without surrounding whitespace or control characters",
-        "conditions": "Use 1–{max} conditions in each rule",
-        "errorCondition": "Add a status code, error code, error type, or error message condition",
-        "rule": "{name}: {error}",
-        "textBudget": "Rule text exceeds 64 KiB in UTF-8, shorten values or remove rules"
-      },
-      "moreValues": "{values} OR {count} more",
-      "messageHelp": "Contains checks the first 8 KiB of the error message, preserving complete characters, equals compares the full message, longer messages are not treated as missing",
-      "limitsHelp": "Up to 32 rules, 8 conditions per rule, and 16 values per condition, all rule text and the probe model share a 64 KiB UTF-8 limit"
+    "promptGuard": {
+      "enabled": "Enable prompt review",
+      "disabled": "Disabled",
+      "ready": "Local rules and candidate review enabled",
+      "candidate_review_unavailable": "Review node not configured: suspicious requests are blocked",
+      "url": "Review Chat Completions URL",
+      "model": "Review model",
+      "timeout": "Review timeout",
+      "threshold": "Blocking confidence",
+      "budget": "Review input limit (Unicode characters)",
+      "egress": "The review scope controls which content is sent. Codex uses original content; Claude uses redacted content. Nothing is sent when review is off.",
+      "clearKey": "Clear saved key"
+    },
+    "resetPriority": {
+      "description": "Rank by reset times and weights of the selected windows",
+      "windowHelp": "Weights control each window's relative influence; 0 ignores a window, and all zeros use the earliest valid reset time"
     }
   }
 }

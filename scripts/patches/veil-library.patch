@@ -1,0 +1,904 @@
+diff --git a/Cargo.toml b/Cargo.toml
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -21,6 +21,7 @@
+ aes-gcm = "0.10"
+ hkdf = "0.12"
+ rand = "0.8"
+-rusqlite = { version = "0.32", features = ["bundled"] }
++# 与宿主 SQLx 共用 SQLite 链接库，避免两个 links=sqlite3 版本冲突
++rusqlite = { version = "0.41.1", features = ["bundled"] }
+ hmac = "0.12"
+ zeroize = { version = "1.8", features = ["derive"] }
+diff --git a/crates/veil-engine/src/lib.rs b/crates/veil-engine/src/lib.rs
+index 4b0a3a7..78ff414 100644
+--- a/crates/veil-engine/src/lib.rs
++++ b/crates/veil-engine/src/lib.rs
+@@ -1,3 +1,4 @@
++pub mod anthropic;
+ pub mod binary;
+ pub mod builtin;
+ pub mod creator;
+diff --git a/crates/veil-engine/src/mapping.rs b/crates/veil-engine/src/mapping.rs
+index de32d7b..e5a26e8 100644
+--- a/crates/veil-engine/src/mapping.rs
++++ b/crates/veil-engine/src/mapping.rs
+@@ -8,6 +8,8 @@ use crate::placeholder::Placeholder;
+ 
+ #[derive(Debug, Error)]
+ pub enum StoreError {
++    #[error("mapping capacity exhausted")]
++    CapacityExceeded,
+     #[error("unavailable")]
+     Unavailable,
+     #[error("internal: {0}")]
+diff --git a/crates/veil-engine/src/rules.rs b/crates/veil-engine/src/rules.rs
+index 35adee3..1a1a4db 100644
+--- a/crates/veil-engine/src/rules.rs
++++ b/crates/veil-engine/src/rules.rs
+@@ -167,6 +167,15 @@ impl RuleSet {
+     }
+ 
+     pub fn find_hits(&self, text: &str) -> Vec<Hit> {
++        self.find_hits_inner(text, false).expect("permissive matching skips failed rules")
++    }
++
++    /// 严格出站调用不能把正则预算耗尽或执行失败当作未命中。
++    pub fn find_hits_strict(&self, text: &str) -> Result<Vec<Hit>, RuleMatchError> {
++        self.find_hits_inner(text, true)
++    }
++
++    fn find_hits_inner(&self, text: &str, strict: bool) -> Result<Vec<Hit>, RuleMatchError> {
+         let mut occupied = Occupied::default();
+         let mut hits = Vec::new();
+ 
+@@ -175,6 +184,7 @@ impl RuleSet {
+                 continue;
+             }
+             let Some(spans) = match_rule(rule, text, &occupied) else {
++                if strict { return Err(RuleMatchError); }
+                 continue;
+             };
+             commit_spans(
+@@ -188,10 +198,14 @@ impl RuleSet {
+         }
+ 
+         hits.sort_by_key(|hit| hit.start);
+-        hits
++        Ok(hits)
+     }
+ }
+ 
++#[derive(Debug, thiserror::Error)]
++#[error("rule evaluation failed")]
++pub struct RuleMatchError;
++
+ #[derive(Default)]
+ struct Occupied {
+     spans: Vec<(usize, usize)>,
+diff --git a/crates/veil-engine/src/sliding.rs b/crates/veil-engine/src/sliding.rs
+index 2b8fb2c..d0d45e2 100644
+--- a/crates/veil-engine/src/sliding.rs
++++ b/crates/veil-engine/src/sliding.rs
+@@ -10,6 +10,7 @@ pub struct RestoreWindow<'a, S: MappingStore + ?Sized> {
+     store: &'a S,
+     creator: Creator,
+     tail: String,
++    strict: bool,
+ }
+ 
+ impl<'a, S: MappingStore + ?Sized> RestoreWindow<'a, S> {
+@@ -18,9 +19,15 @@ impl<'a, S: MappingStore + ?Sized> RestoreWindow<'a, S> {
+             store,
+             creator,
+             tail: String::new(),
++            strict: false,
+         }
+     }
+ 
++    /// 流式恢复与非流式严格恢复使用相同的缺失语义。
++    pub fn new_strict(store: &'a S, creator: Creator) -> Self {
++        Self { strict: true, ..Self::new(store, creator) }
++    }
++
+     pub fn push(&mut self, s: &str) -> Result<String, WalkError> {
+         self.tail.push_str(s);
+         self.emit(false)
+@@ -61,8 +68,9 @@ impl<'a, S: MappingStore + ?Sized> RestoreWindow<'a, S> {
+         };
+         match self.store.lookup(&self.creator, &placeholder) {
+             Ok(Lookup::Hit(plaintext)) => Ok(plaintext),
++            Ok(Lookup::Miss) if self.strict => Err(WalkError::MissingMapping),
+             Ok(Lookup::Miss) => Ok(token.to_string()),
+-            Err(StoreError::Unavailable) | Err(StoreError::Internal(_)) => {
++            Err(StoreError::Unavailable | StoreError::Internal(_) | StoreError::CapacityExceeded) => {
+                 Err(WalkError::StoreUnavailable)
+             }
+         }
+diff --git a/crates/veil-engine/src/walk.rs b/crates/veil-engine/src/walk.rs
+index bd6f2c5..8cdf1e1 100644
+--- a/crates/veil-engine/src/walk.rs
++++ b/crates/veil-engine/src/walk.rs
+@@ -5,14 +5,24 @@ use crate::binary::should_skip_desensitize;
+ use crate::creator::Creator;
+ use crate::mapping::{Lookup, MappingStore, StoreError};
+ use crate::placeholder::{parse_placeholder, PLACEHOLDER_REGEX};
+-use crate::rules::RuleSet;
++use crate::rules::{Hit, RuleSet};
+ 
+ #[derive(Debug, Error)]
+ pub enum WalkError {
++    #[error("rule evaluation failed")]
++    RuleEvaluation,
+     #[error("mapping write failed")]
+     MappingWrite,
+     #[error("store unavailable")]
+     StoreUnavailable,
++    #[error("mapping is missing")]
++    MissingMapping,
++    #[error("mapping capacity exhausted")]
++    MappingCapacity,
++    #[error("invalid or incomplete stream")]
++    InvalidStream,
++    #[error("stream buffer limit exceeded")]
++    BufferLimit,
+ }
+ 
+ pub fn desensitize_json(
+@@ -35,7 +45,18 @@ pub fn restore_json(
+     creator: &Creator,
+ ) -> Result<Value, WalkError> {
+     map_string_values(None, value, &mut |_key, text| {
+-        restore_string(text, store, creator)
++        restore_string(text, store, creator, false)
++    })
++}
++
++/// 严格恢复用于需要保证工具参数可执行的调用方；缺失映射不能作为成功结果交付。
++pub fn restore_json_strict(
++    value: &Value,
++    store: &(impl MappingStore + ?Sized),
++    creator: &Creator,
++) -> Result<Value, WalkError> {
++    map_string_values(None, value, &mut |_key, text| {
++        restore_string(text, store, creator, true)
+     })
+ }
+ 
+@@ -88,7 +109,46 @@ fn desensitize_string(
+     store: &(impl MappingStore + ?Sized),
+     creator: &Creator,
+ ) -> Result<String, WalkError> {
+-    let hits = rules.find_hits(text);
++    replace_hits(text, rules.find_hits(text), store, creator)
++}
++
++/// 原生入口的普通文本属于客户端字面量，不应被当成可信的映射引用。
++/// 与规则命中的重叠区间合并，避免字面量保护破坏跨区间的敏感文本匹配。
++pub(crate) fn desensitize_literal_safe_string(
++    text: &str,
++    rules: &RuleSet,
++    store: &(impl MappingStore + ?Sized),
++    creator: &Creator,
++) -> Result<String, WalkError> {
++    let mut hits = rules.find_hits_strict(text).map_err(|_| WalkError::RuleEvaluation)?;
++    hits.extend(PLACEHOLDER_REGEX.find_iter(text).filter_map(|matched| {
++        parse_placeholder(matched.as_str())?;
++        Some(Hit {
++            start: matched.start(), end: matched.end(),
++            type_prefix: "LITERAL".to_string(), plaintext: matched.as_str().to_string(),
++        })
++    }));
++    hits.sort_by(|left, right| left.start.cmp(&right.start).then(right.end.cmp(&left.end)));
++    let mut merged: Vec<Hit> = Vec::with_capacity(hits.len());
++    for hit in hits {
++        if let Some(previous) = merged.last_mut() {
++            if hit.start < previous.end {
++                previous.end = previous.end.max(hit.end);
++                previous.plaintext = text[previous.start..previous.end].to_string();
++                continue;
++            }
++        }
++        merged.push(hit);
++    }
++    replace_hits(text, merged, store, creator)
++}
++
++fn replace_hits(
++    text: &str,
++    hits: Vec<Hit>,
++    store: &(impl MappingStore + ?Sized),
++    creator: &Creator,
++) -> Result<String, WalkError> {
+     if hits.is_empty() {
+         return Ok(text.to_string());
+     }
+@@ -96,16 +156,20 @@ fn desensitize_string(
+     for hit in hits.into_iter().rev() {
+         let placeholder = store
+             .get_or_insert(creator, &hit.type_prefix, &hit.plaintext)
+-            .map_err(|_| WalkError::MappingWrite)?;
++            .map_err(|error| match error {
++                StoreError::CapacityExceeded => WalkError::MappingCapacity,
++                StoreError::Unavailable | StoreError::Internal(_) => WalkError::MappingWrite,
++            })?;
+         out.replace_range(hit.start..hit.end, &placeholder.format());
+     }
+     Ok(out)
+ }
+ 
+-fn restore_string(
++pub(crate) fn restore_string(
+     text: &str,
+     store: &(impl MappingStore + ?Sized),
+     creator: &Creator,
++    strict: bool,
+ ) -> Result<String, WalkError> {
+     let matches: Vec<_> = PLACEHOLDER_REGEX.find_iter(text).collect();
+     if matches.is_empty() {
+@@ -120,8 +184,9 @@ fn restore_string(
+             Ok(Lookup::Hit(plaintext)) => {
+                 out.replace_range(m.start()..m.end(), &plaintext);
+             }
++            Ok(Lookup::Miss) if strict => return Err(WalkError::MissingMapping),
+             Ok(Lookup::Miss) => {}
+-            Err(StoreError::Unavailable) | Err(StoreError::Internal(_)) => {
++            Err(StoreError::Unavailable | StoreError::Internal(_) | StoreError::CapacityExceeded) => {
+                 return Err(WalkError::StoreUnavailable);
+             }
+         }
+diff --git a/crates/veil-store/src/sqlite.rs b/crates/veil-store/src/sqlite.rs
+index bd73ac5..c1108cd 100644
+--- a/crates/veil-store/src/sqlite.rs
++++ b/crates/veil-store/src/sqlite.rs
+@@ -35,6 +35,7 @@ pub struct SqliteStore {
+     keys: DerivedKeys,
+     ttl: Duration,
+     cap: u64,
++    max_rows: Option<u64>,
+ }
+ 
+ impl SqliteStore {
+@@ -42,11 +43,19 @@ impl SqliteStore {
+         let keys = derive_keys(master_key);
+         let conn = Connection::open(path.as_ref()).map_err(db_err)?;
+         conn.execute_batch(SCHEMA).map_err(db_err)?;
++        // 使用错误主密钥时 HMAC 查询会表现为未命中；先验证已有密文，不能因此写入第二套映射。
++        let existing: Option<Vec<u8>> = conn.query_row(
++            "SELECT plaintext_ct FROM mappings LIMIT 1", [], |row| row.get(0),
++        ).optional().map_err(db_err)?;
++        if let Some(ciphertext) = existing {
++            decrypt(&keys.enc, &ciphertext).map_err(|_| StoreError::Unavailable)?;
++        }
+         Ok(Self {
+             conn: Mutex::new(conn),
+             keys,
+             ttl: DEFAULT_TTL,
+             cap: DEFAULT_CAP,
++            max_rows: None,
+         })
+     }
+ 
+@@ -60,6 +69,18 @@ impl SqliteStore {
+         self
+     }
+ 
++    /// 限制整个库的新映射数量；命中已有映射仍可使用，达到上限不淘汰会话数据。
++    /// 不调用 purge() 时不会发生 TTL/LRU 删除，零上限表示拒绝任何新增映射。
++    pub fn with_max_rows(mut self, max_rows: u64) -> Self {
++        self.max_rows = Some(max_rows);
++        self
++    }
++
++    /// 宿主只读健康与容量观测；COUNT 的非负 i64 按容量合同转为 u64，不暴露映射内容。
++    pub fn mapping_count(&self) -> Result<u64, StoreError> {
++        self.lock()?.query_row("SELECT COUNT(*) FROM mappings", [], |row| row.get::<_, i64>(0).map(|count| count as u64)).map_err(db_err)
++    }
++
+     /// Delete rows whose last access is older than TTL, then evict LRU extras
+     /// for any creator over the cap.
+     pub fn purge(&self) -> Result<(), StoreError> {
+@@ -125,20 +146,32 @@ impl MappingStore for SqliteStore {
+     ) -> Result<Placeholder, StoreError> {
+         let hmac = lookup_hmac(&self.keys.mac, creator, plaintext.as_bytes());
+         let creator_hex = creator.hex();
+-        let conn = self.lock()?;
++        let mut conn = self.lock()?;
++        // 容量检查与写入放在同一写事务内，多个连接不能同时越过容量上限。
++        let tx = conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
++            .map_err(db_err)?;
+ 
+         for _ in 0..8 {
+             let now = now_unix();
+-            if let Some((placeholder, id_str, ct)) = load_by_hmac(&conn, &creator_hex, &hmac)? {
++            if let Some((placeholder, id_str, ct)) = load_by_hmac(&tx, &creator_hex, &hmac)? {
+                 decrypt(&self.keys.enc, &ct).map_err(|_| StoreError::Unavailable)?;
+-                touch(&conn, &id_str, now)?;
++                touch(&tx, &id_str, now)?;
++                tx.commit().map_err(db_err)?;
+                 return Ok(placeholder);
+             }
+ 
++            if let Some(max_rows) = self.max_rows {
++                let count: u64 = tx.query_row("SELECT COUNT(*) FROM mappings", [], |row| row.get::<_, i64>(0).map(|count| count as u64))
++                    .map_err(db_err)?;
++                if count >= max_rows {
++                    return Err(StoreError::CapacityExceeded);
++                }
++            }
++
+             let placeholder = Placeholder::fresh(type_prefix);
+             let id_str = placeholder.id.to_string();
+             let ct = encrypt(&self.keys.enc, plaintext.as_bytes());
+-            match conn.execute(
++            match tx.execute(
+                 "INSERT INTO mappings (
+                     placeholder_id, type_prefix, creator_hex,
+                     plaintext_hmac, plaintext_ct, last_access_unix
+@@ -152,7 +185,10 @@ impl MappingStore for SqliteStore {
+                     now
+                 ],
+             ) {
+-                Ok(_) => return Ok(placeholder),
++                Ok(_) => {
++                    tx.commit().map_err(db_err)?;
++                    return Ok(placeholder);
++                },
+                 Err(err) if is_constraint(&err) => continue,
+                 Err(err) => return Err(db_err(err)),
+             }
+diff --git a/crates/veil/src/proxy/forward.rs b/crates/veil/src/proxy/forward.rs
+index 11142ab..f7de9ec 100644
+--- a/crates/veil/src/proxy/forward.rs
++++ b/crates/veil/src/proxy/forward.rs
+@@ -383,7 +383,8 @@ fn prepare_body(
+                     .map_err(|_| (StatusCode::BAD_GATEWAY, "re-encode").into_response())?;
+                 Ok(Bytes::from(out))
+             }
+-            Err(WalkError::MappingWrite) | Err(WalkError::StoreUnavailable) => {
++            Err(WalkError::MappingWrite | WalkError::StoreUnavailable | WalkError::MissingMapping
++                | WalkError::MappingCapacity | WalkError::InvalidStream | WalkError::BufferLimit | WalkError::RuleEvaluation) => {
+                 Err((StatusCode::BAD_GATEWAY, "desensitize failed").into_response())
+             }
+         }
+diff --git a/crates/veil/src/proxy/sse.rs b/crates/veil/src/proxy/sse.rs
+index ffd5258..d8a158a 100644
+--- a/crates/veil/src/proxy/sse.rs
++++ b/crates/veil/src/proxy/sse.rs
+@@ -2,13 +2,19 @@ use serde_json::Value;
+ use veil_engine::creator::Creator;
+ use veil_engine::mapping::MappingStore;
+ use veil_engine::sliding::RestoreWindow;
+-use veil_engine::walk::{restore_json, WalkError};
++use veil_engine::walk::{restore_json, restore_json_strict, WalkError};
++
++#[path = "anthropic_sse.rs"]
++mod anthropic;
++use anthropic::{AnthropicBlocks, BlockOutput};
+ 
+ pub struct SseRestorer<'a, S: MappingStore + ?Sized> {
+     store: &'a S,
+     creator: Creator,
+     window: RestoreWindow<'a, S>,
+     buf: String,
++    anthropic: Option<AnthropicBlocks<'a, S>>,
++    strict: bool,
+ }
+ 
+ impl<'a, S: MappingStore + ?Sized> SseRestorer<'a, S> {
+@@ -18,16 +24,34 @@ impl<'a, S: MappingStore + ?Sized> SseRestorer<'a, S> {
+             creator,
+             window: RestoreWindow::new(store, creator),
+             buf: String::new(),
++            anthropic: None,
++            strict: false,
++        }
++    }
++
++    /// 严格模式不把缺失映射当成可执行的成功输出。
++    pub fn new_strict(store: &'a S, creator: Creator) -> Self {
++        Self {
++            window: RestoreWindow::new_strict(store, creator),
++            strict: true,
++            ..Self::new(store, creator)
+         }
+     }
+ 
+     pub fn push(&mut self, chunk: &str) -> Result<String, WalkError> {
++        if chunk.len() > (32usize * 1024 * 1024).saturating_sub(self.buf.len()) {
++            return Err(WalkError::BufferLimit);
++        }
+         self.buf.push_str(chunk);
+         self.drain(false)
+     }
+ 
+     pub fn flush(&mut self) -> Result<String, WalkError> {
+-        self.drain(true)
++        let output = self.drain(true)?;
++        if let Some(anthropic) = &self.anthropic {
++            anthropic.finish()?;
++        }
++        Ok(output)
+     }
+ 
+     fn drain(&mut self, flush: bool) -> Result<String, WalkError> {
+@@ -48,6 +72,8 @@ impl<'a, S: MappingStore + ?Sized> SseRestorer<'a, S> {
+             }
+             out.push_str(&restore_event(
+                 &mut self.window,
++                &mut self.anthropic,
++                self.strict,
+                 self.store,
+                 &self.creator,
+                 &event,
+@@ -58,6 +84,8 @@ impl<'a, S: MappingStore + ?Sized> SseRestorer<'a, S> {
+             let rest = std::mem::take(&mut self.buf);
+             out.push_str(&restore_event(
+                 &mut self.window,
++                &mut self.anthropic,
++                self.strict,
+                 self.store,
+                 &self.creator,
+                 rest.trim_end(),
+@@ -68,15 +96,14 @@ impl<'a, S: MappingStore + ?Sized> SseRestorer<'a, S> {
+ }
+ 
+ fn find_event_break(buf: &str) -> Option<usize> {
+-    if let Some(i) = buf.find("\r\n\r\n") {
+-        return Some(i);
+-    }
+-    buf.find("\n\n")
++    buf.find("\r\n\r\n").into_iter().chain(buf.find("\n\n")).min()
+ }
+ 
+-fn restore_event<S: MappingStore + ?Sized>(
+-    window: &mut RestoreWindow<'_, S>,
+-    store: &S,
++fn restore_event<'a, S: MappingStore + ?Sized>(
++    window: &mut RestoreWindow<'a, S>,
++    anthropic: &mut Option<AnthropicBlocks<'a, S>>,
++    strict: bool,
++    store: &'a S,
+     creator: &Creator,
+     event: &str,
+ ) -> Result<String, WalkError> {
+@@ -94,7 +121,32 @@ fn restore_event<S: MappingStore + ?Sized>(
+         return Ok(event.to_string());
+     }
+     let data = data_parts.join("\n");
+-    let restored = restore_data_payload(window, store, creator, &data)?;
++    if let Ok(mut value) = serde_json::from_str::<Value>(&data) {
++        if value["type"] == "message_start" {
++            if anthropic.is_some() { return Err(WalkError::InvalidStream); }
++            *anthropic = Some(AnthropicBlocks::new(store, *creator, strict));
++        }
++        if let Some(blocks) = anthropic {
++            let additional = blocks.event(&mut value)?;
++            if matches!(additional, BlockOutput::Buffered) { return Ok(String::new()); }
++            // 未修改的 JSON 不重新序列化，尤其是签名与未来增加的协议字段。
++            let restored = if serde_json::from_str::<Value>(&data).ok().as_ref() == Some(&value) {
++                data
++            } else {
++                value.to_string()
++            };
++            meta.push(format_data_line(&restored));
++            let original = meta.join("\n");
++            return Ok(match additional {
++                BlockOutput::Before(delta) => format!("event: content_block_delta\ndata: {delta}\n\n{original}"),
++                BlockOutput::Current => original,
++                BlockOutput::Buffered => unreachable!("buffered delta returned above"),
++            });
++        }
++    } else if anthropic.is_some() {
++        return Err(WalkError::InvalidStream);
++    }
++    let restored = restore_data_payload(window, store, creator, &data, strict)?;
+     meta.push(format_data_line(&restored));
+     Ok(meta.join("\n"))
+ }
+@@ -110,6 +162,7 @@ fn restore_data_payload<S: MappingStore + ?Sized>(
+     store: &S,
+     creator: &Creator,
+     data: &str,
++    strict: bool,
+ ) -> Result<String, WalkError> {
+     if data == "[DONE]" {
+         return Ok(data.to_string());
+@@ -120,7 +173,12 @@ fn restore_data_payload<S: MappingStore + ?Sized>(
+     if apply_delta_window(window, &mut value)? {
+         return Ok(value.to_string());
+     }
+-    Ok(restore_json(&value, store, creator)?.to_string())
++    let restored = if strict {
++        restore_json_strict(&value, store, creator)?
++    } else {
++        restore_json(&value, store, creator)?
++    };
++    Ok(restored.to_string())
+ }
+ 
+ fn apply_delta_window<S: MappingStore + ?Sized>(
+diff --git a/crates/veil-engine/src/anthropic.rs b/crates/veil-engine/src/anthropic.rs
+new file mode 100644
+--- /dev/null
++++ b/crates/veil-engine/src/anthropic.rs
+@@ -0,0 +1,127 @@
++//! Anthropic 原生 JSON 的协议边界；文本算法与映射存储继续复用引擎。
++
++use serde_json::Value;
++use crate::{creator::Creator, mapping::MappingStore, rules::RuleSet,
++    walk::{desensitize_literal_safe_string, restore_string, WalkError}};
++
++pub fn desensitize_json(value: &Value, rules: &RuleSet, store: &(impl MappingStore + ?Sized), creator: &Creator) -> Result<Value, WalkError> {
++    visit(value, Location::Root, &mut |text| desensitize_literal_safe_string(text, rules, store, creator))
++}
++pub fn restore_json(value: &Value, store: &(impl MappingStore + ?Sized), creator: &Creator) -> Result<Value, WalkError> {
++    visit(value, Location::Root, &mut |text| restore_string(text, store, creator, true))
++}
++
++#[derive(Clone, Copy)]
++enum Location {
++    Root, Messages, Message, Content, Block, System, SystemBlock, Billing,
++    Tools, Tool, Addition, AddedTool, Schema, SchemaProperties, Source,
++    Metadata, Identity, Thread, Diagnostics, Output, Format, Text, Opaque,
++}
++fn child(location: Location, key: &str, value: &Value) -> Location {
++    use Location::*;
++    match (location, key) {
++        (Root, "messages") => Messages,
++        (Root, "system") => System,
++        (Root, "content") | (Message, "content") | (Block | SystemBlock, "content") => Content,
++        (Root, "tools") => Tools,
++        (Root, "metadata") => Metadata,
++        (Root, "thread") => Thread,
++        (Root, "diagnostics") => Diagnostics,
++        (Root, "output_config") => Output,
++        (Root, "id" | "type" | "model" | "usage" | "stop_reason" | "stop_sequence" | "stop_sequences"
++            | "thinking" | "context_management" | "input_transformations" | "tool_choice"
++            | "container" | "service_tier") => Opaque,
++        (Message, "role") => Opaque,
++        (Block | SystemBlock | Addition, "type" | "id" | "name" | "tool_use_id" | "signature" | "block_binding" | "cache_control") => Opaque,
++        (Block | SystemBlock, "source") => Source,
++        (SystemBlock, "text") => Billing,
++        (Addition, "tool") => AddedTool,
++        (AddedTool, "name") => Opaque,
++        (AddedTool, "definition") => Tool,
++        (Tool, "type" | "name" | "cache_control" | "strict" | "defer_loading") => Opaque,
++        (Tool, "input_schema") | (Format, "schema") => Schema,
++        (Schema, "properties" | "patternProperties" | "$defs" | "definitions" | "dependentSchemas") => SchemaProperties,
++        (SchemaProperties, _) => Schema,
++        (Schema, "items" | "prefixItems" | "allOf" | "anyOf" | "oneOf" | "not" | "if" | "then" | "else"
++            | "contains" | "additionalProperties" | "unevaluatedProperties" | "propertyNames") => Schema,
++        (Schema, "description" | "title" | "default" | "examples" | "enum" | "const") => Text,
++        (Schema, _) => Opaque,
++        (Source, "type" | "media_type") => Opaque,
++        (Metadata, "user_id") => Identity,
++        (Identity, "device_id") if value.as_str().is_some_and(|s| s.len() == 64 && s.bytes().all(|b| b.is_ascii_hexdigit())) => Opaque,
++        (Identity, "account_uuid" | "session_id") if value.as_str().is_some_and(uuid) => Opaque,
++        (Thread, "type") if matches!(value.as_str(), Some("create" | "continue")) => Opaque,
++        (Thread | Diagnostics, "previous_message_id") if value.as_str().is_some_and(message_id) => Opaque,
++        (Output, "format") => Format,
++        (Format, _) | (Output, "effort") => Opaque,
++        _ => Text,
++    }
++}
++fn uuid(s: &str) -> bool {
++    s.len() == 36 && s.bytes().enumerate().all(|(i, b)| if matches!(i, 8 | 13 | 18 | 23) { b == b'-' } else { b.is_ascii_hexdigit() })
++}
++fn message_id(s: &str) -> bool {
++    s.strip_prefix("msg_").is_some_and(|s| !s.is_empty() && s.len() <= 252 && s.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_' || b == b'-'))
++}
++fn billing(s: &str) -> bool {
++    let Some(tail) = s.strip_prefix("x-anthropic-billing-header: ").and_then(|s| s.strip_suffix(';')) else { return false; };
++    let mut keys = Vec::new();
++    for part in tail.split(';') {
++        let Some((key, value)) = part.trim().split_once('=') else { return false; };
++        if keys.contains(&key) || value.is_empty() || value.len() > 256 { return false; }
++        let valid = match key {
++            "cc_version" => value.rsplit_once('.').is_some_and(|(version, hash)| {
++                let parts: Vec<_> = version.split('.').collect();
++                parts.len() == 3 && parts.iter().all(|p| !p.is_empty() && p.bytes().all(|b| b.is_ascii_digit()))
++                    && hash.len() == 3 && hash.bytes().all(|b| b.is_ascii_hexdigit())
++            }),
++            "cc_entrypoint" => matches!(value, "cli" | "cli-bg" | "vscode" | "native"),
++            "cch" => value.len() == 5 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)),
++            "cc_is_subagent" => value == "true",
++            "cc_workload" | "cc_prev_req" | "cc_prompt_id" | "cc_turn_origin" => value.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)),
++            _ => false,
++        };
++        if !valid { return false; }
++        keys.push(key);
++    }
++    keys.contains(&"cc_version") && keys.contains(&"cc_entrypoint")
++}
++
++fn visit(value: &Value, mut location: Location, transform: &mut impl FnMut(&str) -> Result<String, WalkError>) -> Result<Value, WalkError> {
++    use Location::*;
++    if matches!(location, Opaque) { return Ok(value.clone()); }
++    if matches!(location, Content) && value.is_object() { location = Block; }
++    // Only protocol block positions grant opaque treatment. Tool argument names never do.
++    if matches!(location, Block | SystemBlock) {
++        match value.get("type").and_then(Value::as_str) {
++            Some("thinking" | "redacted_thinking") => return Ok(value.clone()),
++            Some("tool_addition") => location = Addition,
++            _ => {},
++        }
++    }
++    if matches!(location, Source) && value.get("type").and_then(Value::as_str) == Some("base64") { return Ok(value.clone()); }
++    match value {
++        Value::String(text) if matches!(location, Identity) => {
++            // Preserve only validated identifiers inside normalized user_id; textual extras remain private.
++            if let Ok(Value::Object(object)) = serde_json::from_str::<Value>(text) {
++                let transformed = visit(&Value::Object(object), Identity, transform)?;
++                Ok(Value::String(transformed.to_string()))
++            } else { Ok(Value::String(transform(text)?)) }
++        }
++        Value::String(text) if matches!(location, Billing) && billing(text) => Ok(value.clone()),
++        Value::String(text) => Ok(Value::String(transform(text)?)),
++        Value::Array(items) => items.iter().enumerate().map(|(index, item)| {
++            let item_location = match location {
++                Messages => Message, Content => Block, System if index == 0 => SystemBlock,
++                System => Block, Tools => Tool, other => other,
++            };
++            visit(item, item_location, transform)
++        }).collect::<Result<Vec<_>, _>>().map(Value::Array),
++        Value::Object(object) => {
++            let mut output = serde_json::Map::with_capacity(object.len());
++            for (key, value) in object { output.insert(key.clone(), visit(value, child(location, key, value), transform)?); }
++            Ok(Value::Object(output))
++        }
++        other => Ok(other.clone()),
++    }
++}
+diff --git a/crates/veil/src/proxy/anthropic_sse.rs b/crates/veil/src/proxy/anthropic_sse.rs
+new file mode 100644
+index 0000000..11c579f
+--- /dev/null
++++ b/crates/veil/src/proxy/anthropic_sse.rs
+@@ -0,0 +1,186 @@
++use std::collections::HashMap;
++
++use serde_json::{json, Value};
++use veil_engine::{
++    creator::Creator,
++    mapping::MappingStore,
++    sliding::RestoreWindow,
++    walk::{restore_json, restore_json_strict, WalkError},
++};
++
++const MAX_PENDING_BYTES: usize = 32 * 1024 * 1024;
++
++pub(super) enum BlockOutput {
++    Current,
++    Buffered,
++    Before(Value),
++}
++
++enum Block<'a, S: MappingStore + ?Sized> {
++    Text(RestoreWindow<'a, S>),
++    Tool(String),
++    Opaque,
++}
++
++pub(super) struct AnthropicBlocks<'a, S: MappingStore + ?Sized> {
++    store: &'a S,
++    creator: Creator,
++    strict: bool,
++    blocks: HashMap<u64, Block<'a, S>>,
++    pending_bytes: usize,
++}
++
++impl<'a, S: MappingStore + ?Sized> AnthropicBlocks<'a, S> {
++    pub(super) fn new(store: &'a S, creator: Creator, strict: bool) -> Self {
++        Self { store, creator, strict, blocks: HashMap::new(), pending_bytes: 0 }
++    }
++
++    pub(super) fn finish(&self) -> Result<(), WalkError> {
++        if self.blocks.is_empty() { Ok(()) } else { Err(WalkError::InvalidStream) }
++    }
++
++    fn restore(&self, value: &Value) -> Result<Value, WalkError> {
++        if self.strict {
++            restore_json_strict(value, self.store, &self.creator)
++        } else {
++            restore_json(value, self.store, &self.creator)
++        }
++    }
++
++    fn restore_fields(&self, value: &mut Value, fields: &[&str]) -> Result<(), WalkError> {
++        for field in fields {
++            if let Some(text) = value.get_mut(*field).filter(|value| value.is_string()) {
++                *text = self.restore(text)?;
++            }
++        }
++        Ok(())
++    }
++
++    fn restore_citation(&self, citation: &mut Value) -> Result<(), WalkError> {
++        if matches!(citation["type"].as_str(), Some("char_location" | "page_location" | "content_block_location"
++            | "web_search_result_location" | "search_result_location")) {
++            // encrypted_index、来源索引和签名属于协议数据，不能作为可逆文本遍历。
++            self.restore_fields(citation, &["cited_text", "document_title", "title", "url"])?;
++        }
++        Ok(())
++    }
++
++    fn restore_result(&self, result: &mut Value) -> Result<(), WalkError> {
++        match result["type"].as_str() {
++            Some("web_search_result") => self.restore_fields(result, &["title", "url"]),
++            Some("web_fetch_result") => {
++                self.restore_fields(result, &["url"])?;
++                let document = &mut result["content"];
++                if document["type"] == "document" {
++                    self.restore_fields(document, &["title"])?;
++                    if document["source"]["type"] == "text" {
++                        self.restore_fields(&mut document["source"], &["data"])?;
++                    }
++                }
++                Ok(())
++            }
++            _ => Ok(()),
++        }
++    }
++
++    /// 只改允许恢复的内容；签名、thinking、用量和未知事件不进入通用字符串遍历。
++    /// 返回的补充 delta 必须在当前 block_stop 前交付。
++    pub(super) fn event(&mut self, value: &mut Value) -> Result<BlockOutput, WalkError> {
++        match value["type"].as_str() {
++            Some("content_block_start") => {
++                let index = value["index"].as_u64().ok_or(WalkError::InvalidStream)?;
++                if self.blocks.contains_key(&index) {
++                    return Err(WalkError::InvalidStream);
++                }
++                if self.blocks.len() >= 1024 { return Err(WalkError::BufferLimit); }
++                let content = &mut value["content_block"];
++                let block = match content["type"].as_str() {
++                    Some("text") => {
++                        let mut window = if self.strict {
++                            RestoreWindow::new_strict(self.store, self.creator)
++                        } else {
++                            RestoreWindow::new(self.store, self.creator)
++                        };
++                        let text = content["text"].as_str().ok_or(WalkError::InvalidStream)?;
++                        content["text"] = Value::String(window.push(text)?);
++                        if let Some(citations) = content.get_mut("citations").and_then(Value::as_array_mut) {
++                            for citation in citations { self.restore_citation(citation)?; }
++                        }
++                        Block::Text(window)
++                    }
++                    Some("tool_use" | "server_tool_use") => {
++                        if let Some(input) = content.get_mut("input") {
++                            *input = self.restore(input)?;
++                        }
++                        Block::Tool(String::new())
++                    }
++                    Some("web_search_tool_result" | "web_fetch_tool_result") => {
++                        if let Some(result) = content.get_mut("content") {
++                            if let Some(results) = result.as_array_mut() {
++                                for result in results { self.restore_result(result)?; }
++                            } else { self.restore_result(result)?; }
++                        }
++                        Block::Opaque
++                    }
++                    _ => Block::Opaque,
++                };
++                self.blocks.insert(index, block);
++            }
++            Some("content_block_delta") => {
++                let index = value["index"].as_u64().ok_or(WalkError::InvalidStream)?;
++                if value["delta"]["type"] == "citations_delta" && matches!(self.blocks.get(&index), Some(Block::Text(_))) {
++                    if let Some(citation) = value["delta"].get_mut("citation") { self.restore_citation(citation)?; }
++                }
++                let block = self.blocks.get_mut(&index).ok_or(WalkError::InvalidStream)?;
++                let delta = &mut value["delta"];
++                match (block, delta["type"].as_str()) {
++                    (Block::Text(window), Some("text_delta")) => {
++                        let text = delta["text"].as_str().ok_or(WalkError::InvalidStream)?;
++                        delta["text"] = Value::String(window.push(text)?);
++                    }
++                    (Block::Tool(buffer), Some("input_json_delta")) => {
++                        let fragment = delta["partial_json"].as_str().ok_or(WalkError::InvalidStream)?;
++                        if fragment.len() > MAX_PENDING_BYTES.saturating_sub(self.pending_bytes) {
++                            return Err(WalkError::BufferLimit);
++                        }
++                        self.pending_bytes += fragment.len();
++                        buffer.push_str(fragment);
++                        // 工具参数是嵌套 JSON，等待整块解析后恢复，不能将原文直接插进 JSON 片段。
++                        // 不发送空 JSON delta，客户端可能立即解析每个工具参数事件。
++                        return Ok(BlockOutput::Buffered);
++                    }
++                    _ => {}
++                }
++            }
++            Some("content_block_stop") => {
++                let index = value["index"].as_u64().ok_or(WalkError::InvalidStream)?;
++                let block = self.blocks.remove(&index).ok_or(WalkError::InvalidStream)?;
++                let delta = match block {
++                    Block::Text(mut window) => {
++                        let tail = window.flush()?;
++                        if tail.is_empty() { return Ok(BlockOutput::Current); }
++                        json!({"type":"text_delta","text":tail})
++                    }
++                    Block::Tool(buffer) => {
++                        self.pending_bytes -= buffer.len();
++                        if buffer.is_empty() { return Ok(BlockOutput::Current); }
++                        let input: Value = serde_json::from_str(&buffer).map_err(|_| WalkError::InvalidStream)?;
++                        if !input.is_object() { return Err(WalkError::InvalidStream); }
++                        let restored = self.restore(&input)?;
++                        json!({"type":"input_json_delta","partial_json":restored.to_string()})
++                    }
++                    Block::Opaque => return Ok(BlockOutput::Current),
++                };
++                return Ok(BlockOutput::Before(json!({"type":"content_block_delta","index":index,"delta":delta})));
++            }
++            Some("message_stop") => self.finish()?,
++            Some("error") => {
++                if let Some(message) = value.pointer_mut("/error/message") {
++                    *message = self.restore(message)?;
++                }
++            }
++            _ => {}
++        }
++        Ok(BlockOutput::Current)
++    }
++}
+diff --git a/crates/veil-store/src/crypto.rs b/crates/veil-store/src/crypto.rs
+index 71f4211..11e3405 100644
+--- a/crates/veil-store/src/crypto.rs
++++ b/crates/veil-store/src/crypto.rs
+@@ -1,4 +1,4 @@
+-use aes_gcm::aead::{Aead, KeyInit};
++use aes_gcm::aead::{Aead, KeyInit, Payload};
+ use aes_gcm::{Aes256Gcm, Nonce};
+ use hkdf::Hkdf;
+ use hmac::{Hmac, Mac};
+@@ -15,6 +15,40 @@ const GCM_TAG_LEN: usize = 16;
+ 
+ type HmacSha256 = Hmac<Sha256>;
+ 
++/// OAuth 恢复材料使用独立 HKDF 域，并将调用方的 flow/owner 绑定为 AEAD 附加数据。
++#[derive(Zeroize, ZeroizeOnDrop)]
++pub struct CheckpointCipher([u8; 32]);
++
++#[derive(Debug)]
++pub struct CheckpointError;
++
++impl CheckpointCipher {
++    pub fn new(master_key: &[u8; 32]) -> Self {
++        let mut key = [0u8; 32];
++        Hkdf::<Sha256>::new(Some(b"cprs-oauth-checkpoint-v1"), master_key)
++            .expand(b"aes-256-gcm", &mut key).expect("32-byte HKDF output");
++        Self(key)
++    }
++
++    pub fn seal(&self, binding: &[u8], plaintext: &[u8]) -> Result<Vec<u8>, CheckpointError> {
++        let mut nonce = [0u8; NONCE_LEN];
++        OsRng.try_fill_bytes(&mut nonce).map_err(|_| CheckpointError)?;
++        let cipher = Aes256Gcm::new_from_slice(&self.0).map_err(|_| CheckpointError)?;
++        let ciphertext = cipher.encrypt(Nonce::from_slice(&nonce), Payload { msg: plaintext, aad: binding })
++            .map_err(|_| CheckpointError)?;
++        let mut output = nonce.to_vec();
++        output.extend(ciphertext);
++        Ok(output)
++    }
++
++    pub fn open(&self, binding: &[u8], ciphertext: &[u8]) -> Result<Vec<u8>, CheckpointError> {
++        if ciphertext.len() < NONCE_LEN + GCM_TAG_LEN { return Err(CheckpointError); }
++        let (nonce, ciphertext) = ciphertext.split_at(NONCE_LEN);
++        let cipher = Aes256Gcm::new_from_slice(&self.0).map_err(|_| CheckpointError)?;
++        cipher.decrypt(Nonce::from_slice(nonce), Payload { msg: ciphertext, aad: binding }).map_err(|_| CheckpointError)
++    }
++}
++
+ #[derive(Zeroize, ZeroizeOnDrop)]
+ pub(crate) struct DerivedKeys {
+     pub enc: [u8; 32],
+diff --git a/crates/veil-store/src/lib.rs b/crates/veil-store/src/lib.rs
+index 9a5bb5c..cad3b8a 100644
+--- a/crates/veil-store/src/lib.rs
++++ b/crates/veil-store/src/lib.rs
+@@ -7,3 +7,4 @@ mod crypto;
+ mod sqlite;
+ 
+ pub use sqlite::SqliteStore;
++pub use crypto::{CheckpointCipher, CheckpointError};

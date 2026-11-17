@@ -28,6 +28,7 @@ deploy/.env
 
 # Local workspaces and tooling state.
 .git/
+.deps/
 .codegraph/
 .worktrees/
 worktrees/

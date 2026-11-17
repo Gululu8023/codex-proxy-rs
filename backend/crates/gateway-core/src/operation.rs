@@ -121,23 +121,12 @@ impl CapabilityRequirements {
 pub struct ProviderSessionState {
     provider: String,
     payload: Map<String, Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    extension_owner: Option<Box<ExtensionSessionOwner>>,
     // 仅供本次终态交付后处置客户端连接，不持久化或传给外部适配器
     #[serde(skip)]
     reconnect_websocket: bool,
-}
-
-/// 受管扩展会话的宿主归属，不能把插件私有状态交给原生 Provider 解码
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct ExtensionSessionOwner {
-    pub instance_id: String,
-    pub contribution_id: String,
-    pub adapter_id: String,
-    pub generation: u64,
-    pub incarnation: String,
-    pub connection_local: bool,
+    // Provider 的终态交付约束，仅对当前事件生效，不进入持久化记录。
+    #[serde(skip)]
+    required_persistence: bool,
 }
 
 impl ProviderSessionState {
@@ -157,14 +146,26 @@ impl ProviderSessionState {
         Ok(Self {
             provider,
             payload,
-            extension_owner: None,
             reconnect_websocket: false,
+            required_persistence: false,
         })
     }
 
     #[must_use]
     pub fn provider(&self) -> &str {
         &self.provider
+    }
+
+    /// 完整响应交付前必须提交此检查点；存储失败不得重放已经完成的上游请求。
+    #[must_use]
+    pub const fn with_required_persistence(mut self) -> Self {
+        self.required_persistence = true;
+        self
+    }
+
+    #[must_use]
+    pub const fn requires_persistence(&self) -> bool {
+        self.required_persistence
     }
 
     #[must_use]
@@ -182,17 +183,6 @@ impl ProviderSessionState {
     #[must_use]
     pub const fn prefers_websocket_reconnect(&self) -> bool {
         self.reconnect_websocket
-    }
-
-    #[must_use]
-    pub fn with_extension_owner(mut self, owner: ExtensionSessionOwner) -> Self {
-        self.extension_owner = Some(Box::new(owner));
-        self
-    }
-
-    #[must_use]
-    pub fn extension_owner(&self) -> Option<&ExtensionSessionOwner> {
-        self.extension_owner.as_deref()
     }
 }
 
@@ -424,7 +414,7 @@ struct GeneratePayload {
     client_turn: Option<ClientTurn>,
     provider_session_state: Option<ProviderSessionState>,
     source_requirements: Option<CapabilityRequirements>,
-    inherited_capability_requirements: Option<CapabilityRequirements>,
+    native_requirements: Option<CapabilityRequirements>,
 }
 
 /// 协议入口确认的客户端推理轮次，不使用连接路由键猜测身份
@@ -467,7 +457,7 @@ impl GenerateRequest {
                 client_turn: None,
                 provider_session_state: None,
                 source_requirements: None,
-                inherited_capability_requirements: None,
+                native_requirements: None,
             }),
         }
     }
@@ -475,6 +465,13 @@ impl GenerateRequest {
     #[must_use]
     pub fn with_client_turn(mut self, client_turn: Option<ClientTurn>) -> Self {
         Arc::make_mut(&mut self.payload).client_turn = client_turn;
+        self
+    }
+
+    /// 原生协议显式提供能力需求，不借用标记协议转换的 source_requirements
+    #[must_use]
+    pub fn with_native_requirements(mut self, requirements: CapabilityRequirements) -> Self {
+        Arc::make_mut(&mut self.payload).native_requirements = Some(requirements);
         self
     }
 
@@ -548,13 +545,11 @@ impl GenerateRequest {
         if let Some(requirements) = &self.payload.source_requirements {
             return requirements.clone();
         }
+        if let Some(native) = &self.payload.native_requirements {
+            return native.clone();
+        }
         let mut requirements = CapabilityRequirements::new(OperationKind::Generate)
             .with_requested_output_tokens(self.max_output_tokens());
-        if let Some(inherited) = &self.payload.inherited_capability_requirements {
-            for feature in inherited.features() {
-                requirements = requirements.require(*feature);
-            }
-        }
         if self
             .body()
             .get("tools")
@@ -930,25 +925,12 @@ pub enum Operation {
 }
 
 impl Operation {
-    pub(crate) fn with_inherited_capability_requirements(
-        self,
-        inherited: CapabilityRequirements,
-    ) -> Result<Self, OperationError> {
-        let Self::Generate(mut request) = self else {
-            return Err(OperationError::EmptyField {
-                field: "middleware capabilities",
-            });
-        };
-        Arc::make_mut(&mut request.payload).inherited_capability_requirements = Some(inherited);
-        Ok(Self::Generate(request))
-    }
-
-    /// 把协议正文编码为中间件可见的原始字节；不包含非 wire context 或会话状态
+    /// 把协议正文编码为原始字节；不包含非 wire context 或会话状态
     ///
     /// # Errors
     ///
     /// 生成请求的 JSON object 无法编码时返回错误
-    pub fn middleware_body(&self) -> Result<Bytes, OperationError> {
+    pub fn wire_body(&self) -> Result<Bytes, OperationError> {
         match self {
             Self::Generate(request) => serde_json::to_vec(request.protocol_payload().body())
                 .map(Bytes::from)
@@ -962,15 +944,15 @@ impl Operation {
         }
     }
 
-    /// 写回中间件返回的协议与正文，同时保留宿主持有的非 wire context
+    /// 写回协议与正文，同时保留宿主持有的非 wire context
     ///
-    /// 同协议是正文替换；跨协议只能使用既有 direct-once 转换边界，不能借中间件
+    /// 同协议是正文替换；跨协议只能使用既有 direct-once 转换边界，不能
     /// 绕过重复转换保护
     ///
     /// # Errors
     ///
     /// 协议名或正文无效，或请求已经发生过一次跨协议转换时返回错误
-    pub fn replace_middleware_wire(
+    pub fn replace_wire_payload(
         self,
         protocol: impl Into<String>,
         body: Bytes,

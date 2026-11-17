@@ -60,13 +60,11 @@ function connectionLogClass(tone: string) {
       >
         <AccountIdentityCell :account="account" size="lg" show-plan show-notes />
         <AccountStatusBadge
+          :quota="account.quota"
           :status="account.status"
           :error-reason="account.errorReason"
           :error-message="account.errorMessage"
           :rate-limit-recovery-display="account.quota.rateLimitRecoveryDisplay"
-          :rate-limit-reason="account.quota.rateLimitReason"
-          :protection-rules="account.quota.protectionRules"
-          :recovery-probe-required="account.quota.recoveryProbeRequired"
           :next-refresh-at="account.nextRefreshAt"
           :next-refresh-at-display="account.nextRefreshAtDisplay"
           variant="pill"

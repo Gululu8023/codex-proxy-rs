@@ -30,6 +30,7 @@ const items = computed(() => props.windows.map((window) => {
 
   return {
     ...quotaWindowDetails(window),
+    evidence: window.providerData,
     key: window.key,
     local: view.mode === 'local',
     localLabel: view.local.label,
@@ -63,7 +64,10 @@ const items = computed(() => props.windows.map((window) => {
       class="grid min-w-0 gap-3"
       :class="grouped ? 'grid-cols-2' : 'grid-cols-1'"
     >
-      <div v-for="item in items" :key="item.key" class="grid min-w-0 gap-1.5">
+      <div v-for="item in items" :key="item.key" class="grid min-w-0 content-start gap-1.5">
+        <p v-if="item.evidence?.source" class="m-0 text-[10px] text-z-text-tertiary">
+          {{ t(`accounts.quota.sources.${item.evidence.source}`) }} · {{ item.evidence.scope === 'account' ? t('accounts.quota.accountScope') : item.evidence.scope }} · {{ item.evidence.observedAt }}
+        </p>
         <template v-if="item.local">
           <div class="flex min-w-0 items-baseline justify-between gap-2 text-z-xs leading-3.5">
             <span class="min-w-0 truncate font-bold text-z-text-quaternary">

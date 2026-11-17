@@ -6,7 +6,6 @@
     "groups": "Groups",
     "apiKeys": "API keys",
     "usage": "Analytics",
-    "plugins": "Plugins",
     "appearance": "Theme",
     "settings": "Settings",
     "update": {
@@ -16,7 +15,6 @@
     "switchLanguage": "Switch language ({value})",
     "languageLoadFailed": "Unable to load language, reload to try again",
     "mainLabel": "Main navigation",
-    "pluginManagement": "Manage",
     "online": "Online",
     "sidebar": {
       "close": "Close sidebar",

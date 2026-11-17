@@ -50,7 +50,21 @@ impl OperationalFailure {
 }
 
 /// 记录遵循既有观测队列的 best-effort 合同，失败不应替换业务结果
+#[derive(Debug, Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ObservationBufferHealth {
+    pub queued_items: usize,
+    pub queued_bytes: usize,
+    pub dropped_total: u64,
+    pub write_failure_total: u64,
+    pub persisted_total: u64,
+}
+
 #[async_trait]
 pub trait OperationalDiagnostics: Send + Sync {
+    /// 进程启动以来的共享队列状态，不把未知实现显示为零丢失。
+    fn observation_buffer_health(&self) -> Option<ObservationBufferHealth> {
+        None
+    }
     async fn record_failure(&self, failure: OperationalFailure) -> Result<(), StoreError>;
 }

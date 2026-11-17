@@ -1,12 +1,9 @@
 //! 网关唯一组合根：按启动模式连接各 Bundle
 
-mod command;
 mod config;
-mod plugins;
 mod server;
 mod startup;
 
-pub use command::{PluginCommand, plugin_command};
 pub use config::GatewayConfig;
 pub use server::run;
 
@@ -16,8 +13,6 @@ pub enum BootstrapError {
     #[error(transparent)]
     Worker(#[from] gateway_core::task::WorkerDefinitionError),
     #[error(transparent)]
-    PluginCommand(#[from] gateway_plugin_runtime::PluginCommandError),
-    #[error(transparent)]
     Config(#[from] gateway_host::ConfigError),
     #[error(transparent)]
     Host(#[from] gateway_host::HostError),
@@ -26,11 +21,9 @@ pub enum BootstrapError {
     #[error(transparent)]
     Store(#[from] gateway_store::StoreError),
     #[error(transparent)]
-    CommandStoreDrain(#[from] gateway_store::CommandStoreDrainError),
-    #[error(transparent)]
     OpenAi(#[from] provider_openai::OpenAiInitializeError),
     #[error(transparent)]
-    Xai(#[from] provider_xai::XaiInitializeError),
+    Anthropic(#[from] provider_anthropic::AnthropicInitializeError),
     #[error(transparent)]
     Registry(#[from] gateway_core::engine::provider::RegistryError),
     #[error(transparent)]

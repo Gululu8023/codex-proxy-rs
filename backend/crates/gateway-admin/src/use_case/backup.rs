@@ -12,8 +12,8 @@ use crate::model::{
     AdminError, AdminErrorKind, MutationContext,
     audit::{MutationAuditIntent, MutationAuditOperation},
     backup::{
-        BackupError, BackupRecord, BackupRecordListQuery, BackupRecordPage, BackupSettings,
-        BackupStatus, BackupStorageConfig, BackupTriggerKind, ConnectionTestResult,
+        BackupArtifact, BackupError, BackupRecord, BackupRecordListQuery, BackupRecordPage,
+        BackupSettings, BackupStatus, BackupStorageConfig, BackupTriggerKind, ConnectionTestResult,
         DownloadUrlResult, UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
         build_backup_seed, code,
     },
@@ -65,6 +65,7 @@ pub trait BackupService: Send + Sync {
         &self,
         context: &MutationContext,
         backup_id: &str,
+        artifact: BackupArtifact,
     ) -> Result<DownloadUrlResult, AdminError>;
 
     async fn delete_backup(
@@ -234,6 +235,7 @@ impl BackupService for DefaultBackupService {
         &self,
         context: &MutationContext,
         backup_id: &str,
+        artifact: BackupArtifact,
     ) -> Result<DownloadUrlResult, AdminError> {
         let record = self.require_record(backup_id).await?;
         if record.status != BackupStatus::Completed {
@@ -247,17 +249,33 @@ impl BackupService for DefaultBackupService {
         let Some(config) = BackupStorageConfig::from_settings(&settings) else {
             return Err(AdminError::bad_request("备份存储配置不完整"));
         };
-        let file_name = crate::model::backup::build_download_file_name(backup_id);
+        let (object_key, file_name) = match artifact {
+            BackupArtifact::Database => (
+                record.object_key.as_str(),
+                crate::model::backup::build_download_file_name(backup_id),
+            ),
+            BackupArtifact::PrivacyStore => (
+                record
+                    .privacy_store
+                    .as_ref()
+                    .map(|object| object.object_key.as_str())
+                    .ok_or_else(|| AdminError::not_found("该备份不含 Claude 隐私存储"))?,
+                crate::model::backup::build_privacy_store_file_name(backup_id),
+            ),
+        };
         let url = self
             .object_store
-            .presigned_download(&config, &record.object_key, &file_name, DOWNLOAD_TTL)
+            .presigned_download(&config, object_key, &file_name, DOWNLOAD_TTL)
             .await
             .map_err(map_backup_error)?;
         self.append_audit(
             context,
             MutationAuditOperation::BackupDownloadUrl,
             backup_id,
-            vec![],
+            match artifact {
+                BackupArtifact::Database => vec![],
+                BackupArtifact::PrivacyStore => vec!["privacyStore".to_owned()],
+            },
         )
         .await?;
         Ok(DownloadUrlResult {

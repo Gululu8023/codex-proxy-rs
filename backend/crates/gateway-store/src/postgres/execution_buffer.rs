@@ -303,6 +303,18 @@ fn request_lane(request_id: &str, lane_count: usize) -> usize {
 
 #[async_trait]
 impl<S: Send + Sync + ?Sized> OperationalDiagnostics for BufferedExecutionStore<S> {
+    fn observation_buffer_health(
+        &self,
+    ) -> Option<gateway_core::diagnostics::ObservationBufferHealth> {
+        let stats = self.stats();
+        Some(gateway_core::diagnostics::ObservationBufferHealth {
+            queued_items: stats.queued_items,
+            queued_bytes: stats.queued_bytes,
+            dropped_total: stats.dropped_total,
+            write_failure_total: stats.write_failure_total,
+            persisted_total: stats.persisted_total,
+        })
+    }
     async fn record_failure(&self, failure: OperationalFailure) -> Result<(), StoreError> {
         self.enqueue(ExecutionObservationWrite::OperationalFailure(Box::new(
             failure,
@@ -325,7 +337,19 @@ where
     }
 
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError> {
-        self.enqueue(ExecutionObservationWrite::Create(Box::new(request)));
+        self.enqueue(ExecutionObservationWrite::Create(Box::new(request), None));
+        Ok(())
+    }
+
+    async fn create_model_request_for_provider(
+        &self,
+        request: NewModelRequest,
+        provider: Option<gateway_core::routing::ProviderKind>,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::Create(
+            Box::new(request),
+            provider,
+        ));
         Ok(())
     }
 
@@ -409,7 +433,22 @@ where
         &self,
         finalization: ModelRequestFinalization,
     ) -> Result<(), StoreError> {
-        self.enqueue(ExecutionObservationWrite::Finalize(Box::new(finalization)));
+        self.enqueue(ExecutionObservationWrite::Finalize(
+            Box::new(finalization),
+            None,
+        ));
+        Ok(())
+    }
+
+    async fn finalize_model_request_with_prompt_guard(
+        &self,
+        finalization: ModelRequestFinalization,
+        assessment: Option<gateway_core::engine::prompt_guard::PromptGuardAssessment>,
+    ) -> Result<(), StoreError> {
+        self.enqueue(ExecutionObservationWrite::Finalize(
+            Box::new(finalization),
+            assessment.map(Box::new),
+        ));
         Ok(())
     }
 
@@ -714,7 +753,10 @@ impl Drop for QueuedExecutionObservation {
 }
 
 enum ExecutionObservationWrite {
-    Create(Box<NewModelRequest>),
+    Create(
+        Box<NewModelRequest>,
+        Option<gateway_core::routing::ProviderKind>,
+    ),
     Attempt(Box<AttemptRecord>),
     CreateWithAttempt(Box<(NewModelRequest, AttemptRecord)>),
     MarkSendState {
@@ -734,7 +776,10 @@ enum ExecutionObservationWrite {
     ProbeFailure(Box<ProbeFailure>),
     EntryRejection(Box<EntryRejection>),
     OperationalFailure(Box<OperationalFailure>),
-    Finalize(Box<ModelRequestFinalization>),
+    Finalize(
+        Box<ModelRequestFinalization>,
+        Option<Box<gateway_core::engine::prompt_guard::PromptGuardAssessment>>,
+    ),
 }
 
 impl ExecutionObservationWrite {
@@ -749,7 +794,7 @@ impl ExecutionObservationWrite {
 
     const fn operation(&self) -> &'static str {
         match self {
-            Self::Create(_) => "create_model_request",
+            Self::Create(..) => "create_model_request",
             Self::Attempt(_) => "record_attempt",
             Self::CreateWithAttempt(_) => "create_model_request_with_attempt",
             Self::MarkSendState { .. } => "mark_send_state",
@@ -759,13 +804,13 @@ impl ExecutionObservationWrite {
             Self::ProbeFailure(_) => "record_probe_failure",
             Self::EntryRejection(_) => "record_entry_rejection",
             Self::OperationalFailure(_) => "record_operational_failure",
-            Self::Finalize(_) => "finalize_model_request",
+            Self::Finalize(..) => "finalize_model_request",
         }
     }
 
     fn request_id(&self) -> Option<&str> {
         match self {
-            Self::Create(request) => Some(request.id.as_str()),
+            Self::Create(request, _) => Some(request.id.as_str()),
             Self::Attempt(attempt) => Some(attempt.request_id.as_str()),
             Self::CreateWithAttempt(write) => Some(write.0.id.as_str()),
             Self::MarkSendState { request_id, .. }
@@ -774,13 +819,17 @@ impl ExecutionObservationWrite {
             Self::IntermediateFailure(failure) => Some(failure.request_id.as_str()),
             Self::ProbeFailure(_) | Self::EntryRejection(_) => None,
             Self::OperationalFailure(failure) => failure.correlation_id.as_deref(),
-            Self::Finalize(finalization) => Some(finalization.request_id.as_str()),
+            Self::Finalize(finalization, _) => Some(finalization.request_id.as_str()),
         }
     }
 
     fn estimated_bytes(&self) -> usize {
         size_of::<Self>().saturating_add(match self {
-            Self::Create(request) => new_request_bytes(request),
+            Self::Create(request, provider) => new_request_bytes(request).saturating_add(
+                provider
+                    .as_ref()
+                    .map_or(0, |provider| provider.as_str().len()),
+            ),
             Self::Attempt(attempt) => attempt_bytes(attempt),
             Self::CreateWithAttempt(write) => {
                 new_request_bytes(&write.0).saturating_add(attempt_bytes(&write.1))
@@ -827,7 +876,7 @@ impl ExecutionObservationWrite {
                     failure.upstream_code.as_ref().map(|code| code.as_str()),
                     failure.details.as_ref().map(|details| details.as_str()),
                 ])),
-            Self::Finalize(finalization) => {
+            Self::Finalize(finalization, assessment) => {
                 let error_bytes = finalization.error.as_ref().map_or(0, |error| {
                     text_bytes([
                         Some(error.client_message()),
@@ -856,6 +905,17 @@ impl ExecutionObservationWrite {
                 ])
                 .saturating_add(error_bytes)
                 .saturating_add(size_of::<ModelRequestFinalization>())
+                .saturating_add(assessment.as_ref().map_or(0, |assessment| {
+                    // JSON 大小与条目结构开销都预留，不能让审核摘要绕过观察队列字节上限。
+                    serde_json::to_vec(assessment)
+                        .expect("typed guard assessment")
+                        .len()
+                        .saturating_mul(2)
+                        .saturating_add(
+                            assessment.hits.len()
+                                * size_of::<gateway_core::engine::prompt_guard::RuleHit>(),
+                        )
+                }))
             }
         })
     }
@@ -866,7 +926,11 @@ impl ExecutionObservationWrite {
     {
         match self {
             Self::OperationalFailure(failure) => store.record_failure(*failure).await,
-            Self::Create(request) => store.create_model_request(*request).await,
+            Self::Create(request, provider) => {
+                store
+                    .create_model_request_for_provider(*request, provider)
+                    .await
+            }
             Self::Attempt(attempt) => store.record_attempt(*attempt).await,
             Self::CreateWithAttempt(write) => {
                 let (request, attempt) = *write;
@@ -897,7 +961,14 @@ impl ExecutionObservationWrite {
             Self::IntermediateFailure(failure) => store.record_intermediate_failure(*failure).await,
             Self::ProbeFailure(failure) => store.record_probe_failure(*failure).await,
             Self::EntryRejection(rejection) => store.record_entry_rejection(*rejection).await,
-            Self::Finalize(finalization) => store.finalize_model_request(*finalization).await,
+            Self::Finalize(finalization, assessment) => {
+                store
+                    .finalize_model_request_with_prompt_guard(
+                        *finalization,
+                        assessment.map(|value| *value),
+                    )
+                    .await
+            }
         }
     }
 }

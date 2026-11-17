@@ -3,7 +3,7 @@ import type { Account } from '@/api'
 
 import { ZIconButton, ZMenuItem, ZPopover } from '@codex-proxy/ui'
 
-import { Download, KeyRound, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
+import { Download, KeyRound, List, MoreHorizontal, Pencil, Power, RefreshCw, RotateCcw, Trash2, Wifi } from '@lucide/vue'
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
@@ -25,6 +25,7 @@ const emit = defineEmits<{
   test: [account: Account]
   refresh: [accountId: string]
   reauthorize: [account: Account]
+  viewModelCatalog: [account: Account]
   downloadModelCatalog: [account: Account]
   toggleScheduling: [account: Account]
 }>()
@@ -81,6 +82,12 @@ const credentialEligible = computed(() => props.account.authenticationKind === '
               <Power class="size-3.5 text-z-text-quaternary" />
             </template>
             {{ account.enabled ? t('accounts.actions.disableScheduling') : t('accounts.actions.enableScheduling') }}
+          </ZMenuItem>
+          <ZMenuItem @click.stop="(close(), emit('viewModelCatalog', account))">
+            <template #icon>
+              <List class="size-3.5 text-z-text-quaternary" />
+            </template>
+            {{ t('accounts.modelCatalog.title') }}
           </ZMenuItem>
           <ZMenuItem
             v-if="credentialEligible"

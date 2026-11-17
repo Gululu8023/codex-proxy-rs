@@ -10,7 +10,7 @@ mod admin_adapter;
 mod authorization;
 mod core_adapter;
 mod deletion;
-mod protection_revision;
+
 mod quota;
 mod quota_forecast;
 mod timestamps;
@@ -28,8 +28,8 @@ use gateway_admin::{
         observability::TimeRange,
         provider_credentials::{
             AuthorizationCommit, AuthorizationCredentialCommit, AuthorizationMutationTarget,
-            AuthorizationOwnerBinding, PendingAuthorizationMutation, PluginAccountListQuery,
-            PreparedCredentialCreate, ProviderDocument,
+            AuthorizationOwnerBinding, PendingAuthorizationMutation, PreparedCredentialCreate,
+            ProviderDocument,
         },
     },
     ports::store::AccountStore,
@@ -207,6 +207,7 @@ async fn core_quota_batch_reads_only_observed_accounts_in_one_contract_call() {
         let observed_at = SystemTime::now();
         let outcome = repository
             .compare_and_swap_quota(QuotaObservation {
+                quota_pause: None,
                 expected_connection: None,
                 plan_type: None,
                 account_id: ProviderAccountId::new(id).expect("account id"),
@@ -246,7 +247,7 @@ async fn core_quota_batch_reads_only_observed_accounts_in_one_contract_call() {
     );
     assert_eq!(
         current_revision(&database.pool).await,
-        1,
+        2,
         "quota observation is runtime state, not a global configuration mutation"
     );
 
@@ -284,6 +285,7 @@ async fn quota_observation_touch_preserves_quota_state_and_advances_account_upda
     assert_eq!(
         repository
             .compare_and_swap_quota(QuotaObservation {
+                quota_pause: None,
                 expected_connection: None,
                 plan_type: None,
                 account_id: account_id.clone(),
@@ -384,6 +386,7 @@ async fn delayed_provider_observations_cannot_overwrite_newer_state_or_quota() {
         .expect("older observation time");
 
     let quota = |marker: &str, observed_at| QuotaObservation {
+        quota_pause: None,
         expected_connection: None,
         plan_type: Some(if marker == "newer" { "pro" } else { "plus" }.to_owned()),
         account_id: account_id.clone(),
@@ -490,6 +493,7 @@ async fn profile_changes_survive_inflight_background_and_manual_token_refresh() 
     let config_revision = current_revision(&database.pool).await;
     let observed_at = SystemTime::now();
     let observation = QuotaObservation {
+        quota_pause: None,
         expected_connection: None,
         account_id: id.clone(),
         expected_revision: original.revision(),
@@ -595,6 +599,7 @@ async fn profile_changes_survive_inflight_background_and_manual_token_refresh() 
     let observed_at = SystemTime::now();
     repository
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             account_id: id.clone(),
             expected_revision: refreshed.revision(),
@@ -818,7 +823,7 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
         )
         .await
         .expect("sort accounts by retained usage");
-    assert_eq!(usage_page.config_revision.get(), 1);
+    assert_eq!(usage_page.config_revision.get(), 2);
     assert_eq!(usage_page.total, 6);
     assert_eq!(usage_page.summary.total, 6);
     assert_eq!(usage_page.summary.normal, 1);
@@ -902,7 +907,6 @@ async fn terminal_admin_list_filters_and_sorts_before_pagination_with_retained_u
                 sort: None,
             },
             AccountRuntimeSnapshot {
-                protection_rules: std::collections::BTreeMap::new(),
                 cooldown: BTreeMap::from([(
                     "acct_alpha".to_owned(),
                     SystemTime::from(now + TimeDelta::minutes(5)).into(),
@@ -1243,7 +1247,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         )
         .await
         .expect("disable account atomically");
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     let enabled: bool = sqlx::query_scalar(
         "select enabled from provider_accounts where id = 'acct_terminal_mutation'",
     )
@@ -1261,7 +1265,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         )
         .await
         .expect("delete disabled account atomically");
-    assert_eq!(revision.get(), 3);
+    assert_eq!(revision.get(), 4);
     assert_eq!(
         account_count(&database.pool, "acct_terminal_mutation").await,
         0
@@ -1278,7 +1282,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
         vec![
             (
                 "update".to_owned(),
-                2,
+                3,
                 vec![
                     "enabled".to_owned(),
                     "concurrency_limit".to_owned(),
@@ -1286,7 +1290,7 @@ async fn terminal_admin_mutations_keep_revision_account_and_audit_atomic() {
                     "groups".to_owned(),
                 ],
             ),
-            ("delete".to_owned(), 3, Vec::new()),
+            ("delete".to_owned(), 4, Vec::new()),
         ]
     );
 
@@ -1405,7 +1409,7 @@ async fn account_rename_preserves_facts_and_is_searchable() {
         .update_account(command.clone(), &context)
         .await
         .unwrap();
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     let after: serde_json::Value = sqlx::query_scalar(facts_query)
         .fetch_one(&database.pool)
         .await
@@ -1540,6 +1544,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                quota_limits: Default::default(),
                 auto_use_quota_credits: None,
                 account_ids: vec!["acct_notes".to_owned()],
                 enabled: Some(false),
@@ -1549,6 +1554,7 @@ async fn account_notes_round_trip_and_survive_import_and_scheduling_updates() {
                 model_access: None,
                 outbound_proxy: None,
             },
+            Default::default(),
             &context,
         )
         .await
@@ -1711,6 +1717,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
     let observed_at = SystemTime::now();
     repository
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: ProviderAccountId::new("acct_recovery").expect("account ID"),
@@ -1779,6 +1786,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
     let enabled = store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                quota_limits: Default::default(),
                 auto_use_quota_credits: None,
                 account_ids: vec!["acct_recovery".to_owned()],
                 enabled: Some(true),
@@ -1788,6 +1796,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
                 group_ids: None,
                 outbound_proxy: None,
             },
+            Default::default(),
             &MutationContext {
                 actor: MutationActor::System,
                 request_id: "request_account_enable".to_owned(),
@@ -1796,7 +1805,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
         .await
         .expect("enable account scheduling");
 
-    assert_eq!(enabled.config_revision.get(), 2);
+    assert_eq!(enabled.config_revision.get(), 3);
     assert!(
         repository
             .load_provider_account("acct_recovery")
@@ -1833,7 +1842,7 @@ async fn account_enable_preserves_facts_and_explicit_recovery_clears_them() {
         .await
         .expect("recover account");
 
-    assert_eq!(result.config_revision.get(), 3);
+    assert_eq!(result.config_revision.get(), 4);
     let current = sqlx::query_as::<_, RecoveredAccountRow>(
         "select enabled, credential_state, quota_access_state, quota_evidence,
                 last_error_message, provider_quota_json, concurrency_limit, weight,
@@ -1904,6 +1913,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     let result = store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                quota_limits: Default::default(),
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
@@ -1913,12 +1923,13 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                 weight: Some(gateway_core::account::AccountWeight::new(25).expect("weight")),
                 group_ids: Some(vec![AccountGroupId::new(GROUP_ID).expect("group ID")]),
             },
+            Default::default(),
             &context,
         )
         .await
         .expect("batch update accounts");
 
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     assert_eq!(result.account_ids.len(), 2);
     let scheduling: Vec<(bool, Option<i64>, i16)> = sqlx::query_as(
         "select enabled, concurrency_limit, weight
@@ -1942,6 +1953,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
     store
         .batch_update_accounts(
             BatchUpdateAccounts {
+                quota_limits: Default::default(),
                 auto_use_quota_credits: None,
                 model_access: Default::default(),
                 outbound_proxy: None,
@@ -1954,6 +1966,7 @@ async fn terminal_batch_update_replaces_state_and_groups_once_or_rolls_back_ever
                         .expect("missing group ID"),
                 ]),
             },
+            Default::default(),
             &context,
         )
         .await
@@ -2018,7 +2031,7 @@ async fn terminal_admin_delete_removes_enabled_accounts_in_one_transaction() {
         .await
         .expect("delete enabled account atomically");
 
-    assert_eq!(revision.get(), 2);
+    assert_eq!(revision.get(), 3);
     assert_eq!(
         account_count(&database.pool, "acct_enabled_delete_a").await
             + account_count(&database.pool, "acct_enabled_delete_b").await,
@@ -2073,7 +2086,7 @@ async fn admin_import_updates_the_same_verified_identity_without_rebinding_it() 
         .expect("update the same imported identity");
     assert_eq!(imported.account_ids, ["acct_admin_upsert"]);
     let revision = imported.config_revision;
-    assert_eq!(revision.get(), 3);
+    assert_eq!(revision.get(), 4);
     let row: (
         String,
         serde_json::Value,
@@ -2107,7 +2120,7 @@ async fn admin_import_updates_the_same_verified_identity_without_rebinding_it() 
         })
         .await
         .expect_err("an existing account ID must not be rebound");
-    assert_eq!(current_revision(&database.pool).await, 3);
+    assert_eq!(current_revision(&database.pool).await, 4);
 
     database.close().await;
 }
@@ -2504,7 +2517,7 @@ async fn core_refresh_cas_updates_profile_and_credential_under_one_revision() {
     assert_eq!(unchanged.2, 2);
     assert_eq!(
         current_revision(&database.pool).await,
-        1,
+        2,
         "credential refresh advances only credential_revision"
     );
 
@@ -2534,7 +2547,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         })
         .await
         .expect("import provider accounts");
-    assert_eq!(imported.config_revision.get(), 2);
+    assert_eq!(imported.config_revision.get(), 3);
     let ready: (bool, String) =
         sqlx::query_as("select enabled, credential_state from provider_accounts where id = $1")
             .bind("acct_admin_a")
@@ -2567,7 +2580,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         })
         .await
         .expect_err("duplicate batch row must roll back the entire import");
-    assert_eq!(current_revision(&database.pool).await, 2);
+    assert_eq!(current_revision(&database.pool).await, 3);
     assert_eq!(
         account_count(&database.pool, "acct_admin_transient").await,
         0
@@ -2594,7 +2607,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             ..
         }
     ));
-    assert_eq!(current_revision(&database.pool).await, 2);
+    assert_eq!(current_revision(&database.pool).await, 3);
 
     sqlx::query(
         "update provider_accounts
@@ -2620,7 +2633,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         })
         .await
         .expect("rotate provider account");
-    assert_eq!(rotation.config_revision.get(), 3);
+    assert_eq!(rotation.config_revision.get(), 4);
     assert_eq!(rotation.credential_revision.get(), 2);
     let restored: (String, String, Option<String>) = sqlx::query_as(
         "select credential_state, upstream_user_id, upstream_account_id
@@ -2664,7 +2677,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
             ..
         }
     ));
-    assert_eq!(current_revision(&database.pool).await, 3);
+    assert_eq!(current_revision(&database.pool).await, 4);
     let unchanged: (String, serde_json::Value, i64, String, Option<String>) = sqlx::query_as(
         "select name, provider_credentials_json, credential_revision,
                 upstream_user_id, upstream_account_id
@@ -2682,6 +2695,8 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
 
     let revision = repository
         .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
+            pauses: Default::default(),
+            quota_limits: Default::default(),
             auto_use_quota_credits: None,
             name: None,
             notes: None,
@@ -2696,7 +2711,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         })
         .await
         .expect("disable provider account");
-    assert_eq!(revision.get(), 4);
+    assert_eq!(revision.get(), 5);
     let exports = repository
         .export_provider_accounts(
             scope.clone(),
@@ -2716,7 +2731,7 @@ async fn provider_account_admin_mutations_are_scoped_audited_and_atomic() {
         })
         .await
         .expect("delete selected accounts regardless of enabled state");
-    assert_eq!(revision.get(), 5);
+    assert_eq!(revision.get(), 6);
     assert_eq!(account_count(&database.pool, "acct_admin_a").await, 0);
     assert_eq!(account_count(&database.pool, "acct_admin_b").await, 0);
     let audit_count: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
@@ -2776,7 +2791,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
         })
         .await
         .expect("save credentials and settings");
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     assert_eq!(result.credential_revision.get(), 2);
     let before: serde_json::Value =
         sqlx::query_scalar("select to_jsonb(account) from provider_accounts account where id = $1")
@@ -2852,7 +2867,7 @@ async fn credential_rotation_and_settings_share_one_transaction() {
             account_group_ids(&database.pool, ACCOUNT_ID).await,
             [GROUP_ID]
         );
-        assert_eq!(current_revision(&database.pool).await, 2);
+        assert_eq!(current_revision(&database.pool).await, 3);
         let audit_count: i64 = sqlx::query_scalar("select count(*) from admin_audit_events")
             .fetch_one(&database.pool)
             .await
@@ -2920,7 +2935,7 @@ async fn provider_account_import_and_reauthorization_preserve_existing_membershi
         })
         .await
         .expect("import account without a group");
-    assert_eq!(imported.config_revision.get(), 2);
+    assert_eq!(imported.config_revision.get(), 3);
     assert!(
         account_group_ids(&database.pool, "acct_grouped_import")
             .await
@@ -3612,7 +3627,7 @@ async fn account_import_settings_apply_atomically_to_new_and_existing_identities
         })
         .await
         .expect("import with settings");
-    assert_eq!(result.config_revision.get(), 2);
+    assert_eq!(result.config_revision.get(), 3);
     for id in ["acct_new_settings", "acct_existing_settings"] {
         let row: (bool, Option<i64>, i16) = sqlx::query_as(
             "select enabled, concurrency_limit, weight from provider_accounts where id = $1",
@@ -3670,7 +3685,7 @@ async fn account_import_settings_apply_atomically_to_new_and_existing_identities
             })
             .await;
         assert!(failed.is_err());
-        assert_eq!(current_revision(&database.pool).await, 2);
+        assert_eq!(current_revision(&database.pool).await, 3);
         assert_eq!(
             account_count(&database.pool, "acct_rollback_settings").await,
             0
@@ -3720,6 +3735,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
     .expect("policy");
     let store = admin_account_store(&database.pool);
     let command = BatchUpdateAccounts {
+        quota_limits: Default::default(),
         auto_use_quota_credits: None,
         account_ids: vec![input.id.clone()],
         enabled: None,
@@ -3734,7 +3750,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
         request_id: "request_model_access".to_owned(),
     };
     store
-        .batch_update_accounts(command.clone(), &context)
+        .batch_update_accounts(command.clone(), Default::default(), &context)
         .await
         .expect("update policy only");
     let loaded = repository
@@ -3772,6 +3788,7 @@ async fn model_access_only_batch_update_preserves_other_settings_and_survives_re
                 model_access: Some(AccountModelAccess::all()),
                 ..command
             },
+            Default::default(),
             &context,
         )
         .await
@@ -3863,6 +3880,7 @@ async fn disabling_quota_credits_revokes_credit_only_access_even_with_a_late_obs
     };
     let set_policy = async |enabled| {
         let command = BatchUpdateAccounts {
+            quota_limits: Default::default(),
             account_ids: vec![input.id.clone()],
             auto_use_quota_credits: Some(enabled),
             enabled: None,
@@ -3873,12 +3891,13 @@ async fn disabling_quota_credits_revokes_credit_only_access_even_with_a_late_obs
             outbound_proxy: None,
         };
         admin
-            .batch_update_accounts(command, &context)
+            .batch_update_accounts(command, Default::default(), &context)
             .await
             .unwrap();
     };
     let observe = async |state: QuotaState| {
         let observation = QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: id.clone(),

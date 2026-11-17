@@ -10,7 +10,7 @@ import { t } from '@/i18n'
 interface PreviewUsageRecordOptions {
   id: string
   accountEmail: string
-  provider: 'openai' | 'xai'
+  provider: 'openai' | 'anthropic'
   authenticationKind: 'oauth' | 'api_key'
   model: string
   clientTransport: 'http_sse' | 'websocket' | 'http_json'
@@ -110,6 +110,9 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
     logicalOutcome: 'succeeded',
     errorCode: null,
     errorKind: null,
+    clientStatusCode: 200,
+    upstreamStatusCode: 200,
+    errorOrigin: 'unknown',
     websocketCloseCode: null,
     continuationUnavailableReason: null,
     upstreamConnectionExitReason: null,
@@ -207,7 +210,7 @@ const themeAnalytics: DashboardSummaryResponse['analytics'] = {
   histogramVersion: 1,
 }
 
-export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
+export const themeDashboardSummary = computed((): DashboardSummaryResponse => ({
   analytics: themeAnalytics,
   asOf: '2026-08-23T10:30:00+08:00',
   asOfDisplay: '2026-08-23 10:30:00',
@@ -316,30 +319,6 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
         latestVersion: '0.163.0-alpha.10.2',
       },
     },
-    {
-      provider: 'xai',
-      product: 'Grok CLI',
-      version: '0.7.3',
-      target: {
-        osType: 'Linux',
-        osVersion: '6.8',
-        arch: 'x86_64',
-        terminal: 'xterm-256color',
-      },
-      userAgent: 'grok_cli/0.7.3',
-      attributes: [
-        { key: 'client_identifier', value: 'grok_cli' },
-        { key: 'token_auth', value: 'bearer' },
-      ],
-      verifiedAt: '2026-08-23T10:25:00+08:00',
-      verifiedAtDisplay: '2026-08-23 10:25:00',
-      release: {
-        status: 'review_required',
-        checkedAt: '2026-08-23T10:30:00+08:00',
-        checkedAtDisplay: '2026-08-23 10:30:00',
-        latestVersion: '0.7.4',
-      },
-    },
   ],
   accountUsage: [
     {
@@ -361,6 +340,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       metricValueRaw: 926_000,
       usageWindow: {
         key: 'short',
+        accountWide: true,
         group: 'shortTerm',
         limitId: null,
         limitName: null,
@@ -378,9 +358,9 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       lastUsedRelative: { kind: 'just_now' },
     },
     {
-      id: 'preview-xai-1',
+      id: 'preview-anthropic-1',
       upstream: null,
-      provider: 'xai',
+      provider: 'anthropic',
       authenticationKind: 'oauth',
       email: 'gateway@example.com',
       notes: null,
@@ -404,6 +384,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       metricValueRaw: 894,
       usageWindow: {
         key: 'free-rolling-24h',
+        accountWide: true,
         group: 'shortTerm',
         limitId: null,
         limitName: null,
@@ -452,6 +433,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       metricValueRaw: 512_000,
       usageWindow: {
         key: 'short',
+        accountWide: true,
         group: 'shortTerm',
         limitId: null,
         limitName: null,
@@ -494,10 +476,10 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
     previewUsageRecord({
       id: 'preview-02',
       accountEmail: 'gateway@example.com',
-      provider: 'xai',
+      provider: 'anthropic',
       authenticationKind: 'oauth',
-      model: 'grok-code-fast-1',
-      clientTransport: 'websocket',
+      model: 'claude-sonnet-4-5-20250929',
+      clientTransport: 'http_sse',
       upstreamTransport: 'http_sse',
       reasoningEffort: 'medium',
       inputTokens: 12_760,
@@ -509,7 +491,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       createdAt: '2026-08-23T14:39:52+08:00',
       createdAtDisplay: '14:39:52',
       clientIp: '10.24.8.21',
-      userAgent: 'grok-cli/0.7.3',
+      userAgent: 'claude-cli/2.1.29',
     }),
     previewUsageRecord({
       id: 'preview-03',
@@ -557,9 +539,9 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
     previewUsageRecord({
       id: 'preview-05',
       accountEmail: 'analysis@example.com',
-      provider: 'xai',
-      authenticationKind: 'api_key',
-      model: 'grok-4.20',
+      provider: 'anthropic',
+      authenticationKind: 'oauth',
+      model: 'claude-opus-4-5-20251101',
       clientTransport: 'http_sse',
       upstreamTransport: 'http_sse',
       reasoningEffort: 'high',
@@ -618,10 +600,10 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
     previewUsageRecord({
       id: 'preview-08',
       accountEmail: 'fallback@example.com',
-      provider: 'xai',
+      provider: 'anthropic',
       authenticationKind: 'oauth',
-      model: 'grok-code-fast-1',
-      clientTransport: 'websocket',
+      model: 'claude-sonnet-4-5-20250929',
+      clientTransport: 'http_sse',
       upstreamTransport: 'http_sse',
       reasoningEffort: 'medium',
       inputTokens: 7_940,
@@ -633,7 +615,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
       createdAt: '2026-08-23T14:13:25+08:00',
       createdAtDisplay: '14:13:25',
       clientIp: '10.24.6.23',
-      userAgent: 'grok-cli/0.7.3',
+      userAgent: 'claude-cli/2.1.29',
     }),
     previewUsageRecord({
       id: 'preview-09',
@@ -682,6 +664,7 @@ export const themeDashboardSummary = computed<DashboardSummaryResponse>(() => ({
   poolSummary: {
     total: 52,
     normal: 47,
+    quotaPaused: 0,
     quotaExhausted: 3,
     rateLimited: 1,
     disabled: 0,

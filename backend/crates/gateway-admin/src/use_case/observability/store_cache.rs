@@ -197,6 +197,13 @@ impl CachedObservabilityStore {
 
 #[async_trait]
 impl ObservabilityStore for CachedObservabilityStore {
+    async fn prompt_guard_records(
+        &self,
+        query: crate::model::prompt_guard_records::PromptGuardQuery,
+    ) -> AdminStoreResult<crate::model::prompt_guard_records::PromptGuardPage> {
+        // 终态摘要允许迟于计量写入，不复用计量投影的缓存版本。
+        self.inner.prompt_guard_records(query).await
+    }
     fn query_timeout(&self) -> Duration {
         self.inner.query_timeout()
     }

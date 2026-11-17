@@ -59,7 +59,6 @@ where
     let execution_entered = Arc::new(AtomicBool::new(false));
     let terminal_entered = Arc::clone(&execution_entered);
     let result = invoke_request(
-        execution,
         prepared,
         input,
         Box::new(move |prepared, request| {
@@ -68,7 +67,7 @@ where
                 if protocol != "openai" {
                     return Err(MiddlewareError::Rejected);
                 }
-                let operation = request.apply_capabilities(decode(body, headers).await?)?;
+                let operation = decode(body, headers).await?;
                 terminal_entered.store(true, Ordering::Relaxed);
                 let started = match service
                     .start_prepared_provider_endpoint(
@@ -115,9 +114,6 @@ async fn collect_raw_json_response(
         .session_mut()
         .ok_or(MiddlewareError::InvalidState)?;
     let events = session.collect_uncommitted().await;
-    let transformed = events
-        .as_ref()
-        .is_ok_and(|events| events.iter().any(ProviderEvent::middleware_transformed));
     let response = match events {
         Ok(events) => match raw_json_body(events) {
             Some(body) => {
@@ -146,7 +142,7 @@ async fn collect_raw_json_response(
         "openai".to_owned(),
         parts.status.as_u16(),
         encode_headers(&parts.headers),
-        MiddlewareFrame::new(bytes, framing, true).with_transformed(transformed),
+        MiddlewareFrame::new(bytes, framing, true),
         execution,
     ))
 }

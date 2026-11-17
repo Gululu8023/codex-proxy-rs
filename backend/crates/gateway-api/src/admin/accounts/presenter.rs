@@ -25,6 +25,7 @@ pub(super) fn account_page_data(
         summary: AccountSummaryView {
             total: result.summary.total,
             normal: result.summary.normal,
+            quota_paused: result.summary.quota_paused,
             quota_exhausted: result.summary.quota_exhausted,
             rate_limited: result.summary.rate_limited,
             disabled: result.summary.disabled,
@@ -55,7 +56,7 @@ pub(super) fn account_models_data(
             .map(|model| {
                 let id = model.id.to_string();
                 AccountModelView {
-                    label: id.clone(),
+                    label: model.name,
                     id,
                 }
             })
@@ -79,7 +80,6 @@ pub(super) fn account_view(
         projection,
         usage,
         quota,
-        protection_rules,
     } = item;
     let status = projection.status.as_str().to_owned();
     let cooldown = projection.cooldown;
@@ -113,9 +113,9 @@ pub(super) fn account_view(
         .upstream
         .clone()
         .map(|value| super::upstream_info::view(value, now, time));
-    let (mut quota, refresh_token_expires_at) = account_quota_view(quota, cooldown, now, time);
-    quota.protection_rules = protection_rules;
+    let (quota, refresh_token_expires_at) = account_quota_view(quota, cooldown, now, time);
     AccountView {
+        quota_limits: account.quota_limits,
         auto_use_quota_credits: account.auto_use_quota_credits,
         upstream,
         capabilities: capabilities.into(),
@@ -251,9 +251,6 @@ pub(super) fn account_quota_view(
     let rate_limited_until = cooldown.map(|value| time.rfc3339(&value.until.into()));
     let rate_limit_recovery_display = cooldown.map(|value| {
         let until = DateTime::<Utc>::from(value.until);
-        if value.kind.requires_probe() && until <= now {
-            return "等待探测成功".to_owned();
-        }
         let minutes = (until - now).num_seconds().saturating_add(30) / 60;
         match minutes {
             ..1 => time.datetime(&until),
@@ -262,27 +259,22 @@ pub(super) fn account_quota_view(
             _ => format!("剩余 {} 小时 {} 分", minutes / 60, minutes % 60),
         }
     });
-    let rate_limit_reason = cooldown.map(|value| {
-        if value.kind.is_error_protection() {
-            "error_protection".to_owned()
-        } else {
-            "upstream_rate_limit".to_owned()
-        }
-    });
-    let recovery_probe_required = cooldown.is_some_and(|value| value.kind.requires_probe());
+    let rate_limit_reason = cooldown.map(|_| "upstream_rate_limit".to_owned());
     (
         AccountQuotaView {
+            paused_windows: quota.paused_windows,
             refreshed_at: quota.observed_at.map(|value| time.rfc3339(&value)),
             refreshed_at_relative: quota
                 .observed_at
                 .map(|value| time.relative_view(value, now)),
+            provider_data: quota
+                .provider_data
+                .map(|data| Value::Object(data.into_provider_data().into_inner())),
             refreshed_at_display,
             limit_reached: quota.limit_reached,
             rate_limited_until,
             rate_limit_recovery_display,
             rate_limit_reason,
-            recovery_probe_required,
-            protection_rules: Vec::new(),
             windows,
             credits: quota.credits.map(|credits| AccountQuotaCreditsView {
                 has_credits: credits.has_credits,
@@ -306,18 +298,20 @@ pub(crate) fn quota_window_view(
         limit_id,
         limit_name,
         role,
-        local_usage_attribution: _,
+        local_usage_attribution,
         window_seconds,
         used_percent,
         reset_at,
         limit_reached,
         local_usage,
-        provider_data: _,
+        provider_data,
     } = window;
     let label_display = limit_name
         .as_ref()
         .map_or_else(|| label.clone(), |name| format!("{name} · {label}"));
     AccountQuotaWindowView {
+        account_wide: local_usage_attribution
+            == gateway_admin::model::provider_credentials::QuotaLocalUsageAttribution::AccountWide,
         source_account_id: upstream.as_ref().and_then(|value| value.account_id.clone()),
         amount: upstream
             .as_ref()
@@ -328,6 +322,8 @@ pub(crate) fn quota_window_view(
             .and_then(|value| value.observed_at)
             .map(|value| time.datetime(&value)),
         stale: upstream.as_ref().is_some_and(|value| value.stale),
+        provider_data: provider_data
+            .map(|data| Value::Object(data.into_provider_data().into_inner())),
         label_display,
         window_label_display: label,
         key,

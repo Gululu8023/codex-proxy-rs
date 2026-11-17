@@ -15,6 +15,8 @@ pub const STATE_CONFLICT: &str = "backup.state_conflict";
 pub const STORAGE_IDENTITY_LOCKED: &str = "backup.storage_identity_locked";
 /// `pg_dump` 非零退出或失败
 pub const PG_DUMP_FAILED: &str = "backup.pg_dump_failed";
+/// Claude 隐私存储已初始化但无法生成一致快照
+pub const PRIVACY_STORE_FAILED: &str = "backup.privacy_store_failed";
 /// 用量汇总尚未完整发布
 pub const ANALYTICS_NOT_READY: &str = "backup.analytics_not_ready";
 /// 暂存磁盘空间不足

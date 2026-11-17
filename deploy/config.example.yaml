@@ -7,6 +7,17 @@
 
 schema_version: 1
 
+# Claude 强制使用同进程 veil；首次启动自动准备新卷，已有卷恢复不完整时只关闭 Claude 数据面。
+# 数据目录相对 host.runtime_data_dir，规则文件相对本配置文件。
+veil:
+  data_directory: 'veil'
+  # null 使用库内置规则；自定义规则需先安装或挂载文件，再填写相对配置文件的路径。
+  rules_file: null
+  max_mappings: 1000000
+  max_parallel_operations: 32
+  # 自动生成新卷的主密钥并创建映射库，可保持 true；已有卷缺文件时仍必须恢复备份。
+  initialize_store: true
+
 host:
   # 统一展示、查询日期、限额重置和定时任务的 IANA 时区，修改后重启生效。
   timezone: 'Asia/Shanghai'

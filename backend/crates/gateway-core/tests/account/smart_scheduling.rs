@@ -62,9 +62,15 @@ fn smart_config_rejects_invalid_weights_and_incomplete_wire_values() {
 #[test]
 fn reset_weight_rewards_only_future_resets_and_preserves_capacity_checks() {
     let mut context = context(RotationStrategy::Smart);
+    // 只跨越额度重置窗口，避免把夹具的一小时凭据有效期也推进到过期。
+    context.now -= Duration::from_secs(2 * 86_400);
+    let mut weights =
+        serde_json::to_value(SmartSchedulingConfig::new([0.0, 0.0, 0.0, 0.0, 1.0, 0.0]).unwrap())
+            .unwrap();
+    weights["resetWindowWeights"] = json!({"fiveHour":0.0,"weekly":1.0,"monthly":0.0});
     context.policy = context
         .policy
-        .with_smart_scheduling(SmartSchedulingConfig::new([0.0, 0.0, 0.0, 0.0, 1.0, 0.0]).unwrap());
+        .with_smart_scheduling(serde_json::from_value(weights).unwrap());
     let mut candidates = [
         candidate_with_concurrency("acct_unknown", 0, 2),
         candidate_with_concurrency("acct_past", 0, 2),
@@ -74,8 +80,18 @@ fn reset_weight_rewards_only_future_resets_and_preserves_capacity_checks() {
     ];
     candidates[1].signals.quota_reset_at = Some(context.now - Duration::from_secs(1));
     candidates[2].signals.quota_reset_at = Some(context.now);
-    candidates[3].signals.quota_reset_at = Some(context.now + Duration::from_secs(3600));
-    candidates[4].signals.quota_reset_at = Some(context.now + Duration::from_secs(86_400));
+    candidates[3].signals.quota_reset_at = Some(context.now + Duration::from_secs(86_400));
+    candidates[4].signals.quota_reset_at = Some(context.now + Duration::from_secs(2_073_600));
+    // 重置评分只消费带周期的通用额度窗口，旧的单一 reset_at 不是评分输入。
+    for candidate in &mut candidates {
+        candidate.signals.quota_reset_windows = candidate.signals.quota_reset_at.map(|reset_at| {
+            vec![gateway_core::account::AccountQuotaResetWindow {
+                period: gateway_core::account::QuotaResetPeriod::Weekly,
+                reset_at,
+            }]
+            .into()
+        });
+    }
     assert_eq!(
         AccountSelector
             .select(&candidates, &context)
@@ -107,7 +123,7 @@ fn reset_weight_rewards_only_future_resets_and_preserves_capacity_checks() {
         "acct_far"
     );
     candidates[3].signals.in_flight = 0;
-    context.now += Duration::from_secs(3600);
+    context.now += Duration::from_secs(86_400);
     assert_eq!(
         AccountSelector
             .select(&candidates, &context)

@@ -4,6 +4,58 @@ export type ProviderRequestProfile = Record<string, unknown>
 export type ProviderRequestProfiles = Record<string, ProviderRequestProfile>
 export type ProviderRequestProfileUpdates = Record<string, ProviderRequestProfile | null>
 
+export interface ClaudeProfileSelection {
+  mode: 'preset' | 'custom' | 'follow'
+  client: 'cli' | 'vscode'
+  platform: 'macos' | 'linux' | 'windows'
+  arch: 'arm64' | 'x64'
+  versionMode: 'latest' | 'stable' | 'fixed'
+  version: string | null
+  userAgent: string | null
+  installationSeed?: string | null
+}
+
+export interface ClaudeProfileOptions {
+  globalConfiguration: ClaudeProfileSelection
+  presets: ClaudeProfileSelection[]
+}
+
+export interface ClaudeProfilePreview {
+  configuration: ClaudeProfileSelection
+  effective: {
+    userAgent: string
+    version: string
+    entry: string
+    os: string
+    arch: string
+    sdkVersion: string
+    runtimeVersion: string
+    template: string
+    versionSource: string
+    verifiedAt: string | null
+  }
+  checkedAt: string | null
+  checkedAtDisplay: string | null
+  error: string | null
+  requiresClientIdentity: boolean
+}
+
+export function getClaudeProfileOptions() {
+  return request<ClaudeProfileOptions>({
+    url: '/api/admin/settings/client-profiles/anthropic',
+    method: 'GET',
+  })
+}
+
+export function previewClaudeProfile(configuration: ClaudeProfileSelection | null) {
+  return request<ClaudeProfilePreview>({
+    url: '/api/admin/settings/client-profiles/anthropic/preview',
+    method: 'POST',
+    data: { configuration },
+    silent: true,
+  })
+}
+
 export interface PresetClientProfileSelection {
   mode?: undefined
   client: 'desktop' | 'cli'
@@ -83,52 +135,6 @@ interface ClientProfilePreviewParam {
 export function previewClientProfile(data: ClientProfilePreviewParam) {
   return request<ClientProfilePreview>({
     url: '/api/admin/settings/client-profiles/openai/preview',
-    method: 'POST',
-    data,
-    silent: true,
-  })
-}
-
-export interface XaiClientProfileSelection {
-  versionMode: 'latest' | 'fixed'
-  clientVersion: string | null
-  clientIdentifier: string
-  clientMode: string
-  targetOs: string
-  targetArch: string
-}
-
-export interface XaiClientProfilePreview extends Omit<XaiClientProfileSelection, 'versionMode'> {
-  configuration: XaiClientProfileSelection
-  source: 'global' | 'override'
-  userAgent: string
-  versionSource: 'official' | 'custom'
-  verifiedAt: string | null
-  verifiedAtDisplay: string | null
-  checkedAt: string | null
-  checkedAtDisplay: string | null
-  error: string | null
-}
-
-interface XaiClientProfileOptions {
-  defaults: XaiClientProfileSelection
-  globalConfiguration: XaiClientProfileSelection
-}
-
-interface XaiClientProfilePreviewParam {
-  configuration: XaiClientProfileSelection | null
-}
-
-export function getXaiClientProfileOptions() {
-  return request<XaiClientProfileOptions>({
-    url: '/api/admin/settings/client-profiles/xai',
-    method: 'GET',
-  })
-}
-
-export function previewXaiClientProfile(data: XaiClientProfilePreviewParam) {
-  return request<XaiClientProfilePreview>({
-    url: '/api/admin/settings/client-profiles/xai/preview',
     method: 'POST',
     data,
     silent: true,

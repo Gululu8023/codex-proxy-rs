@@ -9,7 +9,7 @@ use gateway_admin::model::{
 #[test]
 fn mutation_intent_preserves_actor_request_and_committed_field_names() {
     let intent = MutationAuditIntent {
-        operation: MutationAuditOperation::PluginInstanceConfigure,
+        operation: MutationAuditOperation::AccountGroupUpdate,
         entity_ref: "instance-1",
     };
     for (actor, expected_kind, expected_user) in [
@@ -39,7 +39,7 @@ fn mutation_intent_preserves_actor_request_and_committed_field_names() {
         assert_eq!(event.request_id.as_deref(), Some("request-1"));
         assert_eq!(
             (event.action.as_str(), event.entity_kind.as_str()),
-            ("configure", "plugin_instance")
+            ("update", "account_group")
         );
         assert_eq!(event.entity_ref, "instance-1");
         assert_eq!(event.changed_fields, ["configuration_json"]);

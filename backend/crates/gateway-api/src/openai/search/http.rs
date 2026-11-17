@@ -8,9 +8,8 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use gateway_core::engine::execution::ClientTransport;
 use gateway_core::error::{GatewayError, GatewayErrorKind};
-use gateway_core::operation::{Operation, OperationKind, RawJsonPayload, StandaloneSearchRequest};
+use gateway_core::operation::{Operation, RawJsonPayload, StandaloneSearchRequest};
 
 use crate::ApiState;
 use crate::middleware::headers::encode_headers;
@@ -46,9 +45,7 @@ pub(crate) async fn standalone_search(
         RequestInput {
             endpoint: SEARCH_PATH.to_owned(),
             protocol: OPENAI_PROTOCOL.to_owned(),
-            operation: Some(OperationKind::Search),
-            transport: ClientTransport::HttpJson,
-            model_hint: None,
+
             headers: encode_headers(&headers),
             body,
         },

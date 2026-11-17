@@ -23,7 +23,7 @@ use super::{
 use crate::{
     ApiState,
     auth::SessionState as _,
-    openai::middleware::{self as plugin_middleware, RequestInput},
+    openai::middleware::{self as request_delivery, RequestInput},
 };
 
 pub(super) fn router() -> Router<ApiState> {
@@ -41,10 +41,10 @@ async fn peer_link(State(state): State<ApiState>, headers: HeaderMap, uri: Uri) 
         Ok(client) => client,
         Err(error) => return client_access_error_response(error.into()),
     };
-    plugin_middleware::query_response(
+    request_delivery::query_response(
         state.openai().execution(),
         client,
-        RequestInput::query(super::router::PEER_LINK_PATH.to_owned(), None, &headers),
+        RequestInput::query(super::router::PEER_LINK_PATH.to_owned(), &headers),
         move |client| peer_response(state, client, uri),
     )
     .await

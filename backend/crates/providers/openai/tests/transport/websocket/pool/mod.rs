@@ -58,6 +58,8 @@ fn search_request(downstream_ws: bool, overrides: Value) -> CodexResponsesReques
     request
 }
 
+// 直接返回生产错误类型，以验证调用方可见的完整传输故障合同。
+#[allow(clippy::result_large_err)]
 async fn send(
     client: &CodexBackendClient,
     request: &CodexResponsesRequest,

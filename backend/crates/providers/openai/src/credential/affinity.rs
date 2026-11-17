@@ -208,7 +208,7 @@ pub(crate) fn derive_endpoint_affinity_with_headers(
     payload: &RawJsonPayload,
     client_api_key_id: &ClientApiKeyId,
     body_session_field: &str,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
 ) -> Option<CodexSessionAffinity> {
     let mut body = serde_json::from_slice::<Map<String, Value>>(payload.body()).unwrap_or_default();
     if let Some(session) = body.get(body_session_field).cloned() {
@@ -232,7 +232,7 @@ pub(crate) fn derive_endpoint_affinity_with_headers(
 
 pub(crate) fn derive_live_session_affinity(
     request: &gateway_core::operation::ProviderHttpRequest,
-    headers: &[gateway_core::engine::middleware::MiddlewareHeader],
+    headers: &[gateway_core::engine::middleware::RequestHeader],
     client_api_key_id: &ClientApiKeyId,
 ) -> Option<CodexSessionAffinity> {
     let mut effective = headers.to_vec();
@@ -246,7 +246,7 @@ pub(crate) fn derive_live_session_affinity(
                     .any(|override_header| override_header.name().eq_ignore_ascii_case(h.name()))
             })
             .map(|h| {
-                gateway_core::engine::middleware::MiddlewareHeader::new(h.name(), h.value().clone())
+                gateway_core::engine::middleware::RequestHeader::new(h.name(), h.value().clone())
             }),
     );
     // x-session-id 是实时通话身份，不代表根对话；只消费官方发送的 session-id

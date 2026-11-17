@@ -103,18 +103,6 @@ pub(super) async fn required_credential(
         .ok_or_else(|| AdminError::not_found("服务商凭据不存在"))
 }
 
-pub(super) async fn required_plugin_credential(
-    accounts: &dyn AccountStore,
-    account_id: &ProviderAccountId,
-    resource: &'static str,
-) -> Result<CredentialDetails, AdminError> {
-    accounts
-        .credential_details_by_id(account_id)
-        .await
-        .map_err(|error| map_store_error(error, resource))?
-        .ok_or_else(|| AdminError::not_found("服务商凭据不存在"))
-}
-
 pub(super) async fn import_proxy_binding(
     proxies: &dyn crate::ports::proxy::ProxyStore,
     id: Option<&str>,

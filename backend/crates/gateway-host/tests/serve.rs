@@ -6,9 +6,6 @@ use std::time::Duration;
 
 use axum::{Router, routing::get};
 use futures::future::BoxFuture;
-use gateway_admin::ports::system::{
-    SystemOperationError, SystemRestartPreflight, SystemUpdateCandidate,
-};
 use gateway_core::diagnostics::{OperationalDiagnostics, OperationalFailure};
 use gateway_core::lifecycle::CancellationToken;
 use gateway_core::task::{
@@ -120,7 +117,7 @@ async fn shutdown_with_pending_request(trigger: ShutdownTrigger) {
     match trigger {
         ShutdownTrigger::Cancellation => cancellation.cancel(),
         ShutdownTrigger::SelfRestart => {
-            system.restart(Arc::new(AllowRestart)).await.unwrap();
+            system.restart().await.unwrap();
         }
         #[cfg(unix)]
         ShutdownTrigger::Signal(signal) => {
@@ -184,15 +181,6 @@ fn shutdown_aborts_workers_that_exceed_the_cleanup_budget() {
             drop(client);
         },
     );
-}
-
-struct AllowRestart;
-
-#[async_trait::async_trait]
-impl SystemRestartPreflight for AllowRestart {
-    async fn prepare(&self, _: Option<SystemUpdateCandidate>) -> Result<(), SystemOperationError> {
-        Ok(())
-    }
 }
 
 #[test]

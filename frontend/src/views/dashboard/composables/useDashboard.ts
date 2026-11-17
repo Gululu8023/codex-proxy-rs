@@ -1,12 +1,15 @@
 import type { DashboardSummaryResponse, DashboardTrendResponse } from '@/api'
 import { useIntervalFn } from '@vueuse/core'
-import { computed, onMounted, onScopeDispose, shallowRef } from 'vue'
+import { computed, onMounted, onScopeDispose, shallowRef, watch } from 'vue'
 
 import { getDashboardSummary, getDashboardTrend } from '@/api'
 import { errorMessage, withMinimumDuration } from '@/utils/operation'
 import { dashboardSnapshotView, dashboardTrendView, normalizeDashboardTrendKind } from '../presenter'
 
 export function useDashboard() {
+  const provider = shallowRef('')
+  let viewRevision = 0
+  let summaryRequestId = 0
   const activeTrendKind = shallowRef(normalizeDashboardTrendKind('usage'))
   const summary = shallowRef<DashboardSummaryResponse | null>(null)
   const snapshot = computed(() => dashboardSnapshotView(summary.value))
@@ -51,6 +54,7 @@ export function useDashboard() {
   async function loadDashboardData(silent = false) {
     if (summaryController || refreshing.value)
       return
+    const revision = viewRevision
     try {
       loading.value = !silent
       await loadDashboardSnapshot(silent)
@@ -59,7 +63,8 @@ export function useDashboard() {
       // 自动刷新会继续重试，保留最后一次成功快照。
     }
     finally {
-      loading.value = false
+      if (revision === viewRevision)
+        loading.value = false
     }
   }
 
@@ -67,6 +72,7 @@ export function useDashboard() {
     if (summaryController || refreshing.value)
       return
     refreshing.value = true
+    const revision = viewRevision
     try {
       await withMinimumDuration(loadDashboardSnapshot)
     }
@@ -74,7 +80,8 @@ export function useDashboard() {
       // 手动刷新失败时保留当前数据，不打断概览操作。
     }
     finally {
-      refreshing.value = false
+      if (revision === viewRevision)
+        refreshing.value = false
     }
   }
 
@@ -87,7 +94,12 @@ export function useDashboard() {
     trendLoading.value = true
     trendError.value = ''
     try {
-      const result = await getDashboardTrend({ kind: trendKind, period: 'today', asOf: rangeAsOf }, { signal: trendController.signal })
+      const result = await getDashboardTrend({
+        kind: trendKind,
+        period: 'today',
+        asOf: rangeAsOf,
+        provider: provider.value || undefined,
+      }, { signal: trendController.signal })
       if (isCurrentTrendRequest(requestId, trendKind))
         trend.value = result
     }
@@ -103,6 +115,8 @@ export function useDashboard() {
 
   async function loadDashboardSnapshot(silent = false) {
     const trendKind = activeTrendKind.value
+    const summaryId = ++summaryRequestId
+    const selectedProvider = provider.value
     const asOf = Date.now()
     const requestId = ++trendRequestId
     trendController?.abort()
@@ -113,8 +127,13 @@ export function useDashboard() {
       trendError.value = ''
     }
     try {
-      const response = await getDashboardSummary({ kind: trendKind, period: 'today', asOf }, { silent, signal: summaryController.signal })
-      if (disposed)
+      const response = await getDashboardSummary({
+        kind: trendKind,
+        period: 'today',
+        asOf,
+        provider: selectedProvider || undefined,
+      }, { silent, signal: summaryController.signal })
+      if (disposed || summaryId !== summaryRequestId)
         return
       rangeAsOf = asOf
       summary.value = response
@@ -130,6 +149,8 @@ export function useDashboard() {
       }
     }
     catch (error: unknown) {
+      if (disposed || summaryId !== summaryRequestId)
+        return
       if (!disposed)
         analyticsError.value = errorMessage(error)
       if (!silent && isCurrentTrendRequest(requestId, trendKind))
@@ -137,7 +158,8 @@ export function useDashboard() {
       throw error
     }
     finally {
-      summaryController = undefined
+      if (summaryId === summaryRequestId)
+        summaryController = undefined
       if (isCurrentTrendRequest(requestId, trendKind))
         trendLoading.value = false
     }
@@ -149,6 +171,25 @@ export function useDashboard() {
   ) {
     return !disposed && requestId === trendRequestId && activeTrendKind.value === kind
   }
+
+  watch(provider, () => {
+    // 切换范围立即丢弃旧快照；取消请求之外再用序号拦截晚到的结果。
+    viewRevision += 1
+    summaryRequestId += 1
+    trendRequestId += 1
+    summaryController?.abort()
+    trendController?.abort()
+    summaryController = undefined
+    trendController = undefined
+    summary.value = null
+    trend.value = null
+    analyticsError.value = ''
+    trendError.value = ''
+    lastRefreshedAt.value = ''
+    refreshing.value = false
+    rangeAsOf = Date.now()
+    void loadDashboardData()
+  })
 
   onMounted(() => {
     void loadDashboardData()
@@ -163,6 +204,7 @@ export function useDashboard() {
   })
 
   return {
+    provider,
     loading,
     refreshing,
     activeTrendKind,

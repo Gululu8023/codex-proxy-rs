@@ -1,0 +1,7 @@
+# 仅作为 CPRS 内嵌库的规则配置，不启动 veil 代理或管理 API。
+rules = []
+allowlist = ["127.0.0.1", "localhost", "0.0.0.0", "::1"]
+
+[packs]
+secrets = true
+region = true

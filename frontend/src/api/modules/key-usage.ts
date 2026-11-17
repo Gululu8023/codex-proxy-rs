@@ -7,6 +7,8 @@ import request from '../request'
 export interface KeyUsageConfig {
   name: string
   plaintextKey: string
+  providerKinds: string[]
+  claudePublicUrl: string
 }
 
 export interface KeyUsageMetrics {

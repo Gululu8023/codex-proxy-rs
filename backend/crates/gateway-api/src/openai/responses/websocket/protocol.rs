@@ -174,8 +174,12 @@ pub(super) fn initial_engine_error_event(
         headers.remove("x-request-id");
         headers.remove("x-oai-request-id");
     }
+    if crate::openai::error::suppress_recovery_retry_after(error) {
+        headers.retain(|name, _| !crate::client_error::is_retry_after_header(name));
+    }
     let status = if provider
         .is_some_and(|error| error.kind() == ProviderErrorKind::UpstreamCapacityUnavailable)
+        && gateway.client_error_code() != Some("previous_response_not_found")
     {
         StatusCode::SERVICE_UNAVAILABLE
     } else {

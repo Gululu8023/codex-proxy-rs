@@ -16,17 +16,16 @@ use crate::{
     upstream::UpstreamSendState,
 };
 
-/// 探测始终固定账号，恢复探测的账号状态由解冻任务持有
+/// 探测始终固定账号
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountProbeTarget {
     ConnectionTest(ProviderAccountId),
-    FreezeRecovery(ProviderAccountId),
 }
 
 impl AccountProbeTarget {
     pub fn account_id(&self) -> &ProviderAccountId {
         match self {
-            Self::ConnectionTest(account) | Self::FreezeRecovery(account) => account,
+            Self::ConnectionTest(account) => account,
         }
     }
 
@@ -35,7 +34,6 @@ impl AccountProbeTarget {
             Self::ConnectionTest(account) => {
                 (account, AccountEligibilityPolicy::BypassForDiagnostic)
             }
-            Self::FreezeRecovery(account) => (account, AccountEligibilityPolicy::FreezeRecovery),
         }
     }
 }
@@ -51,6 +49,47 @@ pub struct AccountProbeRequest {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountProbeResult {
     pub text: Vec<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProbeStage {
+    pub stage: String,
+    pub elapsed_ms: u64,
+    pub duration_ms: u64,
+    pub succeeded: bool,
+    pub guard: Option<AccountProbeGuardDecision>,
+    pub client_profile: Option<AccountProbeClientProfile>,
+}
+
+/// Provider 显式投影的客户端事实；不包含配置种子、设备或会话身份。
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct AccountProbeClientProfile {
+    pub mode: String,
+    pub version: String,
+    pub user_agent: String,
+    pub entry: String,
+    pub platform: String,
+    pub arch: String,
+    pub sdk_version: String,
+    pub runtime_version: String,
+    pub template_revision: String,
+    pub version_source: String,
+    pub verified_at: Option<String>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountProbeGuardDecision {
+    pub mode: String,
+    pub action: super::prompt_guard::GuardAction,
+    pub would_action: super::prompt_guard::GuardAction,
+}
+
+pub struct AccountProbeReport {
+    pub result: Result<AccountProbeResult, AccountProbeError>,
+    pub stages: Vec<AccountProbeStage>,
 }
 
 /// 仅供当前管理端连接测试展示的原始上游失败响应
@@ -199,7 +238,17 @@ impl From<GatewayError> for AccountProbeError {
 }
 
 pub trait AccountProbe: Send + Sync {
-    /// 插件管理操作传入其冻结快照；其他调用可使用当前发布视图
+    /// 管理端读取诊断阶段事实，不把诊断写成业务请求。
+    fn probe_report(&self, request: AccountProbeRequest) -> BoxFuture<'_, AccountProbeReport> {
+        Box::pin(async move {
+            AccountProbeReport {
+                result: self.probe(request, None).await,
+                stages: Vec::new(),
+            }
+        })
+    }
+
+    /// 诊断可使用指定的冻结快照；省略时使用当前发布视图
     fn probe(
         &self,
         request: AccountProbeRequest,

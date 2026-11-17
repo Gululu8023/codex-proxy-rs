@@ -16,7 +16,7 @@ use serde_json::{Map, Value};
 use uuid::Uuid;
 
 use super::{
-    AdminError, MutationActor, MutationContext, PageSize, Revision,
+    AdminError, MutationActor, MutationContext, Revision,
     accounts::{
         AccountImportSettings, AccountRecord, AccountSummary, AccountUsage, CredentialState,
     },
@@ -845,6 +845,7 @@ pub struct ProviderQuotaReadRequest<'a> {
 /// Provider 已解析的 quota 结果及其不透明差异字段
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct ProviderQuota {
+    pub paused_windows: Vec<String>,
     pub upstream: Option<super::upstream_info::ProviderUpstreamInfo>,
     /// 上游额度响应明确提供的套餐，可用于补全账号展示
     pub plan_type: Option<String>,
@@ -852,7 +853,7 @@ pub struct ProviderQuota {
     pub refresh_token_expires_at: Option<DateTime<Utc>>,
     pub windows: Vec<ProviderQuotaWindow>,
     pub credits: Option<ProviderQuotaCredits>,
-    /// 展示用快照级触顶事实（顶层或任一窗口触顶）；不参与账号五态派生
+    /// 展示用快照级触顶事实（顶层或任一窗口触顶）；不参与账号状态派生
     pub limit_reached: bool,
     pub provider_data: Option<ProviderDocument>,
 }
@@ -1206,54 +1207,6 @@ pub struct ProviderModelCatalogDocument {
     pub observed_at: DateTime<Utc>,
 }
 
-/// 插件账号回调的服务端过滤条件；Provider 缺省时跨全部已注册类型分页
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginAccountListQuery {
-    pub provider_kind: Option<ProviderKind>,
-    pub cursor: Option<ProviderAccountId>,
-    pub limit: PageSize,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginAccountPage {
-    pub accounts: Vec<AccountRecord>,
-    pub next_cursor: Option<ProviderAccountId>,
-}
-
-/// 原始凭据与当前账号 revision 的同一读取结果
-#[derive(Clone, PartialEq)]
-pub struct PluginAccountCredential {
-    pub account: AccountRecord,
-    pub provider_material: ProviderDocument,
-}
-
-impl fmt::Debug for PluginAccountCredential {
-    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
-        formatter
-            .debug_struct("PluginAccountCredential")
-            .field("account", &self.account)
-            .field("provider_material", &self.provider_material)
-            .finish()
-    }
-}
-
-/// Runtime 已完成 wire 校验、Admin 仍需绑定当前账号和 revision 的 prepared facts
-#[derive(Debug, Clone, PartialEq)]
-pub enum PreparedPluginAccountSave {
-    Create(PreparedCredentialCreate),
-    Replace {
-        facts: PreparedCredentialRotationFacts,
-        authentication_kind: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PluginAccountSaveResult {
-    pub config_revision: Revision,
-    pub account_id: ProviderAccountId,
-    pub credential_revision: Revision,
-}
-
 /// Provider 执行 refresh 时所需的当前公共账号事实
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PrepareCredentialRefresh {
@@ -1288,7 +1241,6 @@ impl fmt::Debug for ProviderExport {
 /// 统一账号目录的一行完整结果
 #[derive(Debug, Clone, PartialEq)]
 pub struct AccountDirectoryItem {
-    pub protection_rules: Vec<gateway_core::account::AccountProtectionMatch>,
     pub account: AccountRecord,
     pub capacity: super::accounts::AccountCapacity,
     pub capabilities: super::accounts::ProviderAccountCapabilities,

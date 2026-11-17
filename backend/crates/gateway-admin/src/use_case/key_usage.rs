@@ -9,15 +9,14 @@ use crate::{
     model::{
         AdminError, AdminErrorKind,
         auth::SessionSubject,
-        client_keys::ClientKeySecret,
         key_usage::{
-            KeyUsageOverview, KeyUsageQuery, KeyUsageRecordKind, KeyUsageRecords,
+            KeyUsageConfig, KeyUsageOverview, KeyUsageQuery, KeyUsageRecordKind, KeyUsageRecords,
             KeyUsageRecordsQuery,
         },
         observability::{Granularity, TimeRange, UsageFilter, UsageQuery, UsageRecordStatus},
         system::SystemVersion,
     },
-    ports::store::{ClientKeyStore, ObservabilityStore},
+    ports::store::{ClientKeyStore, ObservabilityStore, SettingsStore},
 };
 use gateway_core::{
     engine::{
@@ -34,7 +33,7 @@ pub trait KeyUsageService: Send + Sync {
     /// 验证 Key 并只读查询当前额度，不记录 Key 使用或执行推理准入
     async fn budget(&self, plaintext: &str) -> Result<Option<ClientBudgetStatus>, AdminError>;
 
-    /// 使用 Core 已认证的宿主身份查询额度，不接收插件自报的 Key ID
+    /// 使用 Core 已认证的宿主身份查询额度，不接收调用者自报的 Key ID
     async fn budget_for_client(
         &self,
         id: &ClientApiKeyId,
@@ -42,8 +41,7 @@ pub trait KeyUsageService: Send + Sync {
 
     async fn version(&self, session_id: Option<&str>) -> Result<Option<SystemVersion>, AdminError>;
 
-    async fn config(&self, session_id: Option<&str>)
-    -> Result<Option<ClientKeySecret>, AdminError>;
+    async fn config(&self, session_id: Option<&str>) -> Result<Option<KeyUsageConfig>, AdminError>;
 
     async fn overview(
         &self,
@@ -65,6 +63,7 @@ pub(crate) struct DefaultKeyUsageService {
     keys: Arc<dyn ClientKeyStore>,
     observations: Arc<dyn ObservabilityStore>,
     system: Arc<dyn SystemService>,
+    settings: Arc<dyn SettingsStore>,
 }
 
 impl DefaultKeyUsageService {
@@ -75,6 +74,7 @@ impl DefaultKeyUsageService {
         observations: Arc<dyn ObservabilityStore>,
         system: Arc<dyn SystemService>,
         timezone: gateway_core::time::DeploymentTimeZone,
+        settings: Arc<dyn SettingsStore>,
     ) -> Self {
         Self {
             timezone,
@@ -83,6 +83,7 @@ impl DefaultKeyUsageService {
             keys,
             observations,
             system,
+            settings,
         }
     }
 
@@ -117,10 +118,7 @@ impl KeyUsageService for DefaultKeyUsageService {
         let id = match self.verifier.verify_client_key(plaintext) {
             Ok(id) => id,
             Err(ClientAuthenticationError::InvalidKey) => return Ok(None),
-            Err(
-                ClientAuthenticationError::SnapshotUnavailable
-                | ClientAuthenticationError::ProviderUnavailable,
-            ) => {
+            Err(ClientAuthenticationError::SnapshotUnavailable) => {
                 return Err(AdminError::new(
                     AdminErrorKind::Unavailable,
                     "密钥验证暂时不可用",
@@ -148,19 +146,29 @@ impl KeyUsageService for DefaultKeyUsageService {
         self.system.version().await.map(Some)
     }
 
-    async fn config(
-        &self,
-        session_id: Option<&str>,
-    ) -> Result<Option<ClientKeySecret>, AdminError> {
+    async fn config(&self, session_id: Option<&str>) -> Result<Option<KeyUsageConfig>, AdminError> {
         let Some(id) = self.key_id(session_id).await? else {
             return Ok(None);
         };
         // 明文只按服务端会话绑定的 Key 读取，禁用或删除后不再提供配置
-        self.keys
+        let secret = self
+            .keys
             .reveal_client_key(&id)
             .await
-            .map(|secret| secret.filter(|secret| secret.record.enabled))
-            .map_err(|error| map_store_error(error, "key usage config"))
+            .map_err(|error| map_store_error(error, "key usage config"))?
+            .filter(|secret| secret.record.enabled);
+        let Some(secret) = secret else {
+            return Ok(None);
+        };
+        let settings = self
+            .settings
+            .load_runtime_settings()
+            .await
+            .map_err(|error| map_store_error(error, "key usage public entry"))?;
+        Ok(Some(KeyUsageConfig {
+            secret,
+            claude_public_url: settings.values.claude_public_url,
+        }))
     }
 
     async fn overview(

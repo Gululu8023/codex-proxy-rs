@@ -94,6 +94,8 @@ async fn config_reveals_only_the_session_keys_name_and_plaintext() {
         json!({
             "name": "Development",
             "plaintextKey": format!("sk_{}", "a".repeat(43)),
+            "providerKinds": [],
+            "claudePublicUrl": "",
         })
     );
     let overview = get(&app, "overview", "", &cookie).await;
@@ -421,6 +423,8 @@ async fn unknown_scope_fields_and_unbounded_queries_are_rejected() {
             "&clientApiKeyRef=other",
             "&keyId=other",
             "&account=other",
+            "&accountSearch=other@example.invalid",
+            "&accountName=other",
             "&provider=openai",
             "&model=%00",
             "&startTime=duplicate",

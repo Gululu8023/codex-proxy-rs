@@ -1,4 +1,4 @@
-//! 系统更新测试入口与发行包、前置校验和本地安装夹具
+//! 系统更新测试入口与发行包和本地安装夹具
 
 mod channels;
 mod discovery;
@@ -21,16 +21,12 @@ use std::time::Duration;
 use filetime::FileTime;
 use flate2::{Compression, write::GzEncoder};
 use futures::StreamExt as _;
-use gateway_admin::model::{
-    Revision,
-    system::{
-        SystemOperationAccepted, SystemOperationKind, SystemOperationStatus, SystemUpdateCheck,
-        SystemUpdateEventLevel, SystemUpdateStatus,
-    },
+use gateway_admin::model::system::{
+    SystemOperationAccepted, SystemOperationKind, SystemOperationStatus, SystemUpdateCheck,
+    SystemUpdateEventLevel, SystemUpdateStatus,
 };
 use gateway_admin::ports::system::{
-    SystemOperationError, SystemOperationErrorKind, SystemOperations, SystemUpdateCandidate,
-    SystemUpdatePreflight,
+    SystemOperationError, SystemOperationErrorKind, SystemOperations,
 };
 use gateway_core::lifecycle::CancellationToken;
 use gateway_host::system_update::{
@@ -46,8 +42,6 @@ const BINARY_NAME: &str = if cfg!(windows) {
 } else {
     "codex-proxy-rs"
 };
-
-const OLD_RELEASE_MANIFEST: &str = r#"{"gateway_version":"1.0.0"}"#;
 
 const TARGET_VERSION: &str = "1.9.9";
 const CROSS_MAJOR_VERSION: &str = "2.0.0";
@@ -78,27 +72,6 @@ impl gateway_core::diagnostics::OperationalDiagnostics for RecordingDiagnostics 
     }
 }
 
-struct AllowingUpdatePreflight;
-#[async_trait::async_trait]
-impl gateway_admin::ports::system::SystemRestartPreflight for AllowingUpdatePreflight {
-    async fn prepare(&self, _: Option<SystemUpdateCandidate>) -> Result<(), SystemOperationError> {
-        Ok(())
-    }
-}
-
-#[async_trait::async_trait]
-impl SystemUpdatePreflight for AllowingUpdatePreflight {
-    async fn validate(&self, _: SystemUpdateCandidate) -> Result<Revision, SystemOperationError> {
-        Revision::new(1).map_err(|_| {
-            SystemOperationError::new(SystemOperationErrorKind::Internal, "invalid test revision")
-        })
-    }
-
-    async fn confirm_revision(&self, _: Revision) -> Result<(), SystemOperationError> {
-        Ok(())
-    }
-}
-
 #[async_trait::async_trait]
 trait TestSystemUpdate {
     async fn perform_test_update(
@@ -113,93 +86,7 @@ impl TestSystemUpdate for ProcessSystemOperations {
         &self,
         target: Option<String>,
     ) -> Result<SystemOperationAccepted, SystemOperationError> {
-        SystemOperations::perform_update(self, target, None, Arc::new(AllowingUpdatePreflight))
-            .await
-    }
-}
-
-struct ChangingRevisionPreflight {
-    confirmations: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl SystemUpdatePreflight for ChangingRevisionPreflight {
-    async fn validate(
-        &self,
-        candidate: SystemUpdateCandidate,
-    ) -> Result<Revision, SystemOperationError> {
-        assert_eq!(candidate.target_version, TARGET_VERSION);
-        assert_eq!(candidate.release_manifest.as_ref(), b"new-manifest");
-        Ok(Revision::new(7).expect("revision"))
-    }
-
-    async fn confirm_revision(&self, _: Revision) -> Result<(), SystemOperationError> {
-        if self.confirmations.fetch_add(1, Ordering::SeqCst) == 0 {
-            Ok(())
-        } else {
-            Err(SystemOperationError::new(
-                SystemOperationErrorKind::Conflict,
-                "fixture revision changed",
-            ))
-        }
-    }
-}
-
-struct ChangingRollbackRevisionPreflight {
-    confirmations: AtomicUsize,
-}
-
-#[async_trait::async_trait]
-impl SystemUpdatePreflight for ChangingRollbackRevisionPreflight {
-    async fn validate(
-        &self,
-        candidate: SystemUpdateCandidate,
-    ) -> Result<Revision, SystemOperationError> {
-        assert_eq!(candidate.target_version, "1.0.0");
-        assert_eq!(
-            candidate.release_manifest.as_ref(),
-            OLD_RELEASE_MANIFEST.as_bytes()
-        );
-        Ok(Revision::new(11).expect("revision"))
-    }
-
-    async fn confirm_revision(&self, _: Revision) -> Result<(), SystemOperationError> {
-        if self.confirmations.fetch_add(1, Ordering::SeqCst) == 0 {
-            Ok(())
-        } else {
-            Err(SystemOperationError::new(
-                SystemOperationErrorKind::Conflict,
-                "fixture revision changed",
-            ))
-        }
-    }
-}
-
-struct BlockingRollbackPreflight {
-    confirmations: AtomicUsize,
-    reached_after_swap: Arc<tokio::sync::Notify>,
-}
-
-#[async_trait::async_trait]
-impl SystemUpdatePreflight for BlockingRollbackPreflight {
-    async fn validate(
-        &self,
-        candidate: SystemUpdateCandidate,
-    ) -> Result<Revision, SystemOperationError> {
-        assert_eq!(candidate.target_version, "1.0.0");
-        assert_eq!(
-            candidate.release_manifest.as_ref(),
-            OLD_RELEASE_MANIFEST.as_bytes()
-        );
-        Ok(Revision::new(13).expect("revision"))
-    }
-
-    async fn confirm_revision(&self, _: Revision) -> Result<(), SystemOperationError> {
-        if self.confirmations.fetch_add(1, Ordering::SeqCst) == 0 {
-            return Ok(());
-        }
-        self.reached_after_swap.notify_one();
-        std::future::pending().await
+        SystemOperations::perform_update(self, target, None).await
     }
 }
 
@@ -249,13 +136,6 @@ impl Fixture {
         fixture.write_executable("old-binary");
         fs::create_dir_all(fixture.web()).expect("web dir");
         fs::write(fixture.web().join("index.html"), "old-web").expect("web");
-        fs::create_dir_all(fixture.official()).expect("official plugin dir");
-        fs::write(
-            fixture.official().join("plugin-release-manifest.json"),
-            OLD_RELEASE_MANIFEST,
-        )
-        .expect("manifest");
-        fs::write(fixture.official().join("old-plugin.tar.gz"), "old-plugin").expect("plugin");
         fixture
     }
 
@@ -269,10 +149,6 @@ impl Fixture {
 
     fn web(&self) -> PathBuf {
         self.root.path().join("web/dist")
-    }
-
-    fn official(&self) -> PathBuf {
-        self.root.path().join("plugins/official")
     }
 
     fn state(&self) -> PathBuf {
@@ -393,9 +269,6 @@ impl Fixture {
 enum ArchiveKind {
     Safe,
     UnsafePath(&'static str),
-    MissingOfficialManifest,
-    NestedOfficialAsset,
-    OfficialSymlink,
 }
 
 #[derive(Clone, Copy)]
@@ -410,54 +283,11 @@ fn release_archive(kind: ArchiveKind) -> Vec<u8> {
     let mut tar = Builder::new(encoder);
     append_file(&mut tar, BINARY_NAME, b"new-binary", 0o755, false);
     append_file(&mut tar, "web/dist/index.html", b"new-web", 0o755, false);
-    if !matches!(kind, ArchiveKind::MissingOfficialManifest) {
-        append_file(
-            &mut tar,
-            "plugins/official/plugin-release-manifest.json",
-            b"new-manifest",
-            0o444,
-            false,
-        );
-    }
-    append_file(
-        &mut tar,
-        "plugins/official/new-plugin.tar.gz",
-        b"new-plugin",
-        0o644,
-        false,
-    );
     if let ArchiveKind::UnsafePath(name) = kind {
         append_file(&mut tar, name, b"escape", 0o755, true);
     }
-    if matches!(kind, ArchiveKind::NestedOfficialAsset) {
-        append_file(
-            &mut tar,
-            "plugins/official/nested/plugin.tar.gz",
-            b"nested",
-            0o444,
-            false,
-        );
-    }
-    if matches!(kind, ArchiveKind::OfficialSymlink) {
-        append_symlink(
-            &mut tar,
-            "plugins/official/linked.tar.gz",
-            "../outside.tar.gz",
-        );
-    }
     let encoder = tar.into_inner().expect("tar");
     encoder.finish().expect("gzip")
-}
-
-fn append_symlink(tar: &mut Builder<GzEncoder<Vec<u8>>>, name: &str, target: &str) {
-    let mut header = Header::new_gnu();
-    header.set_entry_type(EntryType::Symlink);
-    header.set_mode(0o777);
-    header.set_size(0);
-    header.set_path(name).expect("path");
-    header.set_link_name(target).expect("link target");
-    header.set_cksum();
-    tar.append(&header, std::io::empty()).expect("append link");
 }
 
 fn append_file(
@@ -552,19 +382,4 @@ fn release_response(version: &str, assets: Vec<serde_json::Value>) -> ResponseTe
         "assets": assets,
     });
     ResponseTemplate::new(200).set_body_json(release)
-}
-
-struct RejectingRestartPreflight;
-#[async_trait::async_trait]
-impl gateway_admin::ports::system::SystemRestartPreflight for RejectingRestartPreflight {
-    async fn prepare(
-        &self,
-        candidate: Option<SystemUpdateCandidate>,
-    ) -> Result<(), SystemOperationError> {
-        assert_eq!(candidate.unwrap().target_version, "1.0.0");
-        Err(SystemOperationError::new(
-            SystemOperationErrorKind::Conflict,
-            "plugins need confirmation",
-        ))
-    }
 }

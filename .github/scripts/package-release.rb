@@ -2,30 +2,14 @@ require 'digest'
 require 'fileutils'
 require_relative 'release-metadata'
 
-# 归档与镜像消费相同二进制和封口清单，不在打包时重新解释插件分发策略
+# 归档与镜像消费相同的二进制和前端资源
 module ReleasePackage
   APP_NAME = ReleaseMetadata::APP_NAME
-  MANIFEST = 'dist/plugin-release-assets/plugin-release-manifest.json'
-
-  def self.install_manifest(directory)
-    manifest = JSON.parse(File.read(MANIFEST))
-    unless manifest['schema_version'] == 1 && manifest['sealed'] == true && manifest['plugins'] == []
-      raise 'Expected a sealed host manifest without bundled plugins'
-    end
-    FileUtils.mkdir_p(directory)
-    destination = File.join(directory, File.basename(MANIFEST))
-    FileUtils.cp(MANIFEST, destination)
-    File.chmod(0o444, destination)
-    File.chmod(0o555, directory)
-  end
-
   def self.archives
     platforms = JSON.parse(ENV.fetch('PLATFORM_MATRIX')).fetch('include')
     release_dir = 'dist/release'
     FileUtils.rm_rf(release_dir)
     FileUtils.mkdir_p(release_dir)
-    # 上一次打包生成的只读清单目录需要先恢复写权限
-    FileUtils.chmod_R('u+w', 'package') if File.directory?('package')
     FileUtils.rm_rf('package')
     config = 'deploy/config.example.yaml'
     FileUtils.cp(config, release_dir)
@@ -45,7 +29,6 @@ module ReleasePackage
       File.chmod(0o755, "#{root}/#{binary}")
       FileUtils.cp_r('dist/frontend/.', "#{root}/web/dist")
       FileUtils.cp(config, "#{root}/deploy")
-      install_manifest("#{root}/plugins/official")
       archive = File.join(release_dir, ReleaseMetadata.archive_name(ENV.fetch('VERSION'), platform))
       raise "Failed to create #{archive}" unless system('tar', '-czf', archive, '-C', File.dirname(root), APP_NAME)
     end
@@ -60,7 +43,6 @@ module ReleasePackage
     FileUtils.mkdir_p(target)
     FileUtils.cp("dist/docker-artifacts/#{APP_NAME}-#{platform}/#{ENV.fetch('MATRIX_BINARY')}", "#{target}/#{APP_NAME}")
     File.chmod(0o755, "#{target}/#{APP_NAME}")
-    install_manifest("#{target}/plugins/official")
   end
 end
 

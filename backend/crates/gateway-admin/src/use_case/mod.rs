@@ -11,14 +11,9 @@ pub mod import_tasks;
 pub mod key_usage;
 pub mod observability;
 pub mod peer_link;
-pub mod plugin_accounts;
-pub mod plugin_client_keys;
-pub mod plugin_resources;
-pub mod plugins;
 pub mod proxies;
 pub mod settings;
 pub mod system;
-pub(crate) mod system_preflight;
 pub mod usage_data;
 
 mod credential_mutation;
@@ -29,8 +24,8 @@ use credential_mutation::{
     commit_authorization, commit_credential_refresh, commit_credential_rotation,
     delete_credentials, import_proxy_binding, notify_account_facts_changed,
     notify_account_unavailable, pending_authorization, publish_credentials_and_observe_quota,
-    required_credential, required_plugin_credential, validate_authorization_commit,
-    validate_prepared_import, validate_prepared_rotation, validate_prepared_rotation_facts,
+    required_credential, validate_authorization_commit, validate_prepared_import,
+    validate_prepared_rotation,
 };
 use error::{map_provider_error, map_store_error};
 use publication::publish_committed;

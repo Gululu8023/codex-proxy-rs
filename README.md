@@ -5,133 +5,129 @@
 
 # Codex Proxy RS
 
-面向 Codex 的自托管多账号 AI 网关
+把多个 ChatGPT、Claude 订阅账号合成一个账号池，让 Codex 和 Claude Code 通过同一个网关使用
 
-[![CI](https://github.com/zyycn/codex-proxy-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/zyycn/codex-proxy-rs/actions/workflows/ci.yml)
-[![Release](https://img.shields.io/github/v/release/zyycn/codex-proxy-rs?display_name=tag&sort=semver&style=flat-square)](https://github.com/zyycn/codex-proxy-rs/releases)
-[![GHCR](https://img.shields.io/badge/GHCR-codex--proxy--rs-2496ED?logo=docker&logoColor=white&style=flat-square)](https://github.com/zyycn/codex-proxy-rs/pkgs/container/codex-proxy-rs)
+[![CI](https://github.com/Gululu8023/codex-proxy-rs/actions/workflows/ci.yml/badge.svg)](https://github.com/Gululu8023/codex-proxy-rs/actions/workflows/ci.yml)
+[![Docker image](https://github.com/Gululu8023/codex-proxy-rs/actions/workflows/docker-image.yml/badge.svg)](https://github.com/Gululu8023/codex-proxy-rs/actions/workflows/docker-image.yml)
+[![GHCR](https://img.shields.io/badge/GHCR-codex--proxy--rs-2496ED?logo=docker&logoColor=white&style=flat-square)](https://github.com/Gululu8023/codex-proxy-rs/pkgs/container/codex-proxy-rs)
 [![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg?style=flat-square)](LICENSE)
 
-[快速预览](#快速预览) · [快速开始](#快速开始) · [客户端接入](#客户端接入) · [文档](#文档) · [社区](#社区) · [许可证](#许可证)
+[能做什么](#能做什么) · [快速开始](#快速开始) · [客户端接入](#客户端接入) · [文档](#文档)
 
 </div>
 
-> [!NOTE]
-> 本项目提供 Responses API 和 Chat Completions API；Chat Completions 请求通过 Responses 链路执行，支持范围见 [API 参考](docs/api.md#chat-completions-请求)
+Codex Proxy RS（CPRS）是一个自托管网关。你把手上的 ChatGPT 和 Claude 订阅账号登录进来，再给自己的电脑、同事或其他服务各发一个客户端密钥。Codex、Claude Code 只要连上网关，就由网关挑选合适的账号转发请求，同时记下每个密钥用了多少、花了多少钱。
 
-## 快速预览
+> [!IMPORTANT]
+> 本项目基于 [zyycn/codex-proxy-rs](https://github.com/zyycn/codex-proxy-rs) 二次开发，从 v4.0.0 起独立编号。数据库结构和源仓库**不兼容**，首次部署请使用全新的 PostgreSQL 和空的 Redis，原因见[初始化基线](backend/migrations/README.md#二开初始化基线)。
 
-无需部署即可体验管理端的系统概览、账号分组、代理管理与用量统计：
+## 能做什么
 
-| 登录信息 | 默认值 |
-| --- | --- |
-| 地址 | <https://codex-proxy-rs.ainz.cc> |
-| 登录身份 | 管理员 |
-| 账号 | `admin@cpr.local` |
-| 密码 | `039c18de2aeac46d23ead7766bb07bbbe3747233c66a128e` |
+**账号池**
+- ChatGPT（Codex）和 Claude 账号用 OAuth 登录，也可以直接导入已有凭据
+- 可以给每个账号指定独立的代理出口，并给账号分组
+- 后台自动同步各账号的额度和可用模型，账号快用完或出错时会冷却，暂时不再分到请求
+- 请求按额度、会话亲和和并发情况分配到账号，账号都忙时自动排队
 
-预览服务运行已发布版本，展示的账号、代理与使用记录均为模拟数据，每天北京时间 `00:00` 自动生成当天数据
+**客户端密钥**
+- 每个密钥可以单独限定：能用哪些供应商、哪些账号分组，日/周花费上限，并发数和每分钟请求数
+- 密钥持有人用自己的 Key 登录管理端，就能查看自己的用量和额度，并复制现成的客户端配置
 
-这是公开共享的功能预览环境，不提供真实模型调用；请勿导入真实账号、密钥或其他敏感信息
+**客户端**
+- **Codex**：支持 Responses 和 Chat Completions 接口，也支持生图和语音通话。配置可一键复制，也能导入 CC Switch
+- **Claude Code**：走原生 Messages 接口，支持流式输出、token 计数和模型发现。CLI 和 VS Code 扩展共用一份 `settings.json`
+
+**Claude 隐私保护**：发往 Anthropic 的文本先由内嵌的 [veil](deploy/claude/README.md) 替换掉密钥、令牌等敏感文本，响应回来时再还原。主密钥和映射库在首次启动时自动生成。
+
+**Prompt 审查**：先用本地规则给请求打分，可以再交给一个独立的审核模型复核。可以只记录不拦截，先观察效果，再切到拦截模式。被上游拒绝的请求会进入学习队列，帮你整理出新规则，规则需要人工确认才会发布。
+
+**运维**
+- 按模型定价统计用量和费用，能查看请求日志、定位失败原因
+- 支持备份数据库和 Claude 隐私存储，官方构建可以在管理端直接在线更新
+- 通过 [CPR 互联](deploy/README.md#cpr-互联)，可以把另一台 CPRS 发出的密钥当作账号接入，共享它的账号池
 
 ## 快速开始
 
-使用 Docker Compose 部署版本固定的发布镜像，同时启动 PostgreSQL 和 Redis
+用 Docker Compose 部署，PostgreSQL 和 Redis 会一起启动。需要 Linux amd64，并已安装 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL。
 
-以下命令适用于 Linux amd64/arm64，需要 Docker Engine、Docker Compose Plugin、curl 和 OpenSSL
-
-macOS 从[发行页](https://github.com/zyycn/codex-proxy-rs/releases)下载对应的归档：Intel 机型选 `darwin_amd64`，Apple Silicon 机型选 `darwin_arm64`。
-Windows x64 / ARM64 的安装步骤见 [Windows 二进制部署](deploy/README.md#windows-二进制部署)
-
-已有部署请先看 [升级说明](deploy/README.md#镜像升级与源码构建)，不要覆盖原配置
+> [!TIP]
+> `main` 分支自动构建的 `latest` 镜像只有 linux/amd64 版本。arm64 镜像，以及 Linux、macOS、Windows 的二进制包，请从 [Releases](https://github.com/Gululu8023/codex-proxy-rs/releases) 获取。
 
 ### 一键安装
 
-请确保当前用户能访问 Docker，并可通过 `sudo` 或 root 设置目录权限
+当前用户要能使用 Docker，并能通过 `sudo` 或 root 设置目录权限：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/zyycn/codex-proxy-rs/main/deploy/install.sh -o install.sh && bash install.sh
+curl -fsSL https://raw.githubusercontent.com/Gululu8023/codex-proxy-rs/main/deploy/install.sh -o install.sh && bash install.sh
 ```
 
-[安装脚本](deploy/install.sh) 默认安装到当前目录下的 `codex-proxy-rs/`，下载同一正式 Release 的部署文件，
-自动生成密码、设置目录权限并启动服务
+脚本会在当前目录下创建 `codex-proxy-rs/`，下载部署文件、生成密码并启动服务。结束时会显示访问地址和管理员密码，请记下来。
 
-完成后保存显示的访问地址和管理员密码，再[登录管理端](#登录管理端)并[添加账号与客户端密钥](#添加账号与客户端密钥)
-
-可在执行 `bash install.sh` 时传入环境变量：
+可以用环境变量调整安装行为：
 
 | 变量 | 用途 | 默认值 |
 | --- | --- | --- |
-| `INSTALL_DIR` | 安装目录，建议使用绝对路径 | 当前目录下的 `codex-proxy-rs/` |
-| `CPR_RELEASE_TAG` | 指定发布标签 | 最新正式版本 |
-| `ADMIN_PASSWORD` | 管理员初始密码，至少 12 位，不能包含 `$`，不能使用常见弱口令 | 随机生成 |
-
-例如，自定义安装目录：
+| `INSTALL_DIR` | 安装目录，建议写绝对路径 | 当前目录下的 `codex-proxy-rs/` |
+| `CPR_RELEASE_TAG` | 安装指定 Release 版本 | 跟随 `main` 分支 |
+| `ADMIN_PASSWORD` | 管理员初始密码，至少 12 位，不能包含 `$`，也不能是常见弱口令 | 随机生成 |
 
 ```bash
 INSTALL_DIR="$HOME/services/codex-proxy-rs" bash install.sh
 ```
 
-重复运行时请使用同一安装目录，检测到 `deploy/config.yaml` 后，脚本保留现有配置和部署文件，
-忽略传入的管理员密码，也不执行版本升级
+在已有安装目录里再次运行脚本，不会改动现有配置，也不会升级版本。想自己一步步部署，请看[手动安装](deploy/README.md#手动安装)。
 
-### 手动安装
+### 升级
 
-自行下载部署文件、配置密码和启动服务的完整步骤见 [部署文档](deploy/README.md#手动安装)
+在安装目录执行：
 
-### 登录管理端
+```bash
+docker compose -f deploy/compose.yaml pull
+docker compose -f deploy/compose.yaml up -d
+```
 
-部署完成后，打开 `http://127.0.0.1:8080`，使用 `admin@cpr.local` 和管理员密码登录
+请保留 `.runtime/data` 目录。Claude 隐私处理的主密钥和映射库都存在这里，丢失后之前的 Claude 会话将无法继续。跨版本升级前先看[升级说明](deploy/README.md#镜像升级与源码构建)。
 
-API Key 持有者可在登录页切换身份，查看自己的用量与额度，并通过「密钥配置」复制 Codex 配置或导入 CC Switch
+### 开始使用
 
-默认地址只能在服务器本机访问，从其他设备使用时，需要配置
-[HTTPS 反向代理](deploy/README.md#公网访问)
-
-### 添加账号与客户端密钥
-
-1. 在「账号」中添加账号，完成授权或导入
-2. 按需建立账号分组，再创建客户端密钥并选择可用分组，**不选分组表示可使用全部账号**
-3. [连接客户端](#客户端接入)
+1. 打开 `http://127.0.0.1:8080`，用 `admin@cpr.local` 和管理员密码登录。默认只能在服务器本机访问，要从其他设备使用，请配置 [HTTPS 反向代理](deploy/README.md#公网访问)
+2. 在「账号管理」中选择供应商，登录或导入账号
+3. 在「API密钥」中创建客户端密钥，勾选它能用的供应商。不选分组，就能使用权限范围内的全部账号
+4. 点密钥的「使用密钥」，复制配置到客户端
 
 ## 客户端接入
 
-**Codex CLI / 桌面端**：在「使用密钥」中按操作系统复制配置，合并配置后重启 Codex；也可通过「导入到」把服务连接与密钥添加到 CC Switch
+| 客户端 | 地址 | 配置文件 |
+| --- | --- | --- |
+| Codex CLI / 桌面端 | `http://127.0.0.1:8080/v1` | `~/.codex/config.toml` |
+| Claude Code CLI / VS Code | `http://127.0.0.1:8080/claude`（**不要加 `/v1`**） | `~/.claude/settings.json` |
+| 其他 Responses / Chat Completions 客户端 | `http://127.0.0.1:8080/v1` | 按客户端填写 |
 
-完整步骤、生图配置与排障见[客户端配置](deploy/README.md#客户端配置)
+远程使用时，把 `http://127.0.0.1:8080` 换成网关的 HTTPS 地址。API Key 一律填管理端创建的客户端密钥；Claude Code 使用的密钥需要开通 Anthropic 权限。
 
-**其他 Responses / Chat Completions API 客户端**：填写以下信息：
-
-| 配置 | 值 |
-| --- | --- |
-| Base URL | `http://127.0.0.1:8080/v1`；远程接入使用服务器的 HTTPS 地址 |
-| API Key | 管理端创建的客户端密钥 |
-
-查询该密钥可见的模型目录：
+查询某个密钥能用哪些模型：
 
 ```bash
 curl http://127.0.0.1:8080/v1/models \
   -H 'Authorization: Bearer <client-api-key>'
 ```
 
+具体配置、生图、语音和排障见[客户端配置](deploy/README.md#客户端配置)。
+
 ## 文档
 
-| 任务 | 文档 |
+| 想做什么 | 看这里 |
 | --- | --- |
-| 部署与使用 | [部署、备份与恢复](deploy/README.md) · [客户端接入与生图](deploy/README.md#客户端配置) |
-| 接口集成 | [API 参考](docs/api.md) · [模型定价](docs/api.md#模型定价) |
-| 使用插件 | [安装、配置与使用](docs/plugins.md) |
-| 开发插件 | [SDK 与合同](backend/crates/gateway-plugin/sdk/README.md) · [打包工具](backend/apps/plugin-cli/README.md) · [官方示例](https://github.com/zyycn/codex-proxy-plugins/blob/main/README.md) |
-| 开发共用组件 | [组件库说明](https://github.com/zyycn/codex-proxy-ui/blob/main/README.md) · [组件参考](https://github.com/zyycn/codex-proxy-ui/blob/main/playground/components/index.md) · [Playground](https://zyycn.github.io/codex-proxy-ui/) |
-| 开发宿主 | [开发与源码联调](docs/development.md) · [系统架构](docs/architecture.md) · [管理端主题](docs/theme.md) · [数据库迁移](backend/migrations/README.md) |
-| 参与协作 | [贡献、审查与验证](CONTRIBUTING.md) |
+| 部署、备份、恢复、升级 | [部署文档](deploy/README.md) |
+| 接入 Claude、了解隐私处理 | [Claude 接入与 veil](deploy/claude/README.md) |
+| 对接接口、配置 Prompt 审查 | [API 参考](docs/api.md) |
+| 二次开发 | [开发指南](docs/development.md) · [系统架构](docs/architecture.md) · [数据库迁移](backend/migrations/README.md) · [UI 组件库](https://github.com/zyycn/codex-proxy-ui) |
+| 提交代码 | [贡献指南](CONTRIBUTING.md) |
 
-## 社区
+## 致谢
 
-问题反馈与功能建议请使用 [GitHub Issues](https://github.com/zyycn/codex-proxy-rs/issues)，填写要求见 [贡献说明](CONTRIBUTING.md#提交-issue)
-
-感谢 [LINUX DO](https://linux.do) 社区提供开放、友善的技术交流平台
+感谢 [zyycn/codex-proxy-rs](https://github.com/zyycn/codex-proxy-rs) 原作者打下的基础，也感谢 [LINUX DO](https://linux.do) 社区。
 
 ## 许可证
 
-本项目基于 [Apache License 2.0](LICENSE) 开源
+[Apache License 2.0](LICENSE)

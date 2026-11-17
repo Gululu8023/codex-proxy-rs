@@ -21,12 +21,13 @@ use tracing::{info, warn};
 use crate::{
     model::AdminError,
     model::backup::{
-        BackupError, BackupObjectMetadata, BackupRecord, BackupStatus, BackupStatusTransition,
-        BackupStorageConfig, BackupTriggerKind, build_backup_seed, code,
+        BackupError, BackupObject, BackupObjectMetadata, BackupRecord, BackupStatus,
+        BackupStatusTransition, BackupStorageConfig, BackupTriggerKind, build_backup_seed,
+        build_privacy_store_object_key, code,
     },
     ports::backup::{
-        BackupObjectStorePort, BackupRepository, DatabaseDumpPort, DumpRequest,
-        StatusTransitionUpdate, UploadObjectRequest,
+        BackupObjectStorePort, BackupRepository, DatabaseDumpPort, DumpRequest, NoPrivacyStore,
+        PrivacyStoreSnapshotPort, StatusTransitionUpdate, UploadObjectRequest,
     },
 };
 
@@ -54,7 +55,27 @@ pub struct BackupTask {
     timezone: gateway_core::time::DeploymentTimeZone,
     repository: Arc<dyn BackupRepository>,
     dump: Arc<dyn DatabaseDumpPort>,
+    privacy_store: Arc<dyn PrivacyStoreSnapshotPort>,
     object_store: Arc<dyn BackupObjectStorePort>,
+}
+
+/// 已暂存、待上传到指定对象 key 的归档
+struct StagedObject {
+    object_key: String,
+    path: std::path::PathBuf,
+    size_bytes: u64,
+    sha256: String,
+}
+
+impl StagedObject {
+    fn new(object_key: String, path: std::path::PathBuf, size_bytes: u64, sha256: String) -> Self {
+        Self {
+            object_key,
+            path,
+            size_bytes,
+            sha256,
+        }
+    }
 }
 
 impl BackupTask {
@@ -69,8 +90,16 @@ impl BackupTask {
             timezone: Default::default(),
             repository,
             dump,
+            privacy_store: Arc::new(NoPrivacyStore),
             object_store,
         }
+    }
+
+    /// 接入隐私存储快照；未接入时视为部署没有映射卷
+    #[must_use]
+    pub fn with_privacy_store(mut self, privacy_store: Arc<dyn PrivacyStoreSnapshotPort>) -> Self {
+        self.privacy_store = privacy_store;
+        self
     }
 
     #[must_use]
@@ -267,52 +296,44 @@ impl BackupTask {
         Ok(())
     }
 
-    /// dumping：有完整暂存则继续上传，否则清理暂存并标记失败
+    /// dumping：有完整数据库暂存则补齐隐私存储快照并继续上传，否则清理暂存并标记失败
+    ///
+    /// 映射只增不删，重启后重新生成的快照仍覆盖先前数据库快照引用的映射
     async fn recover_dumping(
         &self,
         record: &BackupRecord,
         cancellation: &CancellationToken,
     ) -> Result<(), WorkerTaskError> {
-        match self.dump.inspect_staging(&record.id).await? {
-            Some(artifact) => {
-                let now = Utc::now();
-                let update = StatusTransitionUpdate {
-                    size_bytes: Some(artifact.size_bytes),
-                    sha256: Some(artifact.sha256.clone()),
-                    ..Default::default()
-                };
-                let Some(uploading_record) = self
-                    .repository
-                    .transition_status(
-                        &record.id,
-                        status_transition(BackupStatus::Dumping, BackupStatus::Uploading)?,
-                        update,
-                        now,
-                    )
-                    .await
-                    .map_err(repo_error)?
-                else {
-                    return Ok(());
-                };
-                self.upload_and_verify(
-                    &uploading_record,
-                    &artifact.path,
-                    artifact.size_bytes,
-                    &artifact.sha256,
-                    now,
-                    cancellation,
-                )
-                .await?;
-            }
-            None => {
-                self.fail_task(record, code::PG_DUMP_FAILED, "导出进程中断，暂存归档不完整")
-                    .await?;
-            }
-        }
-        Ok(())
+        let Some(artifact) = self.dump.inspect_staging(&record.id).await? else {
+            return self
+                .fail_task(record, code::PG_DUMP_FAILED, "导出进程中断，暂存归档不完整")
+                .await;
+        };
+        let privacy = match self.privacy_store.inspect_staging(&record.id).await? {
+            Some(staged) => Some(StagedObject::new(
+                String::new(),
+                staged.path,
+                staged.size_bytes,
+                staged.sha256,
+            )),
+            None => match self.snapshot_privacy_store(record, cancellation).await {
+                Ok(privacy) => privacy,
+                Err((error_code, message)) => {
+                    return self.fail_task(record, error_code, message).await;
+                }
+            },
+        };
+        let database = StagedObject::new(
+            record.object_key.clone(),
+            artifact.path,
+            artifact.size_bytes,
+            artifact.sha256,
+        );
+        self.start_upload(record, database, privacy, cancellation)
+            .await
     }
 
-    /// uploading：远端匹配则补记完成，有完整暂存则重试上传，否则失败
+    /// uploading：远端全部匹配则补记完成，有完整暂存则重试上传，否则失败
     async fn recover_uploading(
         &self,
         record: &BackupRecord,
@@ -322,13 +343,7 @@ impl BackupTask {
         let Some(config) = BackupStorageConfig::from_settings(&settings) else {
             return Ok(());
         };
-        if let Some(remote) = self
-            .object_store
-            .head_object(&config, &record.object_key)
-            .await?
-            && record.size_bytes == Some(remote.size_bytes)
-            && record.sha256.as_deref() == Some(remote.sha256.as_str())
-        {
+        if self.remote_objects_match(&config, record).await? {
             let now = Utc::now();
             if self
                 .repository
@@ -346,27 +361,71 @@ impl BackupTask {
             }
             return Ok(());
         }
-        match self.dump.inspect_staging(&record.id).await? {
-            Some(artifact) => {
-                self.upload_and_verify(
-                    record,
-                    &artifact.path,
-                    artifact.size_bytes,
-                    &artifact.sha256,
-                    Utc::now(),
-                    cancellation,
-                )
-                .await
-            }
-            None => {
-                self.fail_task(
+        let database = self.dump.inspect_staging(&record.id).await?;
+        let privacy = match &record.privacy_store {
+            Some(expected) => match self.privacy_store.inspect_staging(&record.id).await? {
+                Some(staged) => Some(StagedObject::new(
+                    expected.object_key.clone(),
+                    staged.path,
+                    staged.size_bytes,
+                    staged.sha256,
+                )),
+                None => {
+                    return self
+                        .fail_task(
+                            record,
+                            code::S3_UPLOAD_FAILED,
+                            "远端对象缺失且本地无完整暂存",
+                        )
+                        .await;
+                }
+            },
+            None => None,
+        };
+        let Some(database) = database else {
+            return self
+                .fail_task(
                     record,
                     code::S3_UPLOAD_FAILED,
                     "远端对象缺失且本地无完整暂存",
                 )
-                .await
+                .await;
+        };
+        let mut objects = vec![StagedObject::new(
+            record.object_key.clone(),
+            database.path,
+            database.size_bytes,
+            database.sha256,
+        )];
+        objects.extend(privacy);
+        self.upload_and_verify(record, objects, Utc::now(), cancellation)
+            .await
+    }
+
+    /// 已记录的全部远端对象存在且大小与 sha256 一致
+    async fn remote_objects_match(
+        &self,
+        config: &BackupStorageConfig,
+        record: &BackupRecord,
+    ) -> Result<bool, WorkerTaskError> {
+        let (Some(size_bytes), Some(sha256)) = (record.size_bytes, record.sha256.as_deref()) else {
+            return Ok(false);
+        };
+        let mut expected = vec![(record.object_key.as_str(), size_bytes, sha256)];
+        if let Some(privacy) = &record.privacy_store {
+            expected.push((
+                privacy.object_key.as_str(),
+                privacy.size_bytes,
+                &privacy.sha256,
+            ));
+        }
+        for (object_key, size_bytes, sha256) in expected {
+            match self.object_store.head_object(config, object_key).await? {
+                Some(remote) if remote.size_bytes == size_bytes && remote.sha256 == sha256 => {}
+                _ => return Ok(false),
             }
         }
+        Ok(true)
     }
 
     /// 完成待删除记录（deleting → DeleteObject → 硬删除）
@@ -381,12 +440,7 @@ impl BackupTask {
             .await
             .map_err(repo_error)?;
         for record in records {
-            if self
-                .object_store
-                .delete_object(&config, &record.object_key)
-                .await
-                .is_ok()
-            {
+            if self.delete_objects(&config, &record).await.is_ok() {
                 self.repository
                     .delete_record(&record.id)
                     .await
@@ -394,6 +448,23 @@ impl BackupTask {
             }
         }
         Ok(())
+    }
+
+    /// 删除记录的全部远端对象；隐私存储先删，数据库归档最后删除，
+    /// 任一失败时保留记录以便下一轮重试
+    async fn delete_objects(
+        &self,
+        config: &BackupStorageConfig,
+        record: &BackupRecord,
+    ) -> Result<(), BackupError> {
+        if let Some(privacy) = &record.privacy_store {
+            self.object_store
+                .delete_object(config, &privacy.object_key)
+                .await?;
+        }
+        self.object_store
+            .delete_object(config, &record.object_key)
+            .await
     }
 
     /// 领取一个 queued 任务并执行导出、上传与远端校验
@@ -439,7 +510,6 @@ impl BackupTask {
                 .await;
         }
 
-        let now = Utc::now();
         let artifact = match self
             .dump
             .dump(DumpRequest {
@@ -454,11 +524,80 @@ impl BackupTask {
                 return self.fail_task(record, error_code, message).await;
             }
         };
+        // 隐私存储快照必须晚于数据库快照，才能覆盖数据库引用的全部映射
+        let privacy = match self.snapshot_privacy_store(record, cancellation).await {
+            Ok(privacy) => privacy,
+            Err((error_code, message)) => return self.fail_task(record, error_code, message).await,
+        };
+        let database = StagedObject::new(
+            record.object_key.clone(),
+            artifact.path,
+            artifact.size_bytes,
+            artifact.sha256,
+        );
+        self.start_upload(record, database, privacy, cancellation)
+            .await
+    }
 
-        // dumping → uploading，持久化 size/sha256
+    /// 生成隐私存储快照；映射卷从未初始化时无需附属对象
+    async fn snapshot_privacy_store(
+        &self,
+        record: &BackupRecord,
+        cancellation: &CancellationToken,
+    ) -> Result<Option<StagedObject>, (&'static str, &'static str)> {
+        match self
+            .privacy_store
+            .snapshot(DumpRequest {
+                backup_id: record.id.clone(),
+                cancellation: cancellation.clone(),
+            })
+            .await
+        {
+            Ok(artifact) => Ok(artifact.map(|artifact| {
+                StagedObject::new(
+                    String::new(),
+                    artifact.path,
+                    artifact.size_bytes,
+                    artifact.sha256,
+                )
+            })),
+            Err(error) => {
+                warn!(backup_id = %record.id, error_code = error.code(), "Claude 隐私存储快照失败");
+                Err(match error.code() {
+                    code::CANCELLED => (code::CANCELLED, "备份已取消"),
+                    code::STAGING_SPACE_EXHAUSTED => {
+                        (code::STAGING_SPACE_EXHAUSTED, "暂存磁盘空间不足")
+                    }
+                    _ => (
+                        code::PRIVACY_STORE_FAILED,
+                        "Claude 隐私存储快照失败，请检查 veil 状态后重试",
+                    ),
+                })
+            }
+        }
+    }
+
+    /// dumping → uploading：持久化全部对象的大小与 sha256 后上传
+    async fn start_upload(
+        &self,
+        record: &BackupRecord,
+        database: StagedObject,
+        privacy: Option<StagedObject>,
+        cancellation: &CancellationToken,
+    ) -> Result<(), WorkerTaskError> {
+        let now = Utc::now();
+        let privacy = privacy.map(|object| StagedObject {
+            object_key: build_privacy_store_object_key(&record.object_key),
+            ..object
+        });
         let update = StatusTransitionUpdate {
-            size_bytes: Some(artifact.size_bytes),
-            sha256: Some(artifact.sha256.clone()),
+            size_bytes: Some(database.size_bytes),
+            sha256: Some(database.sha256.clone()),
+            privacy_store: privacy.as_ref().map(|object| BackupObject {
+                object_key: object.object_key.clone(),
+                size_bytes: object.size_bytes,
+                sha256: object.sha256.clone(),
+            }),
             ..Default::default()
         };
         let Some(uploading_record) = self
@@ -474,25 +613,17 @@ impl BackupTask {
         else {
             return Ok(());
         };
-
-        self.upload_and_verify(
-            &uploading_record,
-            &artifact.path,
-            artifact.size_bytes,
-            &artifact.sha256,
-            now,
-            cancellation,
-        )
-        .await
+        let mut objects = vec![database];
+        objects.extend(privacy);
+        self.upload_and_verify(&uploading_record, objects, now, cancellation)
+            .await
     }
 
-    /// 上传 + 远端校验，内部完成终态迁移
+    /// 上传 + 远端校验全部对象，内部完成终态迁移
     async fn upload_and_verify(
         &self,
         record: &BackupRecord,
-        source: &std::path::Path,
-        size_bytes: u64,
-        sha256: &str,
+        objects: Vec<StagedObject>,
         now: DateTime<Utc>,
         cancellation: &CancellationToken,
     ) -> Result<(), WorkerTaskError> {
@@ -501,100 +632,117 @@ impl BackupTask {
             return Ok(());
         };
         let store = self.object_store.clone();
-        let metadata =
-            BackupObjectMetadata::new(record.id.clone(), sha256.to_owned(), now, size_bytes);
-        if let Err(error) = store
-            .upload_file(
-                &config,
-                UploadObjectRequest {
-                    object_key: record.object_key.clone(),
-                    source: source.to_path_buf(),
-                    metadata,
-                    cancellation: cancellation.clone(),
-                },
-            )
-            .await
-        {
-            self.fail_uploaded_task(
-                record,
-                &config,
-                BackupError::new(
-                    error.code(),
-                    format!("上传到对象存储失败：{}", error.message()),
-                ),
-            )
-            .await?;
-            return Ok(());
+        for object in &objects {
+            let metadata = BackupObjectMetadata::new(
+                record.id.clone(),
+                object.sha256.clone(),
+                now,
+                object.size_bytes,
+            );
+            if let Err(error) = store
+                .upload_file(
+                    &config,
+                    UploadObjectRequest {
+                        object_key: object.object_key.clone(),
+                        source: object.path.clone(),
+                        metadata,
+                        cancellation: cancellation.clone(),
+                    },
+                )
+                .await
+            {
+                return self
+                    .fail_uploaded_task(
+                        record,
+                        &config,
+                        BackupError::new(
+                            error.code(),
+                            format!("上传到对象存储失败：{}", error.message()),
+                        ),
+                    )
+                    .await;
+            }
         }
 
-        match store.head_object(&config, &record.object_key).await {
-            Ok(Some(remote)) if remote.size_bytes == size_bytes && remote.sha256 == sha256 => {
-                if self
-                    .repository
-                    .transition_status(
-                        &record.id,
-                        status_transition(BackupStatus::Uploading, BackupStatus::Completed)?,
-                        StatusTransitionUpdate::default(),
-                        Utc::now(),
-                    )
-                    .await
-                    .map_err(repo_error)?
-                    .is_some()
-                {
-                    info!(
+        for object in &objects {
+            let size_bytes = object.size_bytes;
+            match store.head_object(&config, &object.object_key).await {
+                Ok(Some(remote))
+                    if remote.size_bytes == size_bytes && remote.sha256 == object.sha256 => {}
+                Ok(Some(remote)) => {
+                    let size_matches = remote.size_bytes == size_bytes;
+                    let sha256_matches = remote.sha256 == object.sha256;
+                    warn!(
                         backup_id = %record.id,
-                        size_bytes,
-                        "备份完成"
+                        expected_size_bytes = size_bytes,
+                        remote_size_bytes = remote.size_bytes,
+                        sha256_matches,
+                        "备份远端对象校验不一致"
                     );
-                    self.cleanup_staging(&record.id).await;
+                    return self
+                        .fail_uploaded_task(
+                            record,
+                            &config,
+                            BackupError::new(
+                                code::REMOTE_VERIFICATION_FAILED,
+                                match (size_matches, sha256_matches) {
+                                    (false, true) => "远端对象大小不一致",
+                                    (true, false) => "远端对象 sha256 校验值不一致",
+                                    (false, false) => "远端对象大小和 sha256 校验值均不一致",
+                                    (true, true) => "远端对象校验状态异常",
+                                }
+                                .to_owned(),
+                            ),
+                        )
+                        .await;
+                }
+                Ok(None) => {
+                    warn!(backup_id = %record.id, "上传完成后未找到远端对象");
+                    // 其他对象可能已经上传，统一按已上传任务清理
+                    return self
+                        .fail_uploaded_task(
+                            record,
+                            &config,
+                            BackupError::new(
+                                code::REMOTE_VERIFICATION_FAILED,
+                                "上传完成后未找到远端对象".to_owned(),
+                            ),
+                        )
+                        .await;
+                }
+                Err(error) => {
+                    return self
+                        .fail_uploaded_task(
+                            record,
+                            &config,
+                            BackupError::new(
+                                error.code(),
+                                format!("远端对象校验失败：{}", error.message()),
+                            ),
+                        )
+                        .await;
                 }
             }
-            Ok(Some(remote)) => {
-                let size_matches = remote.size_bytes == size_bytes;
-                let sha256_matches = remote.sha256 == sha256;
-                warn!(
-                    backup_id = %record.id,
-                    expected_size_bytes = size_bytes,
-                    remote_size_bytes = remote.size_bytes,
-                    sha256_matches,
-                    "备份远端对象校验不一致"
-                );
-                self.fail_uploaded_task(
-                    record,
-                    &config,
-                    BackupError::new(
-                        code::REMOTE_VERIFICATION_FAILED,
-                        match (size_matches, sha256_matches) {
-                            (false, true) => "远端对象大小不一致",
-                            (true, false) => "远端对象 sha256 校验值不一致",
-                            (false, false) => "远端对象大小和 sha256 校验值均不一致",
-                            (true, true) => "远端对象校验状态异常",
-                        }
-                        .to_owned(),
-                    ),
-                )
-                .await?;
-            }
-            Ok(None) => {
-                warn!(backup_id = %record.id, "上传完成后未找到远端对象");
-                self.fail_task(
-                    record,
-                    code::REMOTE_VERIFICATION_FAILED,
-                    "上传完成后未找到远端对象",
-                )
-                .await?;
-            }
-            Err(error) => {
-                self.fail_uploaded_task(
-                    record,
-                    &config,
-                    BackupError::new(
-                        error.code(),
-                        format!("远端对象校验失败：{}", error.message()),
-                    ),
-                )
-                .await?;
-            }
+        }
+        if self
+            .repository
+            .transition_status(
+                &record.id,
+                status_transition(BackupStatus::Uploading, BackupStatus::Completed)?,
+                StatusTransitionUpdate::default(),
+                Utc::now(),
+            )
+            .await
+            .map_err(repo_error)?
+            .is_some()
+        {
+            info!(
+                backup_id = %record.id,
+                size_bytes = objects.iter().map(|object| object.size_bytes).sum::<u64>(),
+                privacy_store = record.privacy_store.is_some(),
+                "备份完成"
+            );
+            self.cleanup_staging(&record.id).await;
         }
         Ok(())
     }
@@ -606,11 +754,7 @@ impl BackupTask {
         config: &BackupStorageConfig,
         mut error: BackupError,
     ) -> Result<(), WorkerTaskError> {
-        if let Err(cleanup) = self
-            .object_store
-            .delete_object(config, &record.object_key)
-            .await
-        {
+        if let Err(cleanup) = self.delete_objects(config, record).await {
             error =
                 error.with_cleanup_failure("DeleteObject", &cleanup, record.expires_at.is_some());
         }
@@ -655,6 +799,9 @@ impl BackupTask {
     async fn cleanup_staging(&self, backup_id: &str) {
         if let Err(error) = self.dump.cleanup_staging(backup_id).await {
             warn!(backup_id, error = %error, "清理备份暂存失败");
+        }
+        if let Err(error) = self.privacy_store.cleanup_staging(backup_id).await {
+            warn!(backup_id, error = %error, "清理隐私存储暂存失败");
         }
     }
 
@@ -739,12 +886,7 @@ impl BackupTask {
         let Some(config) = BackupStorageConfig::from_settings(&settings) else {
             return Ok(());
         };
-        if self
-            .object_store
-            .delete_object(&config, &record.object_key)
-            .await
-            .is_ok()
-        {
+        if self.delete_objects(&config, record).await.is_ok() {
             self.repository
                 .delete_record(&record.id)
                 .await

@@ -41,12 +41,13 @@ impl PgObservabilityRepository {
         self
     }
 
-    /// 从账号事实和当前冷却一次性派生 Dashboard 五态；不在 SQL 中复制状态机
+    /// 从账号事实和当前冷却一次性派生 Dashboard 状态；不在 SQL 中复制状态机
     async fn account_status_snapshot(
         &self,
         observed_at: DateTime<Utc>,
+        provider: Option<&str>,
     ) -> StoreResult<(ProviderAccountMetrics, Vec<ProviderAccountStatus>)> {
-        let accounts = self
+        let mut accounts = self
             .query_budget
             .run(
                 &self.pool,
@@ -54,6 +55,9 @@ impl PgObservabilityRepository {
                 |mut connection| async move { load_account_statuses(&mut *connection).await },
             )
             .await?;
+        if let Some(provider) = provider {
+            accounts.retain(|account| account.provider_kind == provider);
+        }
         let now = observed_at.into();
         let cooldown = load_cooldown(self.cooldowns.as_deref(), &accounts, now).await;
         let mut metrics = ProviderAccountMetrics {
@@ -68,6 +72,9 @@ impl PgObservabilityRepository {
                 gateway_core::account::AccountStatus::Normal => {
                     metrics.normal = metrics.normal.saturating_add(1);
                     normal_accounts.push(account);
+                }
+                gateway_core::account::AccountStatus::QuotaPaused => {
+                    metrics.quota_paused = metrics.quota_paused.saturating_add(1);
                 }
                 gateway_core::account::AccountStatus::QuotaExhausted => {
                     metrics.quota_exhausted = metrics.quota_exhausted.saturating_add(1);
@@ -175,8 +182,14 @@ impl PgObservabilityRepository {
     ) -> StoreResult<DashboardObservation> {
         let range = store_range(query.range)?;
         let yesterday_range = store_range(query.yesterday_range)?;
-        let account_usage_query = ProviderAccountUsageQuery::recent(range, query.account_limit)?
-            .with_hourly_request_buckets()?;
+        let mut account_usage_query =
+            ProviderAccountUsageQuery::recent(range, query.account_limit)?
+                .with_hourly_request_buckets()?;
+        account_usage_query.provider_kind = query.provider_kind.clone();
+        let filter = UsageRecordFilter {
+            provider_kind: query.provider_kind.clone(),
+            ..Default::default()
+        };
         let recent_query = UsageRecordQuery {
             status: Default::default(),
             range,
@@ -192,16 +205,12 @@ impl PgObservabilityRepository {
                 "load dashboard analytics",
                 |mut connection| async move {
                     let mut snapshot = analytics::AnalyticsSnapshot::new(&mut connection).await?;
-                    let totals = snapshot.totals().await?;
-                    let yesterday = snapshot.dashboard_card_metrics(yesterday_range).await?;
+                    let totals = snapshot.totals(&filter).await?;
+                    let yesterday = snapshot
+                        .dashboard_card_metrics(yesterday_range, &filter)
+                        .await?;
                     let trend = snapshot
-                        .trend(
-                            range,
-                            &UsageRecordFilter::default(),
-                            query.granularity,
-                            self.timezone,
-                            false,
-                        )
+                        .trend(range, &filter, query.granularity, self.timezone, false)
                         .await?;
                     let account_usage =
                         provider_account_usage(&mut snapshot, account_usage_query).await?;
@@ -211,8 +220,9 @@ impl PgObservabilityRepository {
                 },
             )
             .await?;
-        let (provider_accounts, normal_accounts) =
-            self.account_status_snapshot(observed_at).await?;
+        let (provider_accounts, normal_accounts) = self
+            .account_status_snapshot(observed_at, query.provider_kind.as_deref())
+            .await?;
         let recent_requests = self
             .query_budget
             .run(
@@ -440,6 +450,20 @@ impl PgObservabilityRepository {
 
 #[async_trait]
 impl AdminObservabilityStore for PgAdminObservabilityStore {
+    async fn prompt_guard_records(
+        &self,
+        query: gateway_admin::model::prompt_guard_records::PromptGuardQuery,
+    ) -> AdminStoreResult<gateway_admin::model::prompt_guard_records::PromptGuardPage> {
+        self.repository
+            .query_budget
+            .run(
+                &self.repository.pool,
+                "list prompt guard records",
+                |mut connection| async move { prompt_guard_records(&mut connection, query).await },
+            )
+            .await
+            .map_err(observability_error)
+    }
     async fn diagnostic_errors(
         &self,
         target: &gateway_admin::model::diagnostics::DiagnosticTarget,

@@ -1,0 +1,60 @@
+# 放入 Nginx 的 http {} 内，CPRS 只监听本机
+map $http_upgrade $cprs_connection {
+    default upgrade;
+    '' close;
+}
+server {
+    listen 443 ssl;
+    server_name codex.example.com;
+    client_max_body_size 0;
+    ssl_certificate /etc/letsencrypt/live/codex.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/codex.example.com/privkey.pem;
+    location ~* ^/(claude(?:/|$)|_internal(?:/|$)|v1/providers/anthropic(?:/|$)) {
+        default_type application/json;
+        return 404 '{"type":"error","error":{"type":"not_found_error","message":"Unknown endpoint"}}';
+    }
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header Upgrade $http_upgrade;
+        proxy_set_header Connection $cprs_connection;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_read_timeout 3600s;
+    }
+}
+server {
+    listen 443 ssl;
+    server_name claude.example.com;
+    ssl_certificate /etc/letsencrypt/live/claude.example.com/fullchain.pem;
+    ssl_certificate_key /etc/letsencrypt/live/claude.example.com/privkey.pem;
+    client_max_body_size 32m;
+    client_body_buffer_size 32m;
+    access_log off;
+    error_log /var/log/nginx/claude-error.log warn;
+    default_type application/json;
+    error_page 413 = @claude_413;
+    error_page 502 504 = @claude_503;
+
+    location ~ ^/v1/(messages(?:/count_tokens)?|models(?:/[^/]+)?)$ {
+        # rewrite 保留查询串；所有处理发生在 CPRS 内，不转发到独立 veil。
+        rewrite ^ /claude$uri break;
+        proxy_pass http://127.0.0.1:8080;
+        proxy_http_version 1.1;
+        proxy_pass_request_headers on;
+        proxy_set_header Host $host;
+        proxy_set_header Connection '';
+        proxy_set_header Accept-Encoding identity;
+        proxy_buffering off;
+        proxy_request_buffering off;
+        proxy_cache off;
+        proxy_intercept_errors off;
+        proxy_read_timeout 3600s;
+        proxy_send_timeout 3600s;
+    }
+    location @claude_503 { return 503 '{"type":"error","error":{"type":"api_error","message":"Claude gateway unavailable"}}'; }
+    location @claude_413 { return 413 '{"type":"error","error":{"type":"request_too_large","message":"Request body exceeds 32 MiB"}}'; }
+    location / { return 404 '{"type":"error","error":{"type":"not_found_error","message":"Unknown Anthropic endpoint"}}'; }
+}

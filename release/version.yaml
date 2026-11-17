@@ -1,7 +1,4 @@
-version: 3.44.0
-published:
-  '3':
-    stable: 3.44.0
-    rc: 3.44.0
-    beta: 3.44.0
-    alpha: 3.44.0
+# CPRS 从 4.0.0 起独立编号，不再随上游版本递增。
+version: 4.0.0
+# 只记录本仓库成功发布的 Release；main/latest 构建不属于正式发行。
+published: {}

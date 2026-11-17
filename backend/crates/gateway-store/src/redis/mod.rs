@@ -2,7 +2,6 @@
 
 use sha2::{Digest, Sha256};
 
-mod account_error_protection;
 mod admin_account_runtime;
 mod artifact_profile;
 mod auth;
@@ -41,6 +40,21 @@ pub(crate) const MAX_REDIS_EXACT_INTEGER: u64 = (1_u64 << 53) - 1;
 pub(crate) fn resource_fingerprint(entity: &'static str, value: &str) -> StoreResult<String> {
     require_nonempty(entity, "resource ID", value)?;
     Ok(hex::encode(Sha256::digest(value.as_bytes())))
+}
+
+fn scheduling_cursor_key(
+    namespace: &str,
+    client_key: &gateway_core::policy::ClientApiKeyId,
+    provider: &gateway_core::routing::ProviderKind,
+    suffix: &str,
+) -> StoreResult<String> {
+    let fingerprint = resource_fingerprint(
+        "provider scheduling cursor",
+        &format!("{}\0{}", client_key.as_str(), provider.as_str()),
+    )?;
+    Ok(format!(
+        "{namespace}:scheduler:client-provider:{{{fingerprint}}}:{suffix}"
+    ))
 }
 
 pub(crate) fn namespace(value: &str) -> StoreResult<String> {

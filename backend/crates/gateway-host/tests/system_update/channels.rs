@@ -114,11 +114,7 @@ async fn install_should_use_confirmed_channel_and_infer_new_default_only_after_r
         .await;
     let service = fixture.service(&server);
     let error = service
-        .perform_update(
-            Some("1.1.0-beta.1".into()),
-            Some(Stable),
-            Arc::new(AllowingUpdatePreflight),
-        )
+        .perform_update(Some("1.1.0-beta.1".into()), Some(Stable))
         .await
         .expect_err("target outside confirmed channel");
     assert_eq!(error.kind(), SystemOperationErrorKind::Conflict);
@@ -130,11 +126,7 @@ async fn install_should_use_confirmed_channel_and_infer_new_default_only_after_r
             .is_empty()
     );
     service
-        .perform_update(
-            Some("1.1.0-beta.1".into()),
-            Some(Beta),
-            Arc::new(AllowingUpdatePreflight),
-        )
+        .perform_update(Some("1.1.0-beta.1".into()), Some(Beta))
         .await
         .expect("accept selected target");
     let status = wait_for_update(&service).await;
@@ -150,11 +142,7 @@ async fn install_should_use_confirmed_channel_and_infer_new_default_only_after_r
     );
     assert!(
         service
-            .perform_update(
-                Some("1.1.0-beta.1".into()),
-                Some(Alpha),
-                Arc::new(AllowingUpdatePreflight)
-            )
+            .perform_update(Some("1.1.0-beta.1".into()), Some(Alpha))
             .await
             .is_err()
     );

@@ -12,17 +12,16 @@ use syn::{Item, visit::Visit};
 /// workspace 成员冻结清单;新增 crate 必须同步扩展本文件的依赖规则
 pub(super) const WORKSPACE_MEMBERS: &[&str] = &[
     "apps/gateway",
-    "apps/plugin-cli",
     "crates/gateway-admin",
     "crates/gateway-api",
     "crates/gateway-core",
+    "crates/gateway-egress",
     "crates/gateway-host",
-    "crates/gateway-plugin/runtime",
-    "crates/gateway-plugin/sdk",
     "crates/gateway-protocol",
     "crates/gateway-store",
+    "crates/gateway-veil",
+    "crates/providers/anthropic",
     "crates/providers/openai",
-    "crates/providers/xai",
 ];
 
 #[test]
@@ -62,7 +61,7 @@ fn gateway_core_depends_on_no_http_db_redis_or_provider_crate() {
             "gateway-host",
             "gateway-store",
             "provider-openai",
-            "provider-xai",
+            "provider-anthropic",
         ],
     );
 }
@@ -77,6 +76,8 @@ fn core_value_owners_do_not_depend_on_execution_or_routing() {
             "identity.rs" => Some(&["validation"]),
             "upstream.rs" => Some(&["validation"]),
             "event.rs" => Some(&["metering", "operation", "upstream", "validation"]),
+            // 代理入口是共享上游事实，账号只负责匹配，不能反向引入执行层。
+            "account/proxy.rs" => Some(&["account", "identity", "upstream", "validation"]),
             "account/selection.rs" => Some(&["account", "concurrency", "identity", "validation"]),
             "concurrency.rs" => Some(&["error"]),
             "account/store.rs" => Some(&["account", "error", "identity", "validation"]),
@@ -153,7 +154,6 @@ fn assert_owner_paths_form_a_dag(member: &str) {
 #[test]
 fn shared_owners_do_not_depend_on_their_callers() {
     let boundaries: &[(&str, &str, &[&str])] = &[
-        ("crates/providers/xai", "transport", &["credential"]),
         ("crates/providers/openai", "transport", &["provider"]),
         ("crates/gateway-api", "time", &["admin"]),
         (
@@ -163,7 +163,6 @@ fn shared_owners_do_not_depend_on_their_callers() {
         ),
         ("crates/gateway-api", "middleware", &["openai"]),
         ("crates/gateway-host", "system_update", &["config"]),
-        ("crates/gateway-plugin/runtime", "package", &["callback"]),
     ];
     for &(member, owner, forbidden) in boundaries {
         let root = backend_root().join(member).join("src");
@@ -420,16 +419,9 @@ fn gateway_protocol_has_no_workspace_dependencies() {
 }
 
 #[test]
-fn plugin_sdk_has_no_workspace_dependencies() {
-    for name in dependency_names("crates/gateway-plugin/sdk") {
-        assert!(!name.starts_with("gateway-") && !name.starts_with("provider-"));
-    }
-}
-
-#[test]
 fn provider_crates_do_not_depend_on_each_other() {
-    assert_no_dependency("crates/providers/openai", &["provider-xai"]);
-    assert_no_dependency("crates/providers/xai", &["provider-openai"]);
+    assert_no_dependency("crates/providers/openai", &["provider-anthropic"]);
+    assert_no_dependency("crates/providers/anthropic", &["provider-openai"]);
 }
 
 #[test]
@@ -443,23 +435,20 @@ fn gateway_admin_stays_free_of_infrastructure_dependencies() {
 /// workspace 包名到冻结成员路径的映射
 const PACKAGE_TO_MEMBER: &[(&str, &str)] = &[
     ("codex-proxy-rs", "apps/gateway"),
-    ("codex-proxy-plugin-cli", "apps/plugin-cli"),
     ("gateway-admin", "crates/gateway-admin"),
     ("gateway-api", "crates/gateway-api"),
     ("gateway-core", "crates/gateway-core"),
+    ("gateway-egress", "crates/gateway-egress"),
     ("gateway-host", "crates/gateway-host"),
-    ("gateway-plugin-runtime", "crates/gateway-plugin/runtime"),
-    ("gateway-plugin-sdk", "crates/gateway-plugin/sdk"),
     ("gateway-protocol", "crates/gateway-protocol"),
     ("gateway-store", "crates/gateway-store"),
+    ("gateway-veil", "crates/gateway-veil"),
+    ("provider-anthropic", "crates/providers/anthropic"),
     ("provider-openai", "crates/providers/openai"),
-    ("provider-xai", "crates/providers/xai"),
 ];
 
-/// SDK 与 Adapter/provider 根门面的稳定合同模块；任何增减都必须同步完成边界审计
+/// Adapter/provider 根门面的稳定合同模块；任何增减都必须同步完成边界审计
 const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
-    ("crates/gateway-plugin/sdk", &["call", "client"]),
-    ("crates/gateway-plugin/runtime", &[]),
     ("crates/gateway-api", &["admin", "auth", "openai"]),
     (
         "crates/gateway-host",
@@ -468,9 +457,9 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
             "config",
             "outbound",
             "peer",
-            "official_plugins",
             "pricing",
-            "plugin_distribution",
+            "privacy_backup",
+            "prompt_guard",
             "process",
             "proxy_probe",
             "retention",
@@ -484,7 +473,7 @@ const ADAPTER_PUBLIC_MODULES: &[(&str, &[&str])] = &[
         "crates/providers/openai",
         &["config", "credential", "transport"],
     ),
-    ("crates/providers/xai", &["transport"]),
+    ("crates/providers/anthropic", &[]),
 ];
 
 /// 不对应单一生产模块、而是校验 crate/workspace 整体契约的根级测试场景
@@ -495,36 +484,37 @@ const ROOT_TEST_SCENARIOS: &[(&str, &[&str])] = &[
 
 /// 冻结的 workspace 内部运行时依赖边；新增/删除任何边都必须同步本表
 const ALLOWED_INTERNAL_EDGES: &[(&str, &str)] = &[
-    ("codex-proxy-plugin-cli", "gateway-plugin-sdk"),
     ("codex-proxy-rs", "gateway-admin"),
     ("codex-proxy-rs", "gateway-api"),
     ("codex-proxy-rs", "gateway-core"),
     ("codex-proxy-rs", "gateway-host"),
-    ("codex-proxy-rs", "gateway-plugin-runtime"),
     ("codex-proxy-rs", "gateway-store"),
+    ("codex-proxy-rs", "gateway-veil"),
+    ("codex-proxy-rs", "provider-anthropic"),
     ("codex-proxy-rs", "provider-openai"),
-    ("codex-proxy-rs", "provider-xai"),
     ("gateway-admin", "gateway-core"),
     ("gateway-admin", "gateway-protocol"),
     ("gateway-api", "gateway-admin"),
     ("gateway-api", "gateway-core"),
     ("gateway-api", "gateway-protocol"),
+    ("gateway-api", "gateway-veil"),
+    ("gateway-core", "gateway-protocol"),
+    ("gateway-egress", "gateway-core"),
     ("gateway-host", "gateway-admin"),
     ("gateway-host", "gateway-core"),
+    ("gateway-host", "gateway-egress"),
     ("gateway-host", "gateway-protocol"),
-    ("gateway-plugin-runtime", "gateway-host"),
-    ("gateway-plugin-runtime", "gateway-core"),
-    ("gateway-plugin-runtime", "gateway-admin"),
-    ("gateway-plugin-runtime", "gateway-plugin-sdk"),
-    ("gateway-plugin-runtime", "gateway-protocol"),
+    ("gateway-host", "gateway-veil"),
     ("gateway-store", "gateway-admin"),
     ("gateway-store", "gateway-core"),
+    ("provider-anthropic", "gateway-admin"),
+    ("provider-anthropic", "gateway-core"),
+    ("provider-anthropic", "gateway-egress"),
+    ("provider-anthropic", "gateway-veil"),
     ("provider-openai", "gateway-admin"),
     ("provider-openai", "gateway-core"),
+    ("provider-openai", "gateway-egress"),
     ("provider-openai", "gateway-protocol"),
-    ("provider-xai", "gateway-admin"),
-    ("provider-xai", "gateway-core"),
-    ("provider-xai", "gateway-protocol"),
 ];
 
 #[test]
@@ -812,9 +802,10 @@ fn assert_module_tree(root: &Path, crate_roots: &[&str]) {
             );
             let child_directory = relative.with_extension("");
             assert!(
-                !files
-                    .iter()
-                    .any(|candidate| candidate.starts_with(&child_directory)),
+                !files.iter().any(|candidate| {
+                    candidate.starts_with(&child_directory)
+                        && candidate != &child_directory.join("tests.rs")
+                }),
                 "{} mixes a leaf module with a same-name module directory",
                 root.join(relative).display()
             );
@@ -836,7 +827,17 @@ fn assert_module_tree(root: &Path, crate_roots: &[&str]) {
             } else {
                 parent
             };
-            vec![root.join(declaration_directory).join("mod.rs")]
+            // foo.rs 可按 Rust 标准布局承载 foo/tests.rs，生产子模块仍遵守目录规范。
+            if file_name == "tests.rs"
+                && root
+                    .join(declaration_directory)
+                    .with_extension("rs")
+                    .is_file()
+            {
+                vec![root.join(declaration_directory).with_extension("rs")]
+            } else {
+                vec![root.join(declaration_directory).join("mod.rs")]
+            }
         };
         let declaration_count = declaration_parents
             .iter()

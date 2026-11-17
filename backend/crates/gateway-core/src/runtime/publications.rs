@@ -135,7 +135,6 @@ fn acquire_current(
 ) -> Result<Arc<RuntimeSnapshot>, RuntimeSnapshotUnavailable> {
     read_unpoisoned(current)
         .clone()
-        .filter(|snapshot| snapshot.extensions().is_none_or(|set| set.can_serve()))
         .ok_or(RuntimeSnapshotUnavailable)
 }
 

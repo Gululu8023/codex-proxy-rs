@@ -4,8 +4,7 @@ use chrono::{TimeDelta, Utc};
 use gateway_admin::ports::backup::{DatabaseDumpPort as _, DumpRequest};
 use gateway_admin::{
     model::client_keys::{
-        ClientKeyBudgetMutationOrigin, ClientKeyBudgetWindowPeriod, ExplicitClientKeyBudgetWindow,
-        SetClientKeyBudgetWindow,
+        ClientKeyBudgetWindowPeriod, ExplicitClientKeyBudgetWindow, SetClientKeyBudgetWindow,
     },
     ports::store::{AdminStoreErrorKind, ClientKeyStore as _},
 };
@@ -33,8 +32,6 @@ async fn business_backup_restores_core_state_and_usage_without_request_history()
     sqlx::raw_sql("insert into client_api_keys(id,name,key,weekly_limit_usd,created_at,updated_at) values('restore_key','restore key','sk_backup_test',9.5,now(),now());
         insert into client_api_key_budget_windows values('restore_key',now(),now()+interval '1 day',now(),now()+interval '7 days',2.5,9.5);
         insert into client_api_key_charge_events(request_id,client_api_key_id,amount_usd,completed_at) values('native_a','restore_key',2.5,now());
-        insert into plugin_update_sources(plugin_id,source_json) values('backup.test','{}');
-        insert into plugin_artifacts(sha256,plugin_id,version,metadata_json,source_json,archive,accepted_at) values(repeat('a',64),'backup.test','1.0.0','{}','{}',decode('010203','hex'),now());
         update runtime_settings set usage_retention_days=3;
         update model_requests set cost_source='provider_reported',cost_amount=0.5,cost_currency='USD';
         insert into request_analytics_1h(bucket_start,collection,dimensions,outcome,schema_version,histogram_version,counts,costs,distributions)
@@ -158,14 +155,13 @@ async fn business_backup_restores_core_state_and_usage_without_request_history()
                 ends_at: saved.ends_at.unwrap(),
             }),
         };
-        let actor = ClientKeyBudgetMutationOrigin::Admin;
         change.expected_revision = keys
-            .set_client_key_budget_window(change.clone(), actor.clone(), &context())
+            .set_client_key_budget_window(change.clone(), &context())
             .await
             .unwrap();
         change.window.as_mut().unwrap().ends_at += TimeDelta::microseconds(1);
         let conflict = keys
-            .set_client_key_budget_window(change.clone(), actor.clone(), &context())
+            .set_client_key_budget_window(change.clone(), &context())
             .await
             .unwrap_err();
         assert_eq!(conflict.kind(), AdminStoreErrorKind::Conflict);
@@ -187,7 +183,7 @@ async fn business_backup_restores_core_state_and_usage_without_request_history()
                 starts_at: start,
                 ends_at: start + TimeDelta::hours(1),
             });
-            keys.set_client_key_budget_window(change, actor, &context())
+            keys.set_client_key_budget_window(change, &context())
                 .await
                 .unwrap();
             assert_eq!(
@@ -200,13 +196,6 @@ async fn business_backup_restores_core_state_and_usage_without_request_history()
             );
             ledger.admit(key).await.unwrap();
         }
-        let archive: Vec<u8> = sqlx::query_scalar(
-            "select archive from plugin_artifacts where plugin_id='backup.test'",
-        )
-        .fetch_one(&database.pool)
-        .await
-        .unwrap();
-        assert_eq!(archive, [1, 2, 3]);
         let retention_days: i64 =
             sqlx::query_scalar("select usage_retention_days from runtime_settings")
                 .fetch_one(&database.pool)

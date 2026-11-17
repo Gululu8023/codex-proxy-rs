@@ -16,16 +16,16 @@ module ReleasePublication
     JSON.parse(output.split(/\r?\n\r?\n/, 2).fetch(1)).fetch('tag_name')
   end
 
-  def self.latest_image(image)
-    ref = "#{image}:latest"
+  def self.stable_image(image)
+    ref = "#{image}:stable"
     output, error, status = Open3.capture3('docker', 'buildx', 'imagetools', 'inspect', ref, '--format', '{{json .Image}}')
     # 只把明确的缺失标签当作首次发布，鉴权和网络错误必须终止提升
     return nil if !status.success? && error.include?("#{ref}: not found")
-    raise "Cannot read latest image: #{error.strip}" unless status.success?
+    raise "Cannot read stable image: #{error.strip}" unless status.success?
     versions = JSON.parse(output).values.map do |config|
       config.fetch('config').fetch('Labels').fetch('org.opencontainers.image.version')
     end.uniq
-    raise 'Latest image must have one consistent version across platforms' unless versions.length == 1
+    raise 'Stable image must have one consistent version across platforms' unless versions.length == 1
     versions.first
   end
 
@@ -57,16 +57,17 @@ module ReleasePublication
     run('gh', 'api', '--method', 'PATCH', endpoint, '-F', 'draft=false', '-f', 'make_latest=false')
     return if ReleaseMetadata.prerelease?(version)
 
-    current_versions = [latest_release(repository), latest_image(image)]
+    current_versions = [latest_release(repository), stable_image(image)]
     unless can_promote?(version, current_versions)
-      puts "Published #{version}; latest remains at #{current_versions.compact.join(', ')}"
+      puts "Published #{version}; stable image and latest release remain at #{current_versions.compact.join(', ')}"
       return
     end
 
     # 两个服务不能原子更新；同时检查两侧版本，让失败重试可以补齐而旧版不能回退
-    tag(image, digest, 'latest')
+    # latest 镜像由 main 自动构建独占；正式发行仅提升 stable 和 GitHub 最新 Release。
+    tag(image, digest, 'stable')
     run('gh', 'api', '--method', 'PATCH', endpoint, '-f', 'make_latest=true')
-    puts "Published #{version} and promoted latest"
+    puts "Published #{version} and promoted stable image and latest release"
   end
 end
 

@@ -72,6 +72,19 @@ pub(crate) fn client_error_code(code: &str) -> &str {
     }
 }
 
+pub(crate) fn is_retry_after_header(name: &str) -> bool {
+    name.eq_ignore_ascii_case("retry-after") || name.eq_ignore_ascii_case("retry-after-ms")
+}
+
+/// 容量等待与换号已由网关执行；只清理恢复投影，不能修改原始上游事实
+pub(crate) fn remove_retry_after_headers(data: &mut Value) {
+    for path in ["/headers", "/error/headers", "/response/error/headers"] {
+        if let Some(Value::Object(headers)) = data.pointer_mut(path) {
+            headers.retain(|name, _| !is_retry_after_header(name));
+        }
+    }
+}
+
 /// 为 HTTP 错误或流内失败保留原有字段，仅投影客户端需要的重试信号
 pub(crate) fn capacity_error_for_client(data: &Value) -> Option<Value> {
     const CODE_PATHS: [&str; 2] = ["/error/code", "/response/error/code"];
@@ -87,6 +100,7 @@ pub(crate) fn capacity_error_for_client(data: &Value) -> Option<Value> {
         return None;
     }
     let mut projected = data.clone();
+    remove_retry_after_headers(&mut projected);
     for path in CODE_PATHS {
         if let Some(code) = projected.pointer_mut(path)
             && capacity_code(code)
@@ -142,6 +156,11 @@ pub const fn gateway_error_contract(
             StatusCode::BAD_REQUEST,
             "invalid_request_error",
             "invalid_request",
+        ),
+        GatewayErrorKind::PeerRoutingLoop => (
+            StatusCode::LOOP_DETECTED,
+            "invalid_request_error",
+            gateway_protocol::peer::ROUTING_LOOP_CODE,
         ),
         GatewayErrorKind::Unsupported => (
             StatusCode::BAD_REQUEST,

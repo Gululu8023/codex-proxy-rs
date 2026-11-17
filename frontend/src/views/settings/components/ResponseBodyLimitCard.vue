@@ -10,6 +10,9 @@ const model = defineModel<string>({ required: true })
 
 <template>
   <ZCard :title="t('settings.responseLimit.requestBodyLimit')" :description="t('settings.responseLimit.description')">
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <div class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2 sm:items-end">
       <ZFormItem :show-message="Boolean(model.trim())" prop="responsesMaxDecompressedBodyMiB" :label="t('settings.responseLimit.maximumSizeAfterDecompression')" :description="t('settings.responseLimit.sizeHelp')">
         <ZInput v-model="model" :aria-label="t('settings.responseLimit.maxSizeLabel')" type="number" min="1" step="1">
@@ -19,5 +22,6 @@ const model = defineModel<string>({ required: true })
         </ZInput>
       </ZFormItem>
     </div>
+    <slot name="footer" />
   </ZCard>
 </template>

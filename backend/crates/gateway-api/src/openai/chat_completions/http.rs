@@ -78,7 +78,6 @@ pub(in crate::openai) async fn chat_completions(
             decoded,
             middleware_body,
         },
-        None,
         Some(adapter),
     )
     .await

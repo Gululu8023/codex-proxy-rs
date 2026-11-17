@@ -32,7 +32,6 @@
       "started": "更新已開始"
     },
     "errors": {
-      "preRestartCheck": "重啓前檢查失敗",
       "restart": "重啓失敗，請重新檢查",
       "unconfirmed": "尚未確認更新任務，請檢查狀態後重試",
       "updateFailed": "更新失敗",
@@ -65,16 +64,8 @@
     "actions": {
       "check": "檢查更新",
       "install": "下載更新",
-      "continueRestart": "繼續重啓",
       "restart": "立即重啓"
     },
-    "plugins": {
-      "title": "插件兼容性提醒",
-      "description": "重新啟動後，不相容插件將維持未啟動",
-      "incompatible": "不兼容插件",
-      "requestErrorHelp": "設定與資料保留，可在插件頁嘗試啟動"
-    },
-    "versionAfterRestart": "重啓後版本",
     "logs": {
       "live": "實時",
       "disconnectedState": "斷開",

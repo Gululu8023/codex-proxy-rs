@@ -83,9 +83,9 @@ async fn official_cli_cache_updates_entry_headers_together_and_preserves_frozen_
             ProviderArtifactProfile::new(
                 provider.clone(),
                 "cli-linux-x64".into(),
-                157_001,
+                9_000_001,
                 chrono::Utc::now().into(),
-                OpaqueProviderData::new(json!({"version":"0.157.0"}).as_object().unwrap().clone()),
+                OpaqueProviderData::new(json!({"version":"9.0.0"}).as_object().unwrap().clone()),
             ),
             Duration::from_secs(86400),
         )
@@ -100,11 +100,11 @@ async fn official_cli_cache_updates_entry_headers_together_and_preserves_frozen_
         let current = selection.resolve(&state).unwrap();
         let headers = build_codex_model_headers(&current, "Bearer fixture", None).unwrap();
         let expected = format!(
-            "{originator}/0.157.0 (Alpine Linux 3.24.1; x86_64) xterm-256color ({originator}; 0.157.0)"
+            "{originator}/9.0.0 (Alpine Linux 3.24.1; x86_64) xterm-256color ({originator}; 9.0.0)"
         );
         assert_eq!(headers["user-agent"], expected);
         assert_eq!(headers["originator"], originator);
-        assert_eq!(headers["version"], "0.157.0");
+        assert_eq!(headers["version"], "9.0.0");
     }
     assert_eq!(
         fixed.resolve(&state).unwrap().user_agent(),
@@ -114,7 +114,7 @@ async fn official_cli_cache_updates_entry_headers_together_and_preserves_frozen_
         custom.resolve(&state).unwrap().user_agent(),
         frozen.user_agent()
     );
-    assert_eq!(frozen.codex_version, "0.155.0");
+    assert_ne!(frozen.codex_version, "9.0.0");
 
     // 缓存恢复与启动种子构成观察历史，滞后档位据此钉住上一版。
     let lagged = ClientProfileSelection {
@@ -123,7 +123,7 @@ async fn official_cli_cache_updates_entry_headers_together_and_preserves_frozen_
     };
     assert_eq!(
         lagged.resolve(&state).unwrap().user_agent(),
-        "codex-tui/0.155.0 (Alpine Linux 3.24.1; x86_64) xterm-256color (codex-tui; 0.155.0)"
+        frozen.user_agent()
     );
 
     let restarted = CodexWireProfileState::new(super::wire_profile());

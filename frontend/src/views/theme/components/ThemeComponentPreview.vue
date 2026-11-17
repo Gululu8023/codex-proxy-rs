@@ -20,7 +20,7 @@ import {
 import { computed, shallowRef } from 'vue'
 
 import { useI18n } from 'vue-i18n'
-import { formatProviderLabel } from '@/utils/providers'
+import { formatProviderLabel, PROVIDER_IDS } from '@/utils/providers'
 
 const { t } = useI18n({ useScope: 'global' })
 
@@ -51,17 +51,13 @@ const syncTagVisible = shallowRef(true)
 
 const providerOptions = computed(() => ([
   {
-    label: formatProviderLabel('openai'),
-    value: 'openai',
-  },
-  {
-    label: formatProviderLabel('xai'),
-    value: 'xai',
-  },
-  {
     label: t('appearance.preview.components.allPlatforms'),
     value: 'all',
   },
+  ...PROVIDER_IDS.map(value => ({
+    label: formatProviderLabel(value),
+    value,
+  })),
 ]))
 const viewOptions = computed(() => ([
   {
@@ -154,7 +150,7 @@ const tableRows = computed<PreviewTableRow[]>(() => ([
   {
     id: 'gateway',
     account: 'gateway@example.com',
-    provider: formatProviderLabel('xai'),
+    provider: formatProviderLabel('anthropic'),
     status: 'active',
     requests: '9,462',
     latency: '316 ms',
@@ -181,7 +177,7 @@ const tableRows = computed<PreviewTableRow[]>(() => ([
   {
     id: 'fallback',
     account: 'fallback@example.com',
-    provider: formatProviderLabel('xai'),
+    provider: formatProviderLabel('anthropic'),
     status: 'error',
     requests: '3,172',
     latency: '—',

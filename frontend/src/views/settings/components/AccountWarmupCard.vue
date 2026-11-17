@@ -2,19 +2,32 @@
 import { ZCard, ZFormItem, ZIconButton, ZInput, ZPopover, ZSwitch } from '@codex-proxy/ui'
 
 import { CircleAlert, Clock, Sparkles } from '@lucide/vue'
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
 const { t } = useI18n({ useScope: 'global' })
 
 const enabled = defineModel<boolean>('enabled', { required: true })
-const cron = defineModel<string>('cron', { required: true })
+const cron = defineModel<string[]>('cron', { required: true })
 const model = defineModel<string>('model', { required: true })
+const cronText = computed({
+  get: () => cron.value.join(';'),
+  // 编辑时保留空格，提交时再裁剪，避免无法输入 Cron 字段间的分隔空格。
+  set: (value: string) => {
+    cron.value = value
+      ? value.split(';')
+      : []
+  },
+})
 </script>
 
 <template>
   <ZCard
     :description="t('settings.warmup.description')"
   >
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <template #title>
       <span class="inline-flex items-center gap-1">
         {{ t('settings.warmup.title') }}
@@ -26,7 +39,7 @@ const model = defineModel<string>('model', { required: true })
           </template>
           <div class="max-w-80 space-y-2 px-3 py-2 text-z-sm font-regular leading-relaxed text-z-text-secondary">
             <p>{{ t('settings.warmup.help') }}</p>
-            <p>{{ t('settings.warmup.cronExample') }}</p>
+            <p>{{ t('settings.warmup.scheduleHelp') }}</p>
           </div>
         </ZPopover>
       </span>
@@ -39,14 +52,14 @@ const model = defineModel<string>('model', { required: true })
       />
 
       <ZFormItem
-        :show-message="enabled"
+        :show-message="enabled || cron.length > 0"
         prop="accountWarmupCron"
         :label="t('settings.warmup.cronExpression')"
         :description="t('settings.warmup.cronHelp')"
         :required="enabled"
       >
         <ZInput
-          v-model="cron"
+          v-model="cronText"
           :disabled="!enabled"
           :aria-label="t('settings.warmup.cronExpression')"
           placeholder="0 8 * * *"
@@ -78,5 +91,6 @@ const model = defineModel<string>('model', { required: true })
         </ZInput>
       </ZFormItem>
     </div>
+    <slot name="footer" />
   </ZCard>
 </template>

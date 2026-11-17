@@ -1,19 +1,31 @@
 import type { Component } from 'vue'
-import { Key, LinkAlt, Openai, Xai } from '@boxicons/vue'
+import { Key, LinkAlt, Openai } from '@boxicons/vue'
 import { Fingerprint, Plug } from '@lucide/vue'
+import ClaudeIcon from '@/components/icons/ClaudeIcon.vue'
 import { t } from '@/i18n'
 
 const PROVIDER_DISPLAY_NAMES = {
   openai: 'Codex',
-  xai: 'xAI',
+  anthropic: 'Claude',
 } as const
 
-export const PROVIDER_IDS = Object.keys(PROVIDER_DISPLAY_NAMES) as Array<keyof typeof PROVIDER_DISPLAY_NAMES>
+// 供应商切换统一按 Codex、Claude 展示，避免接口顺序和字母排序改变按钮位置。
+export const PROVIDER_IDS = ['openai', 'anthropic'] as const
 
 type SupportedProvider = keyof typeof PROVIDER_DISPLAY_NAMES
 
 export function isSupportedProvider(value: unknown): value is SupportedProvider {
   return typeof value === 'string' && Object.hasOwn(PROVIDER_DISPLAY_NAMES, value)
+}
+
+export function compareProviders(left: string, right: string) {
+  const leftOrder = isSupportedProvider(left)
+    ? PROVIDER_IDS.indexOf(left)
+    : PROVIDER_IDS.length
+  const rightOrder = isSupportedProvider(right)
+    ? PROVIDER_IDS.indexOf(right)
+    : PROVIDER_IDS.length
+  return leftOrder - rightOrder || left.localeCompare(right)
 }
 
 export function formatProviderLabel(value?: string | null, fallback = '—') {
@@ -27,7 +39,7 @@ export function formatProviderLabel(value?: string | null, fallback = '—') {
 export function providerIcon(value: string): Component {
   switch (value.trim().toLowerCase()) {
     case 'openai': return Openai
-    case 'xai': return Xai
+    case 'anthropic': return ClaudeIcon
     default: return Plug
   }
 }

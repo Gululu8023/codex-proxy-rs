@@ -21,6 +21,7 @@ pub use gateway_core::account::{
 /// 账号可用的管理操作
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct ProviderAccountCapabilities {
+    pub quota_limits_supported: bool,
     pub quota_credits: bool,
     pub quota: bool,
     pub quota_refresh: bool,
@@ -83,22 +84,9 @@ pub struct AccountListQuery {
 /// Admin query service 从运行态存储取得的当前账号冷却快照
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct AccountRuntimeSnapshot {
-    pub protection_rules: BTreeMap<String, Vec<gateway_core::account::AccountProtectionMatch>>,
     pub cooldown: BTreeMap<String, gateway_core::account::AccountCooldown>,
     /// `None` 表示实时 lease 存储不可用；`Some` 中未出现的账号当前使用量为零
     pub in_flight: Option<BTreeMap<String, u64>>,
-}
-
-/// 恢复任务读取的冻结快照；generation 将异步结果绑定到本次冻结
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct AccountFreeze {
-    pub credential_revision: Revision,
-    pub until: DateTime<Utc>,
-    pub generation: String,
-    pub requires_probe: bool,
-    pub duration_seconds: Option<u64>,
-    pub probe_model: Option<String>,
-    pub protection_rules: Vec<gateway_core::account::AccountProtectionMatch>,
 }
 
 /// 可选的账号分组成员筛选条件
@@ -111,6 +99,8 @@ pub enum AccountGroupFilter {
 /// 账号公共存储投影；Provider 专属字段不进入此结构
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountRecord {
+    pub quota_paused: bool,
+    pub quota_limits: gateway_core::account::AccountQuotaLimits,
     pub auto_use_quota_credits: bool,
     pub id: String,
     pub provider_kind: ProviderKind,
@@ -143,7 +133,7 @@ pub struct AccountRecord {
 }
 
 impl AccountRecord {
-    /// 配置保留绑定，执行请求时禁用代理按直连处理
+    /// 配置保留绑定，执行请求时禁用代理使用部署默认出口
     #[must_use]
     pub fn effective_outbound_proxy(&self) -> Option<&gateway_core::account::OutboundProxy> {
         self.outbound_proxy
@@ -210,7 +200,6 @@ pub struct AccountPage {
 /// 同一状态快照下的账号事实与唯一状态投影
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountPageItem {
-    pub protection_rules: Vec<gateway_core::account::AccountProtectionMatch>,
     pub account: AccountRecord,
     pub projection: AccountStatusProjection,
     pub capacity: AccountCapacity,
@@ -251,6 +240,7 @@ pub struct AccountUpdateResult {
 /// 仅修改显式字段的批量账号设置命令
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct BatchUpdateAccounts {
+    pub quota_limits: Option<gateway_core::account::AccountQuotaLimits>,
     pub auto_use_quota_credits: Option<bool>,
     pub account_ids: Vec<String>,
     pub enabled: Option<bool>,
@@ -260,6 +250,16 @@ pub struct BatchUpdateAccounts {
     pub group_ids: Option<Vec<gateway_core::routing::AccountGroupId>>,
     pub outbound_proxy: Option<super::proxies::AccountProxySelection>,
 }
+
+/// 已按拟提交策略重算的账号暂停结果，以快照版本防止旧判断覆盖新观测
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedQuotaPause {
+    pub observed_at: Option<DateTime<Utc>>,
+    pub revision: Revision,
+    pub paused: bool,
+}
+
+pub type PreparedQuotaPauses = std::collections::BTreeMap<String, PreparedQuotaPause>;
 
 /// 批量账号更新结果
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -277,6 +277,9 @@ pub struct DeleteAccounts {
 /// 账号连接测试的语义事件
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AccountConnectionTestEvent {
+    Stages {
+        stages: Vec<gateway_core::engine::probe::AccountProbeStage>,
+    },
     Started {
         model: String,
     },

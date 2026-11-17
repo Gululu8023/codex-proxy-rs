@@ -258,6 +258,9 @@ pub(crate) fn usage_list_record_view(
         .clone()
         .or_else(|| record.requested_model_id.clone());
     UsageListRecordView {
+        error_origin: record.error_origin().as_str(),
+        client_status_code: record.client_status_code,
+        upstream_status_code: record.upstream_status_code,
         error_code: record.error_code,
         error_message: record.error_message,
         error_kind: record.error_kind,
@@ -362,6 +365,7 @@ pub(crate) fn usage_record_view(
         .or_else(|| record.requested_model_id.clone());
     let metadata = provider_metadata_fields(record.provider_metadata_json.as_deref());
     UsageRecordView {
+        error_origin: record.error_origin().as_str(),
         upstream_error: record
             .upstream_error
             .map(|error| super::wire::UsageUpstreamErrorView {
@@ -1016,10 +1020,16 @@ pub(crate) fn dashboard_view(
                     .map_or_else(|| "—".to_owned(), |amount| format!("${}", amount.as_str())),
             },
             cache: DashboardCacheCardView {
-                today_hit_rate: display_rate(today.cached_token_rate),
+                today_hit_rate: today
+                    .observed_cached_token_rate
+                    .map_or_else(|| "—".to_owned(), display_rate),
                 today_hit_rate_value: today.observed_cached_token_rate,
                 yesterday_hit_rate_value: yesterday.observed_cached_token_rate,
-                total_hit_rate: display_rate(total_cached_token_rate),
+                total_hit_rate: if totals.input_tokens == 0 {
+                    "—".to_owned()
+                } else {
+                    display_rate(total_cached_token_rate)
+                },
                 total_cached_input_tokens: format_compact_number(totals.cached_input_tokens),
                 average_first_token_latency_ms: display_duration(average_first_token_latency_ms),
             },
@@ -1038,6 +1048,7 @@ pub(crate) fn dashboard_view(
         pool_summary: DashboardPoolSummaryView {
             total: provider_accounts.total,
             normal: provider_accounts.normal,
+            quota_paused: provider_accounts.quota_paused,
             quota_exhausted: provider_accounts.quota_exhausted,
             rate_limited: provider_accounts.rate_limited,
             disabled: provider_accounts.disabled,

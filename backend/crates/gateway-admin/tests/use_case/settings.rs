@@ -27,66 +27,6 @@ struct PricingSettingsStore {
 }
 
 #[tokio::test]
-async fn explicit_service_calls_freeze_empty_plan_and_cancel_before_entering_terminal() {
-    use gateway_admin::public_service::{Origin, Plan, scope};
-    use std::sync::atomic::{AtomicUsize, Ordering};
-
-    let resolutions = Arc::new(AtomicUsize::new(0));
-    let source_calls = resolutions.clone();
-    let store = Arc::new(PricingSettingsStore::default());
-    let services = super::AdminHarness::new()
-        .settings(store.clone())
-        .service_middleware(Arc::new(move || {
-            source_calls.fetch_add(1, Ordering::SeqCst);
-            None
-        }))
-        .build()
-        .await;
-    let context = MutationContext {
-        actor: gateway_admin::model::MutationActor::System,
-        request_id: "empty-plan".into(),
-    };
-    let command = UpdatePricing {
-        provider: "xai".into(),
-        models: vec!["example-model".into()],
-        change: PricingChange::Reset,
-    };
-    for expected in 1..=2 {
-        services
-            .public_services()
-            .call(
-                "settings.update_pricing",
-                serde_json::to_value((&context, command.clone())).unwrap(),
-            )
-            .await
-            .unwrap();
-        // 内部 pricing 不再单独进入插件链；显式调用只解析一次发布集合
-        assert_eq!(resolutions.load(Ordering::SeqCst), expected);
-    }
-    store.updated.lock().unwrap().take();
-    let cancellation = gateway_core::lifecycle::CancellationToken::new();
-    cancellation.cancel();
-    let error = scope(
-        Origin {
-            request_id: "cancelled-native".into(),
-            call_id: "entry".into(),
-            cancellation,
-            extensions: Default::default(),
-            plan: Plan::Frozen(None),
-        },
-        services.public_services().call(
-            "settings.update_pricing",
-            serde_json::to_value((context, command)).unwrap(),
-        ),
-    )
-    .await
-    .unwrap_err();
-    assert_eq!(error.kind, "unavailable");
-    assert!(store.updated.lock().unwrap().is_none());
-    assert_eq!(resolutions.load(Ordering::SeqCst), 2);
-}
-
-#[tokio::test]
 async fn client_profile_preview_rejects_unknown_provider_before_loading_settings() {
     let services = super::AdminHarness::new()
         .settings(Arc::new(UnusedSettingsStore))
@@ -101,8 +41,8 @@ async fn client_profile_preview_rejects_unknown_provider_before_loading_settings
 }
 
 #[tokio::test]
-async fn pricing_accepts_ultrafast_for_openai_but_rejects_it_for_xai() {
-    for provider in ["openai", "xai"] {
+async fn pricing_accepts_ultrafast_for_openai() {
+    for provider in ["openai"] {
         let store = Arc::new(PricingSettingsStore::default());
         let services = super::AdminHarness::new()
             .settings(store.clone())
@@ -131,16 +71,9 @@ async fn pricing_accepts_ultrafast_for_openai_but_rejects_it_for_xai() {
                 .settings()
                 .update_pricing(&context, update.clone())
                 .await;
-            if provider == "openai" {
-                result.expect("OpenAI accepts Ultrafast overrides");
-                assert_eq!(store.updated.lock().unwrap().as_ref(), Some(&update));
-            } else {
-                assert_eq!(
-                    result.expect_err("xAI rejects Ultrafast").kind(),
-                    AdminErrorKind::Invalid
-                );
-                assert!(store.updated.lock().unwrap().is_none());
-            }
+
+            result.expect("OpenAI accepts Ultrafast overrides");
+            assert_eq!(store.updated.lock().unwrap().as_ref(), Some(&update));
         }
     }
 }
@@ -325,6 +258,20 @@ async fn settings_should_reject_zero_refresh_margin_before_store_call() {
                 model_mappings: Default::default(),
                 rotation_strategy: RotationStrategy::Smart,
                 values: gateway_admin::model::settings::RuntimeSettingsValues {
+                    anthropic_model_mappings: Default::default(),
+                    anthropic_account_affinity: Default::default(),
+                    anthropic_session_affinity_ttl_hours: 24,
+                    quota_reset_window_weights: Default::default(),
+                    min_claude_code_version: None,
+                    reset_credit_on_low_weekly_quota: false,
+                    // 显式清空测试密钥，避免“省略即保留”先读取存储。
+                    prompt_guard: gateway_admin::model::prompt_guard::PromptGuardConfig {
+                        review_api_key: Some(
+                            gateway_admin::model::prompt_guard::ReviewApiKey::new(String::new()),
+                        ),
+                        ..Default::default()
+                    },
+                    claude_public_url: String::new(),
                     codex_privacy_policy: Default::default(),
                     request_location_enabled: false,
                     request_location: Default::default(),
@@ -348,8 +295,6 @@ async fn settings_should_reject_zero_refresh_margin_before_store_call() {
                     usage_retention_days: 31,
                     ops_event_retention_days: 30,
                     audit_retention_days: 30,
-                    account_error_protection:
-                        gateway_core::account::AccountErrorProtection::default(),
                     account_warmup_enabled: false,
                     account_warmup_cron: "0 8 * * *".to_owned(),
                     account_warmup_model: None,

@@ -2,10 +2,10 @@
 
 mod frame;
 mod handle;
-mod middleware;
 mod pump;
 mod state;
 mod transport;
+mod writer;
 
 pub use frame::{
     ConnectionConfig, ConnectionEvent, ConnectionWriteError, FramePhase, PumpExitReason,
@@ -14,3 +14,4 @@ pub use frame::{
 pub use handle::{ResponsesWebSocketConnection, spawn_connection};
 pub(super) use transport::Socket;
 pub(crate) use transport::Upgrade;
+pub(crate) use writer::CancelOnDrop;

@@ -1,25 +1,17 @@
 //! Responses WebSocket 事件转发、错误去重与连接恢复测试
 
 use std::collections::VecDeque;
-use std::sync::{
-    Arc, Mutex,
-    atomic::{AtomicUsize, Ordering},
-};
+use std::sync::{Arc, Mutex, atomic::Ordering};
 use std::time::Duration;
 
 use axum::http::{StatusCode, header::AUTHORIZATION};
 use bytes::Bytes;
-use futures::{SinkExt, StreamExt, future::BoxFuture};
-use gateway_core::engine::middleware::{
-    FrozenMiddlewarePlan, MiddlewareContext, MiddlewareError, MiddlewareNext, MiddlewarePlan,
-    MiddlewareRequest, MiddlewareResponse,
-};
+use futures::{SinkExt, StreamExt};
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError};
 use gateway_core::error::{
     ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, ProviderError, ProviderErrorKind,
 };
 use gateway_core::event::{ProtocolWireEvent, ProviderEvent, ProviderResponseHeader};
-use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference};
 use gateway_core::upstream::{OpaqueUpstreamValue, UpstreamSendState};
 use serde_json::{Value, json};
 use tokio::net::TcpStream;
@@ -160,63 +152,6 @@ fn upstream_failure(
         )
 }
 
-#[derive(Debug)]
-struct InspectFailureMiddleware(Arc<AtomicUsize>);
-
-impl ExtensionSetLease for InspectFailureMiddleware {
-    fn is_ready(&self) -> bool {
-        true
-    }
-}
-
-impl MiddlewarePlan for InspectFailureMiddleware {
-    fn handle(
-        &self,
-        _: MiddlewareContext,
-        request: MiddlewareRequest,
-        next: MiddlewareNext,
-    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
-        let drops = Arc::clone(&self.0);
-        Box::pin(async move {
-            let response = next.run(request).await?;
-            assert_eq!(
-                drops.load(Ordering::Acquire),
-                0,
-                "next must retain the failed execution until the onion chain returns"
-            );
-            assert_eq!(response.status_code(), 503);
-            Ok(response)
-        })
-    }
-}
-
-#[tokio::test]
-async fn initial_failure_retains_execution_until_request_middleware_returns() {
-    let drops = Arc::new(AtomicUsize::new(0));
-    let middleware = Arc::new(InspectFailureMiddleware(Arc::clone(&drops)));
-    let trace = Arc::new(AtomicFailureTrace {
-        initial_errors: Mutex::new(VecDeque::from([EngineError::EmptyRoutingPlan])),
-        session_drops: Arc::clone(&drops),
-        middleware: Some(FrozenMiddlewarePlan::new(
-            middleware.clone(),
-            ExtensionSetReference::new(
-                ExtensionSetId::new("failure-inspector".to_owned()).unwrap(),
-                middleware,
-            ),
-        )),
-        ..AtomicFailureTrace::default()
-    });
-    let (mut socket, _server) = connect(Arc::clone(&trace), vec![]).await;
-    send_request(&mut socket).await;
-    let error = next_error(&mut socket).await;
-    assert_eq!(error["status"], 503);
-    assert_eq!(error["error"]["code"], "no_available_provider");
-    assert_no_duplicate_failure(&mut socket).await;
-    assert_eq!(drops.load(Ordering::Acquire), 1);
-    assert!(!trace.committed.load(Ordering::Acquire));
-    socket.close(None).await.unwrap();
-}
-
 #[tokio::test]
 async fn initial_http_or_opening_failure_preserves_status_and_structured_error() {
     // 分类故意都用 Unavailable：不能把收到的 401/429/500 等按网关分类改成 502
@@ -285,6 +220,7 @@ async fn initial_capacity_failure_offers_client_retry_with_upstream_correlation(
                 vec![
                     header("x-request-id", b"req_capacity"),
                     header("retry-after", b"7"),
+                    header("retry-after-ms", b"7000"),
                 ],
             )
             .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
@@ -297,7 +233,8 @@ async fn initial_capacity_failure_offers_client_retry_with_upstream_correlation(
             assert_eq!(error["error"]["code"], "server_error");
             assert_eq!(error["error"]["message"], "busy");
             assert_eq!(error["headers"]["x-request-id"], "req_capacity");
-            assert_eq!(error["headers"]["retry-after"], "7");
+            assert!(error["headers"].get("retry-after").is_none());
+            assert!(error["headers"].get("retry-after-ms").is_none());
         }
     }
 }

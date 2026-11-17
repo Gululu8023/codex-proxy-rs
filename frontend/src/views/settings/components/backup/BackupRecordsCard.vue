@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import type { BackupRecord } from '@/api'
+import type { BackupArtifact, BackupRecord } from '@/api'
 
 import { defineTableColumns, ZButton, ZCard, ZConfirmDialog, ZIconButton, ZPagination, ZPopover, ZTable } from '@codex-proxy/ui'
 
-import { CircleHelp, Download, Play, RefreshCw, Trash2 } from '@lucide/vue'
+import { CircleHelp, Download, Play, RefreshCw, ShieldCheck, Trash2 } from '@lucide/vue'
 
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 
+import { downloadStateKey } from '../../composables/useBackupRecords'
 import BackupStatusBadge from './BackupStatusBadge.vue'
 
 defineProps<{
@@ -30,7 +31,7 @@ const emit = defineEmits<{
   pageSizeChange: [pageSize: number]
   create: []
   refresh: []
-  download: [record: BackupRecord]
+  download: [record: BackupRecord, artifact: BackupArtifact]
   requestDelete: [record: BackupRecord]
   confirmDelete: []
 }>()
@@ -106,10 +107,10 @@ function formatSize(value: unknown): string {
 }
 
 /** 从对象 key 提取文件名（最后一段）。 */
-function formatFileName(record: BackupRecord): string {
-  if (!record.objectKey)
+function formatFileName(objectKey: string): string {
+  if (!objectKey)
     return '—'
-  return record.objectKey.split('/').pop() || '—'
+  return objectKey.split('/').pop() || '—'
 }
 
 /** 记录 ID 的短标识：`backup_` 前缀 + 前 8 位 hex，与对象 key 文件名一致；完整值通过 title 展示。 */
@@ -145,6 +146,7 @@ function canDelete(record: BackupRecord): boolean {
           <div class="max-w-72 space-y-2 px-3 py-2 text-z-sm leading-relaxed text-z-text-secondary">
             <p>{{ t('settings.backup.contents') }}</p>
             <p>{{ t('settings.backup.usageRetentionHourSummary') }}</p>
+            <p>{{ t('settings.backup.privacyStoreSummary') }}</p>
           </div>
         </ZPopover>
       </span>
@@ -196,11 +198,25 @@ function canDelete(record: BackupRecord): boolean {
         </template>
 
         <template #fileName="{ row }">
-          <span class="text-z-text-secondary" :title="row.objectKey">{{ formatFileName(row) }}</span>
+          <div class="flex flex-col">
+            <span class="text-z-text-secondary" :title="row.objectKey">{{ formatFileName(row.objectKey) }}</span>
+            <span
+              v-if="row.privacyStore"
+              class="text-z-xs text-z-text-tertiary"
+              :title="row.privacyStore.objectKey"
+            >
+              {{ formatFileName(row.privacyStore.objectKey) }}
+            </span>
+          </div>
         </template>
 
         <template #sizeBytes="{ row }">
-          <span class="text-z-text-secondary">{{ formatSize(row.sizeBytes) }}</span>
+          <div class="flex flex-col">
+            <span class="text-z-text-secondary">{{ formatSize(row.sizeBytes) }}</span>
+            <span v-if="row.privacyStore" class="text-z-xs text-z-text-tertiary">
+              {{ formatSize(row.privacyStore.sizeBytes) }}
+            </span>
+          </div>
         </template>
 
         <template #expiresAt="{ row }">
@@ -225,11 +241,22 @@ function canDelete(record: BackupRecord): boolean {
           <div class="flex items-center justify-start gap-1">
             <ZIconButton
               :disabled="!canDownload(row)"
-              :loading="Boolean(downloadStates[row.id])"
+              :loading="Boolean(downloadStates[downloadStateKey(row.id, 'database')])"
               :aria-label="t('settings.backup.downloadBackup')"
-              @click="emit('download', row)"
+              :title="t('settings.backup.downloadBackup')"
+              @click="emit('download', row, 'database')"
             >
               <Download class="size-4" />
+            </ZIconButton>
+            <ZIconButton
+              v-if="row.privacyStore"
+              :disabled="!canDownload(row)"
+              :loading="Boolean(downloadStates[downloadStateKey(row.id, 'privacyStore')])"
+              :aria-label="t('settings.backup.downloadPrivacyStore')"
+              :title="t('settings.backup.downloadPrivacyStore')"
+              @click="emit('download', row, 'privacyStore')"
+            >
+              <ShieldCheck class="size-4" />
             </ZIconButton>
             <ZIconButton
               :disabled="!canDelete(row)"

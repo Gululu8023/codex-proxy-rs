@@ -119,7 +119,6 @@ impl SystemOperations for VersionSystem {
         &self,
         _: Option<String>,
         _: Option<gateway_admin::model::system::SystemUpdateChannel>,
-        _: std::sync::Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
     ) -> Result<SystemOperationAccepted, SystemOperationError> {
         unreachable!("client route must not perform updates")
     }
@@ -128,17 +127,11 @@ impl SystemOperations for VersionSystem {
         unreachable!("client route must not request update status")
     }
 
-    async fn rollback(
-        &self,
-        _: std::sync::Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
-    ) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn rollback(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
         unreachable!("client route must not roll back")
     }
 
-    async fn restart(
-        &self,
-        _preflight: Arc<dyn gateway_admin::ports::system::SystemRestartPreflight>,
-    ) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn restart(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
         unreachable!("client route must not restart")
     }
 }

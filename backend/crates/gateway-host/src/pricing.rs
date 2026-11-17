@@ -17,7 +17,8 @@ pub struct ModelsDevPricing;
 #[async_trait]
 impl PricingSource for ModelsDevPricing {
     async fn fetch(&self) -> Result<PricingSyncPreview, AdminError> {
-        let client = reqwest::Client::builder()
+        let client = gateway_egress::http_client(None)
+            .map_err(|_| source_error())?
             .https_only(true)
             .redirect(reqwest::redirect::Policy::none())
             .connect_timeout(Duration::from_secs(10))
@@ -53,7 +54,7 @@ pub fn decode_catalog(body: &[u8]) -> Result<PricingSyncPreview, AdminError> {
         prices: BTreeMap::new(),
         skipped: Vec::new(),
     };
-    for provider in ["openai", "xai"] {
+    for provider in ["openai", "anthropic"] {
         let models = catalog
             .get(provider)
             .and_then(|p| p.get("models"))
@@ -104,14 +105,18 @@ fn model_price(provider: &str, model: &Value) -> Option<ModelPriceOverride> {
             return None;
         }
         if let Some(tier) = tiers.first() {
-            let expected = if provider == "xai" { 200_000 } else { 272_000 };
+            let expected = if provider == "anthropic" {
+                200_000
+            } else {
+                272_000
+            };
             if tier.pointer("/tier/size")?.as_u64()? != expected {
                 return None;
             }
             bands.insert("long_standard".to_owned(), rates(tier)?);
         }
     } else if let Some(long) = cost.get("context_over_200k") {
-        if provider != "xai" {
+        if provider != "anthropic" {
             return None;
         }
         bands.insert("long_standard".to_owned(), rates(long)?);

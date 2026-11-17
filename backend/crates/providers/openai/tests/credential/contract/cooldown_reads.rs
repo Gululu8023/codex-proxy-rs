@@ -169,7 +169,7 @@ async fn dropping_selection_cancels_pending_reads_without_starting_later_batches
 }
 
 #[tokio::test]
-async fn concurrent_reads_preserve_cooldown_expiry_probe_freeze_and_error_fallback() {
+async fn concurrent_reads_preserve_cooldown_expiry_and_error_fallback() {
     let now = SystemTime::now();
     for (kind, until, fail_read, expected) in [
         (
@@ -183,24 +183,6 @@ async fn concurrent_reads_preserve_cooldown_expiry_probe_freeze_and_error_fallba
             now - Duration::from_secs(60),
             false,
             "acct_first",
-        ),
-        (
-            ProviderCooldownKind::CapacityFreeze,
-            now + Duration::from_secs(60),
-            false,
-            "acct_second",
-        ),
-        (
-            ProviderCooldownKind::CapacityFreeze,
-            now - Duration::from_secs(60),
-            false,
-            "acct_first",
-        ),
-        (
-            ProviderCooldownKind::CapacityFreezeProbe,
-            now - Duration::from_secs(60),
-            false,
-            "acct_second",
         ),
         (
             ProviderCooldownKind::RateLimit,

@@ -72,7 +72,7 @@ async fn codex_oauth_keeps_explicit_limits_and_context_options() {
 }
 
 #[tokio::test]
-async fn effort_values_reach_upstream_before_and_after_middleware() {
+async fn effort_values_reach_upstream() {
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_provider_contract").await;
     let server = MockServer::start().await;
@@ -94,50 +94,31 @@ async fn effort_values_reach_upstream_before_and_after_middleware() {
         json!(null),
         json!("x".repeat(65)),
     ];
-    for rewritten in [false, true] {
-        for effort in &efforts {
-            let reasoning = json!({"effort":effort,"future_extension":true});
-            let initial_reasoning = if rewritten {
-                json!({"effort":"high"})
-            } else {
-                reasoning.clone()
-            };
-            let body = json!({"model":"gpt-5.4","input":"synthetic","reasoning":initial_reasoning});
-            let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
-                ProtocolPayload::json_object("openai", body.as_object().unwrap().clone())
-                    .unwrap()
-                    .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
-            ));
-            let context = if rewritten {
-                context_with_middleware(
-                    "req_effort",
-                    Arc::new(RecordingMiddleware {
-                        observed: Arc::default(),
-                        replacement: ("reasoning".to_owned(), reasoning.clone()),
-                        request_headers: Vec::new(),
-                    }),
-                    FastMode::Default,
-                )
-            } else {
-                context("req_effort", CancellationToken::new())
-            };
-            let mut stream = Arc::clone(&provider)
-                .execute(planned_request("openai", operation), context)
-                .await
-                .unwrap();
-            while let Some(event) = stream.next().await {
-                event.unwrap();
-            }
-            let requests = server.received_requests().await.unwrap();
-            assert_eq!(
-                captured_request_body(requests.last().unwrap())["reasoning"],
-                reasoning
-            );
+    for effort in &efforts {
+        let reasoning = json!({"effort":effort,"future_extension":true});
+        let body = json!({"model":"gpt-5.4","input":"synthetic","reasoning":reasoning});
+        let operation = Operation::Generate(GenerateRequest::from_protocol_payload(
+            ProtocolPayload::json_object("openai", body.as_object().unwrap().clone())
+                .unwrap()
+                .with_context(Map::from_iter([("use_websocket".to_owned(), json!(false))])),
+        ));
+        let context = context("req_effort", CancellationToken::new());
+        let mut stream = Arc::clone(&provider)
+            .execute(planned_request("openai", operation), context)
+            .await
+            .unwrap();
+        while let Some(event) = stream.next().await {
+            event.unwrap();
         }
+        let requests = server.received_requests().await.unwrap();
+        assert_eq!(
+            captured_request_body(requests.last().unwrap())["reasoning"],
+            reasoning
+        );
     }
     assert_eq!(
         server.received_requests().await.unwrap().len(),
-        efforts.len() * 2
+        efforts.len()
     );
 }
 

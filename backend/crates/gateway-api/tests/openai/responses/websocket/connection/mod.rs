@@ -1,6 +1,5 @@
 //! Responses WebSocket 连接生命周期与多轮请求边界测试
 
-mod middleware;
 mod transport;
 
 use std::{
@@ -328,8 +327,6 @@ fn test_connection(stall_writes: bool) -> PumpHarness {
         Arc::from("ws_test"),
         cancellation.clone(),
         ConnectionConfig::PRODUCTION,
-        None,
-        Arc::from([]),
     );
     PumpHarness {
         connection,
@@ -827,11 +824,10 @@ async fn start_active_response() -> (
     TestClientSocket,
     tokio::task::JoinHandle<()>,
 ) {
-    start_active_response_with(None, "/v1/responses", "integration-test").await
+    start_active_response_with("/v1/responses", "integration-test").await
 }
 
 async fn start_active_response_with(
-    plan: Option<gateway_core::engine::middleware::FrozenMiddlewarePlan>,
     path: &str,
     user_agent: &str,
 ) -> (
@@ -844,28 +840,7 @@ async fn start_active_response_with(
         client: authenticated_client("sk_ws_crossing_limit"),
         trace: Arc::clone(&trace),
     });
-    let app = if let Some(plan) = plan {
-        let admin = crate::admin::AdminTestFixture::new().await;
-        gateway_api::initialize(
-            gateway_api::ApiConfig {
-                asset_directory: std::env::temp_dir(),
-                cors_allowed_origins: Vec::new(),
-                request_timeout_seconds: None,
-                request_id_header: "x-request-id".into(),
-            },
-            execution,
-            admin.services,
-            Vec::new(),
-            Arc::new(crate::openai::EmptyWorkerHealth),
-            Arc::new(crate::openai::TestLifecycle::default()),
-            Arc::new(crate::support::RecordingDiagnostics::default()),
-        )
-        .unwrap()
-        .with_middleware(move |_| Some(plan.clone()))
-        .router()
-    } else {
-        api_router(execution).await
-    };
+    let app = api_router(execution).await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0")
         .await
         .expect("bind WebSocket test server");

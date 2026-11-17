@@ -589,7 +589,7 @@ impl CalculatedCostBreakdown {
 }
 
 impl ProviderReportedCost {
-    /// xAI 等 Provider 的 USD ticks 可直接传入；1 USD = 10^10 ticks
+    /// Provider 的 USD ticks 可直接传入；1 USD = 10^10 ticks
     ///
     /// # Errors
     ///

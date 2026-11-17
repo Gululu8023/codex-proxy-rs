@@ -59,12 +59,12 @@ export function resolveAccountCreatePresentation(input: {
       width: configuring ? '42rem' : '36rem',
     },
     oauth: {
-      callbackLabel: id === 'xai'
-        ? t('accounts.onboarding.callbackLabel')
-        : t('accounts.onboarding.callbackAddress'),
+      callbackLabel: t('accounts.onboarding.callbackAddress'),
       callbackPlaceholder: id === 'openai'
         ? 'http://localhost:1455/auth/callback?code=...&state=...'
-        : t('accounts.onboarding.callbackPlaceholder'),
+        : id === 'anthropic'
+          ? 'code#state'
+          : t('accounts.onboarding.callbackPlaceholder'),
       description: t('accounts.onboarding.callbackHelp'),
     },
     importInput: form.mode === 'access_token'

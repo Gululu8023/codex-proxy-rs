@@ -813,9 +813,7 @@ pub struct ProviderEvent {
     wire: Option<Box<ProtocolWireEvent>>,
     observation: Option<Box<ProviderResponseObservation>>,
     session_update: Option<Box<ProviderSessionState>>,
-    middleware_transformed: bool,
     replayable_prelude: bool,
-    middleware_origin_wire: Option<Arc<ProtocolWireEvent>>,
 }
 
 impl ProviderEvent {
@@ -827,9 +825,7 @@ impl ProviderEvent {
             wire: None,
             observation: None,
             session_update: None,
-            middleware_transformed: false,
             replayable_prelude: false,
-            middleware_origin_wire: None,
         }
     }
 
@@ -848,9 +844,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
-            middleware_transformed: false,
             replayable_prelude: false,
-            middleware_origin_wire: None,
         }
     }
 
@@ -862,9 +856,7 @@ impl ProviderEvent {
             wire: Some(Box::new(wire)),
             observation: None,
             session_update: None,
-            middleware_transformed: false,
             replayable_prelude: false,
-            middleware_origin_wire: None,
         }
     }
 
@@ -876,9 +868,7 @@ impl ProviderEvent {
             wire: None,
             observation: Some(Box::new(observation)),
             session_update: None,
-            middleware_transformed: false,
             replayable_prelude: false,
-            middleware_origin_wire: None,
         }
     }
 
@@ -892,42 +882,7 @@ impl ProviderEvent {
 
     #[must_use]
     pub const fn is_replayable_prelude(&self) -> bool {
-        self.replayable_prelude && !self.middleware_transformed
-    }
-
-    /// 返回协议表达是否由中间件替换、展开或丢弃映射产生
-    ///
-    /// 宿主最终协议边界据此启用严格复核，插件可读取其快照
-    #[must_use]
-    pub const fn middleware_transformed(&self) -> bool {
-        self.middleware_transformed
-    }
-
-    /// 返回中间件第一次改写前的协议表达，供协议复核和插件读取
-    #[must_use]
-    pub fn middleware_origin_wire(&self) -> Option<&ProtocolWireEvent> {
-        self.middleware_origin_wire.as_deref()
-    }
-
-    /// 记录宿主已经确认的中间件改写；后续原生编码和投递必须继续传播
-    pub(crate) fn mark_middleware_transformed(&mut self) {
-        self.middleware_transformed = true;
-    }
-
-    /// 用中间件输出替换正文，同时冻结第一次改写前的原始 wire
-    pub(crate) fn replace_middleware_wire(&mut self, wire: Option<ProtocolWireEvent>) {
-        let previous = self.wire.take();
-        if self.middleware_origin_wire.is_none() {
-            self.middleware_origin_wire = previous.map(Arc::from);
-        }
-        self.wire = wire.map(Box::new);
-        self.middleware_transformed = true;
-    }
-
-    /// 一对多或内建协议转换生成的新封套继承同一份宿主 provenance
-    pub(crate) fn inherit_middleware_provenance(&mut self, source: &Self) {
-        self.middleware_transformed = source.middleware_transformed;
-        self.middleware_origin_wire = source.middleware_origin_wire.clone();
+        self.replayable_prelude
     }
 
     /// 把响应观察附在同一上游封套，不拆分或重复交付原生表达

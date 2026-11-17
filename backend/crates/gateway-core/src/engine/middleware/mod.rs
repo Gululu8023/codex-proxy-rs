@@ -1,16 +1,8 @@
-//! 执行层的请求、HTTP、WebSocket 与公开服务中间件合同
+//! 协议入口使用的流式正文封套与响应结算边界。
 
 mod contract;
-pub mod http;
-pub mod outbound;
-mod plan;
-pub mod service;
-pub mod websocket;
-
+pub use crate::engine::request_context::RequestHeader;
 pub use contract::{
-    MiddlewareAuthority, MiddlewareBody, MiddlewareCapabilityDeclaration, MiddlewareContext,
-    MiddlewareError, MiddlewareFrame, MiddlewareFrameEnvelope, MiddlewareFraming, MiddlewareHeader,
-    MiddlewareMount, MiddlewareNext, MiddlewareRequest, MiddlewareResponse,
-    MiddlewareResponseEnvelope, MiddlewareTarget,
+    MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareRequest,
+    MiddlewareResponse,
 };
-pub use plan::{FrozenMiddlewarePlan, MiddlewarePlan};

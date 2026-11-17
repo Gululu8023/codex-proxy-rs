@@ -1101,6 +1101,7 @@ async fn openai_admin_batch_quota_isolates_stale_and_invalid_observations() {
             };
             store
                 .compare_and_swap_quota(QuotaObservation {
+                    quota_pause: None,
                     expected_connection: None,
                     account_id: account.id().clone(),
                     expected_revision: account.revision(),
@@ -1212,7 +1213,13 @@ async fn openai_admin_provider_projects_cached_quota_models_and_canonical_export
     let record = account_record(&account);
     let config = valid_config();
     let catalog_cache = Arc::new(TestCatalogCache::default());
-    catalog_cache.seed("plan:pro", ["gpt-5.4"]);
+    catalog_cache.seed(
+        provider_openai::credential::CodexCatalogScope::for_account(&account)
+            .cache_scope()
+            .unwrap()
+            .as_str(),
+        ["gpt-5.4"],
+    );
     let bundle = provider_openai::initialize(
         config.config.clone(),
         provider_ports_with_catalog(
@@ -1445,6 +1452,7 @@ async fn openai_admin_projects_free_plan_from_cached_quota_when_account_claims_o
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
@@ -1561,6 +1569,7 @@ async fn openai_admin_provider_projects_official_codex_quota_and_independent_buc
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
@@ -1664,6 +1673,7 @@ async fn openai_admin_keeps_confirmed_exhaustion_separate_from_raw_usage_display
     let observed_at = SystemTime::now();
     store
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
@@ -1776,6 +1786,7 @@ async fn openai_admin_preserves_expired_window_usage_and_exhaustion_attribution(
         };
         store
             .compare_and_swap_quota(QuotaObservation {
+                quota_pause: None,
                 expected_connection: None,
                 plan_type: None,
                 account_id: account.id().clone(),
@@ -2178,6 +2189,8 @@ fn provider_ports_with_catalog(
 fn account_record(account: &ProviderAccount) -> AccountRecord {
     let now = Utc::now();
     AccountRecord {
+        quota_limits: Default::default(),
+        quota_paused: false,
         auto_use_quota_credits: false,
         outbound_proxy_id: None,
         outbound_proxy_enabled: true,

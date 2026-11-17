@@ -4,9 +4,6 @@ on:
   push:
     branches:
       - main
-    paths-ignore:
-      - 'release/version.yaml'
-      - 'release/notes.md'
   pull_request:
     branches:
       - main
@@ -45,6 +42,8 @@ jobs:
           predicate-quantifier: some-with-excludes
           filters: |
             backend:
+              - 'scripts/prepare-veil.*'
+              - 'scripts/patches/veil-library.patch'
               - '.github/scripts/toolchains.rb'
               - 'deploy/Dockerfile'
               - 'backend/**'
@@ -62,6 +61,8 @@ jobs:
               - '.github/workflows/_quality.yml'
               - '!**/*.md'
             container:
+              - 'scripts/prepare-veil.*'
+              - 'scripts/patches/veil-library.patch'
               - 'backend/**'
               - 'frontend/**'
               - 'deploy/**'
@@ -77,6 +78,8 @@ jobs:
               - '.github/workflows/ci.yml'
               - '!**/*.md'
             source_container:
+              - 'scripts/prepare-veil.*'
+              - 'scripts/patches/veil-library.patch'
               - 'deploy/Dockerfile'
               - 'deploy/Dockerfile.dockerignore'
               - '.dockerignore'

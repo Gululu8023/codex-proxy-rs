@@ -1,4 +1,4 @@
-//! Codex 客户端最低版本策略
+//! Codex 与 Claude Code 客户端最低版本策略
 
 use std::fmt;
 
@@ -30,16 +30,44 @@ pub struct CodexClientVersion(Version);
 impl CodexClientVersion {
     /// 仅接受没有前后空白、长度受限的标准 SemVer
     pub fn parse(value: &str) -> Result<Self, CodexClientVersionError> {
-        if value.is_empty()
-            || value.len() > MAXIMUM_VERSION_LENGTH
-            || value.trim() != value
-            || value.bytes().any(|byte| byte.is_ascii_control())
-        {
-            return Err(CodexClientVersionError);
-        }
-        Version::parse(value)
+        parse_client_version(value)
             .map(Self)
-            .map_err(|_| CodexClientVersionError)
+            .ok_or(CodexClientVersionError)
+    }
+}
+
+fn parse_client_version(value: &str) -> Option<Version> {
+    if value.is_empty()
+        || value.len() > MAXIMUM_VERSION_LENGTH
+        || value.trim() != value
+        || value.bytes().any(|byte| byte.is_ascii_control())
+    {
+        return None;
+    }
+    Version::parse(value).ok()
+}
+
+/// Claude Code 的客户端版本；与出站身份画像中的伪装版本独立。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeCodeVersion(Version);
+
+impl ClaudeCodeVersion {
+    /// 与 Codex 共用严格 SemVer 边界，非法版本返回 `None`。
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        parse_client_version(value).map(Self)
+    }
+
+    /// 构建元数据不参与最低版本准入比较。
+    #[must_use]
+    pub fn meets_minimum(&self, minimum: &Self) -> bool {
+        !self.0.cmp_precedence(&minimum.0).is_lt()
+    }
+}
+
+impl fmt::Display for ClaudeCodeVersion {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.0.fmt(formatter)
     }
 }
 

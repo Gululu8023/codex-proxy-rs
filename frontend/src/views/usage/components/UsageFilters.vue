@@ -42,7 +42,7 @@ const fieldOptions = computed(() => [
       <ZSelect v-model="field" :options="fieldOptions" :aria-label="t('usage.filters.fieldLabel')" />
       <ZInput
         v-model="value"
-        :placeholder="t('usage.filters.enterFilterValue')"
+        :placeholder="field === 'account' ? t('usage.filters.accountSearchPlaceholder') : t('usage.filters.enterFilterValue')"
         :aria-label="t('usage.filters.valueLabel')"
         class="w-full"
       >

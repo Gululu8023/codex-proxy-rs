@@ -133,7 +133,6 @@ pub enum PumpExitReason {
     InboundOverload,
     ServerClose,
     PumpStopped,
-    MiddlewareFailed,
 }
 
 impl PumpExitReason {
@@ -151,7 +150,6 @@ impl PumpExitReason {
             Self::InboundOverload => "inbound_overload",
             Self::ServerClose => "server_close",
             Self::PumpStopped => "pump_stopped",
-            Self::MiddlewareFailed => "middleware_failed",
         }
     }
 }
@@ -167,7 +165,7 @@ pub enum ConnectionWriteError {
     Transport { message: String },
 }
 
-/// 只有实际 transport 写入才记为 Written；插件丢弃消息不伪造写入成功
+/// 只有实际 transport 写入才记为 Written，取消交付不记为成功
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum WriteOutcome {
     Written,

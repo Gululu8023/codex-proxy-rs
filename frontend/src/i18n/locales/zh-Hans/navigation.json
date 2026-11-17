@@ -6,7 +6,6 @@
     "groups": "分组管理",
     "apiKeys": "API密钥",
     "usage": "分析统计",
-    "plugins": "插件",
     "appearance": "主题设置",
     "settings": "系统设置",
     "update": {
@@ -16,7 +15,6 @@
     "switchLanguage": "切换语言（{value}）",
     "languageLoadFailed": "语言加载失败，请刷新重试",
     "mainLabel": "主导航",
-    "pluginManagement": "插件管理",
     "online": "在线",
     "sidebar": {
       "close": "关闭侧边栏",

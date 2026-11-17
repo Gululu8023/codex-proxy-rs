@@ -22,21 +22,13 @@ use gateway_core::{
         CommitRequirement, CoordinatedEvent, EngineError, ModelRequestId,
         execution::{
             AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
-            PreparedRootExecution, ResponseCommit, StartExecution, StartProviderExecution,
-            StartedExecution,
-        },
-        middleware::{
-            FrozenMiddlewarePlan, MiddlewareContext, MiddlewareError, MiddlewareNext,
-            MiddlewarePlan, MiddlewareRequest, MiddlewareResponse,
+            ResponseCommit, StartExecution, StartProviderExecution, StartedExecution,
         },
     },
     error::GatewayError,
     event::{ProviderEvent, ProviderResponseHeader},
     operation::Operation,
-    routing::{
-        PublicModelId,
-        extensions::{ExtensionSetId, ExtensionSetLease, ExtensionSetReference},
-    },
+    routing::PublicModelId,
 };
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
@@ -44,7 +36,6 @@ use tower::ServiceExt as _;
 use super::{chat_request, completed, created, message};
 use crate::openai::{
     api_router, authenticated_client, authenticated_client_for_provider_with_limit,
-    middleware::{RequestMiddleware, ResponseFrameAction},
 };
 
 pub(super) const PATH: &str = "/v1/chat/completions";
@@ -191,7 +182,6 @@ pub(super) struct Captured {
 pub(super) struct Execution {
     pub captured: Mutex<Option<Captured>>,
     pub client: AuthenticatedClient,
-    pub middleware: Option<FrozenMiddlewarePlan>,
     session: Mutex<Option<Session>>,
 }
 
@@ -200,7 +190,6 @@ impl Execution {
         Self {
             captured: Mutex::default(),
             client: authenticated_client(KEY),
-            middleware: None,
             session: Mutex::new(Some(session)),
         }
     }
@@ -219,9 +208,6 @@ impl ExecutionService for Execution {
     }
     fn contains_public_model(&self, _: &AuthenticatedClient, _: &PublicModelId) -> bool {
         true
-    }
-    fn middleware_plan(&self, _: &PreparedRootExecution) -> Option<FrozenMiddlewarePlan> {
-        self.middleware.clone()
     }
     fn start(
         &self,
@@ -303,57 +289,6 @@ pub(super) async fn json_body(response: Response) -> Value {
     serde_json::from_slice(&to_bytes(response.into_body(), usize::MAX).await.unwrap()).unwrap()
 }
 
-#[derive(Debug, Default)]
-pub(super) struct InspectMiddleware {
-    pub inner: RequestMiddleware,
-    pub requests: Mutex<Vec<Value>>,
-    pub update: Option<fn(&mut Value)>,
-}
-
-impl InspectMiddleware {
-    pub fn frozen(self: &Arc<Self>) -> FrozenMiddlewarePlan {
-        FrozenMiddlewarePlan::new(
-            self.clone(),
-            ExtensionSetReference::new(
-                ExtensionSetId::new("chat-inspector".to_owned()).unwrap(),
-                Arc::new(ReadyLease),
-            ),
-        )
-    }
-}
-
-struct ReadyLease;
-impl ExtensionSetLease for ReadyLease {
-    fn is_ready(&self) -> bool {
-        true
-    }
-}
-
-impl MiddlewarePlan for InspectMiddleware {
-    fn handle(
-        &self,
-        context: MiddlewareContext,
-        mut request: MiddlewareRequest,
-        next: MiddlewareNext,
-    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
-        let mut body: Value = serde_json::from_slice(request.body()).unwrap();
-        self.requests.lock().unwrap().push(body.clone());
-        if let Some(update) = self.update {
-            update(&mut body);
-            let headers = request.headers().to_vec();
-            request = request
-                .replace_parts(
-                    "openai".to_owned(),
-                    headers,
-                    Bytes::from(body.to_string()),
-                    None,
-                )
-                .unwrap();
-        }
-        self.inner.handle(context, request, next)
-    }
-}
-
 #[tokio::test]
 async fn rejects_missing_authentication_before_decoding_or_execution() {
     let fixture = Fixture::new(Session::new(Vec::new())).await;
@@ -371,38 +306,6 @@ async fn rejects_missing_authentication_before_decoding_or_execution() {
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
     assert!(fixture.execution.captured.lock().unwrap().is_none());
-}
-
-#[tokio::test]
-async fn request_middleware_sees_responses_and_preserves_the_chat_endpoint() {
-    let middleware = Arc::new(InspectMiddleware {
-        inner: RequestMiddleware {
-            expected_operation: Some(gateway_core::operation::OperationKind::Generate),
-            ..RequestMiddleware::default()
-        },
-        update: Some(|body| {
-            body["input"] = json!("rewritten by request middleware");
-        }),
-        ..InspectMiddleware::default()
-    });
-    let mut execution = Execution::new(Session::new(vec![completed(json!([message("ok")]))]));
-    execution.middleware = Some(middleware.frozen());
-    let fixture = Fixture::with_execution(execution).await;
-    let response = fixture.post(chat_request(false)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    let downstream = json_body(response).await;
-    assert_eq!(downstream["object"], "chat.completion");
-    let observed = middleware.requests.lock().unwrap();
-    assert!(observed[0].get("messages").is_none());
-    assert_eq!(observed[0]["input"][0]["role"], "user");
-    assert_eq!(
-        middleware.inner.endpoints.lock().unwrap().as_slice(),
-        [PATH]
-    );
-    let captured = fixture.captured();
-    assert_eq!(captured.endpoint, PATH);
-    assert_eq!(captured.body["input"], "rewritten by request middleware");
-    assert_eq!(fixture.trace.commits.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -462,6 +365,7 @@ async fn gzip_and_headers_reuse_the_responses_ingress_contract() {
         "ok"
     );
     let captured = fixture.captured();
+    assert_eq!(captured.endpoint, PATH);
     assert_eq!(captured.context["session_id"], "chat-session");
     let headers = captured.context["opaque_request_headers"]
         .as_array()
@@ -498,42 +402,6 @@ async fn corrupt_or_oversized_compressed_chat_never_starts_execution() {
         let response = fixture.router.clone().oneshot(request).await.unwrap();
         assert_eq!(response.status(), StatusCode::BAD_REQUEST);
         assert!(fixture.execution.captured.lock().unwrap().is_none());
-    }
-}
-
-#[tokio::test]
-async fn response_middleware_is_validated_as_responses_before_chat_projection() {
-    for matching_identity in [true, false] {
-        let replacement = json!({"id":if matching_identity {"resp_chat_test"} else {"resp_other"},
-            "status":"completed","output":[message("plugin text")]});
-        let middleware = Arc::new(
-            RequestMiddleware {
-                expected_operation: Some(gateway_core::operation::OperationKind::Generate),
-                ..RequestMiddleware::default()
-            }
-            .with_response_actions(vec![ResponseFrameAction::Replace(Bytes::from(
-                replacement.to_string(),
-            ))]),
-        );
-        let mut execution =
-            Execution::new(Session::new(vec![completed(json!([message("original")]))]));
-        execution.middleware = Some(middleware.frozen());
-        let fixture = Fixture::with_execution(execution).await;
-        let response = fixture.post(chat_request(false)).await;
-        if matching_identity {
-            assert_eq!(response.status(), StatusCode::OK);
-            assert_eq!(
-                json_body(response).await["choices"][0]["message"]["content"],
-                "plugin text"
-            );
-        } else {
-            assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-            assert_eq!(
-                json_body(response).await["error"]["code"],
-                "middleware_failed"
-            );
-            assert_eq!(fixture.trace.commits.load(Ordering::SeqCst), 0);
-        }
     }
 }
 
@@ -621,51 +489,4 @@ async fn error_after_admission_keepalive_uses_chat_error_encoding() {
     assert!(!body.contains("response.failed"));
     assert_eq!(fixture.trace.commits.load(Ordering::SeqCst), 0);
     assert_eq!(fixture.trace.response_commit.status_code(), Some(200));
-}
-
-#[tokio::test]
-async fn early_middleware_failure_is_recorded_at_ingress_without_a_reserved_model_id() {
-    let middleware = Arc::new(
-        RequestMiddleware {
-            expected_operation: Some(gateway_core::operation::OperationKind::Generate),
-            ..Default::default()
-        }
-        .with_json_short_circuit(Bytes::from_static(b"{}")),
-    );
-    let mut execution = Execution::new(Session::new(vec![completed(json!([message("OK")]))]));
-    execution.middleware = Some(middleware.frozen());
-    let execution = Arc::new(execution);
-    let diagnostics = Arc::new(crate::support::RecordingDiagnostics::default());
-    let admin = crate::admin::AdminTestFixture::new().await;
-    let router = gateway_api::initialize(
-        gateway_api::ApiConfig {
-            asset_directory: env!("CARGO_MANIFEST_DIR").into(),
-            cors_allowed_origins: Vec::new(),
-            request_timeout_seconds: None,
-            request_id_header: "x-correlation-id".into(),
-        },
-        execution.clone(),
-        admin.services,
-        Vec::new(),
-        Arc::new(crate::openai::EmptyWorkerHealth),
-        Arc::new(crate::openai::TestLifecycle::default()),
-        diagnostics.clone(),
-    )
-    .unwrap()
-    .router();
-    let mut request = request(chat_request(false));
-    request
-        .headers_mut()
-        .insert("x-correlation-id", "ingress-short-circuit".parse().unwrap());
-    let response = router.oneshot(request).await.unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    assert!(!response.headers().contains_key("x-gateway-request-id"));
-    assert!(execution.captured.lock().unwrap().is_none());
-    let failures = diagnostics.0.lock().unwrap();
-    assert_eq!(failures.len(), 1);
-    assert_eq!(failures[0].operation, "http_ingress");
-    assert_eq!(
-        failures[0].correlation_id.as_deref(),
-        Some("ingress-short-circuit")
-    );
 }

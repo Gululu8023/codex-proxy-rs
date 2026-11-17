@@ -5,7 +5,8 @@ pub mod privacy;
 pub mod request_profiles;
 mod values;
 pub use values::{
-    SettingsValues, client_min_versions, response_body_limit, validate_request_limits,
+    SettingsValues, claude_code_min_version, client_min_versions, response_body_limit,
+    validate_request_limits,
 };
 
 #[derive(Debug, thiserror::Error)]

@@ -29,6 +29,11 @@ jobs:
             const { owner, repo } = context.repo;
             const pr = context.payload.pull_request;
             const params = { owner, repo, pull_number: pr.number };
+            // 维护者需要通过 PR 调整二开工作流；外部贡献仍遵守受保护文件规则。
+            if (['OWNER', 'MEMBER', 'COLLABORATOR'].includes(pr.author_association)) {
+              core.info('Maintainer rule changes are handled through normal PR review.');
+              return;
+            }
             const files = await github.paginate(github.rest.pulls.listFiles, {
               ...params,
               per_page: 100,

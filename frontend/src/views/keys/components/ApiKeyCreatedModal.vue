@@ -1,23 +1,19 @@
 <script setup lang="ts">
 import { ZButton, ZDialog, ZIconButton } from '@codex-proxy/ui'
 
-import { Copy, Upload } from '@lucide/vue'
-import { shallowRef } from 'vue'
+import { Copy } from '@lucide/vue'
 import { useI18n } from 'vue-i18n'
-import ClientImportModal from '@/components/ClientImportModal.vue'
 
 defineProps<{ createdKey: string }>()
 
 const emit = defineEmits<{
   copy: [text: string]
-  importClient: []
   afterLeave: []
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
 const open = defineModel<boolean>({ default: false })
-const showImport = shallowRef(false)
 </script>
 
 <template>
@@ -27,7 +23,7 @@ const showImport = shallowRef(false)
     :description="t('keys.created.description')"
     type="success"
     width="36rem"
-    @closed="showImport = false; emit('afterLeave')"
+    @closed="emit('afterLeave')"
   >
     <div class="flex flex-col gap-4">
       <div class="rounded-z bg-z-warning-container px-4 py-3">
@@ -51,16 +47,15 @@ const showImport = shallowRef(false)
     </div>
 
     <template #footer>
-      <ZButton :disabled="!createdKey" @click="showImport = true">
+      <ZButton @click="emit('copy', createdKey)">
         <template #icon>
-          <Upload class="size-4" />
+          <Copy class="size-4" />
         </template>
-        {{ t('keys.configuration.importTo') }}
+        {{ t('common.actions.copy') }}
       </ZButton>
       <ZButton type="primary" @click="open = false">
         {{ t('keys.created.iHaveSaved') }}
       </ZButton>
     </template>
   </ZDialog>
-  <ClientImportModal v-if="open" v-model="showImport" @select="emit('importClient')" />
 </template>

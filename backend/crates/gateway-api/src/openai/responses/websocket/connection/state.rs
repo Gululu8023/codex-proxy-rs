@@ -4,10 +4,7 @@ use super::frame::{
     ConnectionConfig, ConnectionWriteError, OUTBOUND_COMMAND_BUFFER, WriteContext, WriteOutcome,
 };
 use axum::extract::ws::Message;
-use gateway_core::{
-    engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader},
-    lifecycle::CancellationToken,
-};
+use gateway_core::lifecycle::CancellationToken;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering},
@@ -56,9 +53,6 @@ impl ConnectionStats {
 }
 
 pub(super) struct PumpContext {
-    pub(super) extensions: gateway_core::engine::extensions::ExtensionCallScope,
-    pub(super) middleware: Option<FrozenMiddlewarePlan>,
-    pub(super) headers: Arc<[MiddlewareHeader]>,
     pub(super) connection_id: Arc<str>,
     pub(super) cancellation: CancellationToken,
     pub(super) opened_at: Instant,

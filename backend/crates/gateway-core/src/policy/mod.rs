@@ -8,7 +8,8 @@ mod peer_sharing;
 pub use peer_sharing::{ClientPeerSharing, ClientPeerSharingError};
 
 pub use client_version::{
-    ClientVersionRejection, CodexClientKind, CodexClientMinVersions, CodexClientVersion,
+    ClaudeCodeVersion, ClientVersionRejection, CodexClientKind, CodexClientMinVersions,
+    CodexClientVersion,
 };
 
 use std::collections::BTreeMap;
@@ -111,7 +112,7 @@ impl RateLimits {
     }
 }
 
-/// Key 自身的设置默认值；请求派生策略保留本值，不能把宿主默认或插件覆盖写回
+/// Key 自身的设置默认值；请求派生策略保留本值，不能把宿主默认写回
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ClientSettings {
     pub request_profiles: BTreeMap<ProviderKind, OpaqueProviderData>,
@@ -191,12 +192,9 @@ impl ClientPolicy {
 
     #[must_use]
     pub fn with_peer_sharing(mut self, sharing: ClientPeerSharing) -> Self {
-        self.account_scope = Arc::new(
-            self.account_scope
-                .as_ref()
-                .clone()
-                .with_direct_accounts_only(sharing.enabled),
-        );
+        if sharing.enabled {
+            self.account_scope = Arc::new(self.account_scope.as_ref().clone().requiring_groups());
+        }
         self.peer_sharing = sharing;
         self
     }

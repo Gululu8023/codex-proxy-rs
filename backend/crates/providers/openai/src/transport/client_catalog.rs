@@ -10,34 +10,64 @@ use super::{
     },
     diagnostics::CodexUpstreamSendPhase,
     endpoints::endpoint_url,
+    profile::CodexWireProfile,
     response_meta,
 };
 
 impl CodexBackendClient {
-    /// 客户端目录按调用方版本协商；后台目录仍使用经过核验的服务端画像版本
+    /// 目录优先使用显式协商版本，否则沿用调用方冻结的画像版本
     pub async fn fetch_models_with_context(
         &self,
         context: CodexRequestContext<'_>,
         client_version: Option<&str>,
     ) -> CodexClientResult<CodexModelCatalogSnapshot> {
+        let profile = self.profile.snapshot();
+        let query = (
+            "client_version",
+            client_version.unwrap_or(&profile.codex_version),
+        );
+        let (body, etag) = match self.fetch_models_page(context, &profile, &[query]).await {
+            Err(CodexClientError::Upstream {
+                status, ref body, ..
+            }) if self.protocol == OpenAiUpstreamProtocol::ResponsesApi
+                && rejects_catalog_version(status, body) =>
+            {
+                self.fetch_models_page(context, &profile, &[]).await?
+            }
+            result => result?,
+        };
+        match self.protocol {
+            OpenAiUpstreamProtocol::Codex => Ok(parse_codex_model_catalog(&body, etag.as_deref())?),
+            OpenAiUpstreamProtocol::ResponsesApi => Ok(super::catalog::parse_api_model_catalog(
+                &body,
+                etag.as_deref(),
+            )?),
+        }
+    }
+
+    async fn fetch_models_page(
+        &self,
+        context: CodexRequestContext<'_>,
+        profile: &CodexWireProfile,
+        query: &[(&str, &str)],
+    ) -> CodexClientResult<(bytes::Bytes, Option<String>)> {
         let path = match self.protocol {
             OpenAiUpstreamProtocol::Codex => "codex/models",
             OpenAiUpstreamProtocol::ResponsesApi => "models",
         };
-        let profile = self.profile.snapshot();
-        let headers = self.model_request_headers(&profile, context)?;
+        let headers = self.model_request_headers(profile, context)?;
         let mut request = self
             .client
             .get(endpoint_url(&self.base_url, path))
-            .headers(headers);
-        let client_version = client_version.or_else(|| {
-            (self.protocol == OpenAiUpstreamProtocol::Codex)
-                .then_some(profile.codex_version.as_str())
-        });
-        if let Some(client_version) = client_version {
-            request = request.query(&[("client_version", client_version)]);
+            .headers(headers)
+            .query(query)
+            .build()?;
+        if let Some(route) = self.route_to(request.url()) {
+            request
+                .headers_mut()
+                .insert(gateway_protocol::peer::ROUTE_HEADER, route.clone());
         }
-        let response = request.send().await?;
+        let response = self.client.execute(request).await?;
         let status = response.status();
         let diagnostics = response_meta::diagnostics(Some(status.as_u16()), response.headers())
             .with_response_origin(Some(response.url().clone()));
@@ -65,11 +95,22 @@ impl CodexBackendClient {
                 send_phase: CodexUpstreamSendPhase::AfterPayload,
             });
         }
-        Ok(match self.protocol {
-            OpenAiUpstreamProtocol::Codex => parse_codex_model_catalog(&body, etag.as_deref())?,
-            OpenAiUpstreamProtocol::ResponsesApi => {
-                super::catalog::parse_api_model_catalog(&body, etag.as_deref())?
-            }
-        })
+        Ok((body, etag))
     }
+}
+
+/// 仅在上游明确不接受版本参数时读取普通目录，其他失败保留原错误
+fn rejects_catalog_version(status: reqwest::StatusCode, body: &str) -> bool {
+    if !matches!(status.as_u16(), 400 | 422) {
+        return false;
+    }
+    let Ok(value) = serde_json::from_str::<serde_json::Value>(body) else {
+        return false;
+    };
+    let error = &value["error"];
+    error["param"].as_str() == Some("client_version")
+        && matches!(
+            error["code"].as_str(),
+            Some("unknown_parameter" | "unsupported_parameter")
+        )
 }

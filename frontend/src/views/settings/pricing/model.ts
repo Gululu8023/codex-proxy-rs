@@ -1,6 +1,7 @@
 import type { ModelPricing, PriceBand, PricingCatalog, TokenPrices } from '@/api'
 import { computed } from 'vue'
 import { t } from '@/i18n'
+import { compareProviders } from '@/utils/providers'
 
 export const bands = computed<{ value: PriceBand, label: string }[]>(() => ([
   {
@@ -59,7 +60,7 @@ export interface PricingRow {
   effective: ModelPricing
 }
 export function pricingProviders(catalog: PricingCatalog): string[] {
-  return Object.keys(catalog.defaults).sort((left, right) => left.localeCompare(right))
+  return Object.keys(catalog.defaults).sort(compareProviders)
 }
 export function pricingRows(catalog: PricingCatalog, provider: string): PricingRow[] {
   const defaults = catalog.defaults[provider] ?? {}

@@ -15,7 +15,7 @@ use gateway_admin::{
         store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
     },
 };
-use gateway_core::account::{OutboundProxy, ProviderAccountId};
+use gateway_core::account::ProviderAccountId;
 use serde_json::{Value, json};
 use tower::ServiceExt as _;
 
@@ -348,14 +348,18 @@ pub(super) struct SuccessfulProbe;
 
 #[async_trait]
 impl ProxyProbe for SuccessfulProbe {
-    async fn test(&self, proxy: Option<&OutboundProxy>, detect_location: bool) -> ProxyTestResult {
-        if let Some(proxy) = proxy {
+    async fn test(
+        &self,
+        proxy: gateway_admin::ports::proxy::ProbeRoute<'_>,
+        detect_location: bool,
+    ) -> ProxyTestResult {
+        if let gateway_admin::ports::proxy::ProbeRoute::Proxy(proxy) = proxy {
             assert_eq!(
                 proxy.expose_url(),
                 "http://test-user:private-password@proxy.example:8080/"
             );
         }
-        let exit_ip = if proxy.is_some() {
+        let exit_ip = if matches!(proxy, gateway_admin::ports::proxy::ProbeRoute::Proxy(_)) {
             "203.0.113.2"
         } else {
             "203.0.113.3"

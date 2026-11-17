@@ -1,6 +1,5 @@
 //! 模型请求生命周期、单行持久化 port 与 commit/send/cancellation 边界
 
-mod account_protection;
 pub mod admission;
 pub mod authentication;
 pub mod budget;
@@ -9,16 +8,14 @@ pub mod connection;
 pub mod continuation;
 pub mod coordinator;
 pub mod execution;
-pub mod extensions;
 mod image_generation;
 pub mod middleware;
-pub mod nested;
 pub mod observation;
-pub mod policy;
 pub mod probe;
+pub mod prompt_guard;
 pub mod provider;
+pub mod request_context;
 pub mod response_control;
-pub mod upstream_adapter;
 
 use crate::lifecycle::{Deadline, LeaseGuard};
 
@@ -35,13 +32,10 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::account::{
-    AccountCandidate, AccountEligibilityPolicy, AccountSelection, AccountSelectionContext,
-    AccountSelectionPolicy, FastMode, ProviderAccountId,
+    AccountEligibilityPolicy, AccountSelectionPolicy, FastMode, ProviderAccountId,
 };
 use crate::engine::continuation::{ContinuationBinding, NativeContinuationPin};
-use crate::error::{
-    GatewayError, ProviderConnectionObservation, ProviderError, ProviderErrorKind, StoreError,
-};
+use crate::error::{GatewayError, ProviderConnectionObservation, ProviderError, StoreError};
 use crate::event::ProviderEvent;
 use crate::identity::ProviderKind;
 use crate::lifecycle::CancellationToken;
@@ -124,6 +118,7 @@ impl AttemptTrigger {
 /// 一旦设置，Provider 在本 attempt 内不得换号或切换 target
 #[derive(Debug, Clone, Default)]
 pub struct AccountAttemptContext {
+    excluded_proxy_endpoints: Vec<crate::upstream::ProxyEndpoint>,
     excluded_accounts: BTreeSet<ProviderAccountId>,
     required_account: Option<ProviderAccountId>,
     state_owner: Option<ProviderAccountStateOwner>,
@@ -140,6 +135,7 @@ impl AccountAttemptContext {
         state_owner: Option<ProviderAccountStateOwner>,
     ) -> Self {
         Self {
+            excluded_proxy_endpoints: Vec::new(),
             excluded_accounts,
             required_account,
             state_owner,
@@ -160,6 +156,7 @@ impl AccountAttemptContext {
     ) -> Self {
         let (required_account, eligibility) = target.into_selection();
         Self {
+            excluded_proxy_endpoints: Vec::new(),
             excluded_accounts,
             required_account: Some(required_account),
             state_owner,
@@ -265,6 +262,8 @@ pub enum ContinuationAttempt {
     ///
     /// 该枚举本身不证明客户端 input 完整，也不授权 Provider 清除 previous-response
     ReplayAny,
+    /// 仅迁移账号绑定，随后要求客户端携带完整历史重放；不得发送当前增量输入
+    RotateForClientReplay,
 }
 
 impl ContinuationAttempt {
@@ -275,6 +274,7 @@ impl ContinuationAttempt {
             Self::Native => "native",
             Self::ReplayOwner => "replay_owner",
             Self::ReplayAny => "replay_any",
+            Self::RotateForClientReplay => "rotate_for_client_replay",
         }
     }
 }
@@ -282,7 +282,8 @@ impl ContinuationAttempt {
 /// Provider 每次执行可见的 request-local context
 #[derive(Debug, Clone)]
 pub struct RequestAttemptContext {
-    account_error_protection: Option<account_protection::ProtectionContext>,
+    prompt_guard_state: prompt_guard::PromptGuardState,
+    prompt_guard: Option<Arc<dyn prompt_guard::PromptGuard>>,
     request_body_limit: Option<usize>,
     lease_metadata: Option<Arc<crate::provider_ports::ProviderLeaseMetadata>>,
     response_control: Option<response_control::ResponseControl>,
@@ -297,23 +298,17 @@ pub struct RequestAttemptContext {
     trace: crate::diagnostics::TraceContext,
     concurrency_wait_budget: crate::concurrency::ConcurrencyWaitBudget,
     connection_budget: connection::ConnectionBudget,
-    request_policy: Option<policy::RequestPolicyContext>,
-    execution_effects: Option<Arc<nested::ExecutionEffects>>,
-    middleware: Option<middleware::FrozenMiddlewarePlan>,
-    upstream_adapters: Option<upstream_adapter::FrozenUpstreamAdapterPlan>,
     requested_model: Option<PublicModelId>,
-    account_group_ids: Arc<[crate::account::scope::AccountGroupId]>,
-    endpoint: String,
-    client_transport: execution::ClientTransport,
-    extension_scope: extensions::ExtensionCallScope,
+    request_scope: request_context::RequestScope,
 }
 
 impl RequestAttemptContext {
-    fn with_account_error_protection(
-        mut self,
-        protection: Option<account_protection::ProtectionContext>,
-    ) -> Self {
-        self.account_error_protection = protection;
+    pub fn with_prompt_guard_state(mut self, state: prompt_guard::PromptGuardState) -> Self {
+        self.prompt_guard_state = state;
+        self
+    }
+    pub fn with_prompt_guard(mut self, guard: Option<Arc<dyn prompt_guard::PromptGuard>>) -> Self {
+        self.prompt_guard = guard;
         self
     }
 
@@ -335,15 +330,6 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn with_requested_model(mut self, model: Option<PublicModelId>) -> Self {
         self.requested_model = model;
-        self
-    }
-
-    #[must_use]
-    pub fn with_upstream_adapters(
-        mut self,
-        plan: Option<upstream_adapter::FrozenUpstreamAdapterPlan>,
-    ) -> Self {
-        self.upstream_adapters = plan;
         self
     }
 
@@ -398,8 +384,9 @@ impl RequestAttemptContext {
     #[must_use]
     pub fn new(request_id: ModelRequestId, client_api_key_ref: ClientApiKeyId) -> Self {
         Self {
-            account_error_protection: None,
+            prompt_guard_state: prompt_guard::PromptGuardState::default(),
             response_control: None,
+            prompt_guard: None,
             request_body_limit: None,
             lease_metadata: None,
             request_id,
@@ -413,15 +400,8 @@ impl RequestAttemptContext {
             trace: crate::diagnostics::TraceContext::default(),
             concurrency_wait_budget: crate::concurrency::ConcurrencyWaitBudget::default(),
             connection_budget: connection::ConnectionBudget::default(),
-            request_policy: None,
-            execution_effects: None,
-            middleware: None,
-            upstream_adapters: None,
             requested_model: None,
-            account_group_ids: Arc::from([]),
-            endpoint: String::new(),
-            client_transport: execution::ClientTransport::InternalProbe,
-            extension_scope: extensions::ExtensionCallScope::default(),
+            request_scope: request_context::RequestScope::default(),
         }
     }
 
@@ -455,42 +435,9 @@ impl RequestAttemptContext {
         self
     }
 
-    /// 附着与发布视图同代次的请求策略；诊断与无插件路径保持 `None`
     #[must_use]
-    pub fn with_request_policy(mut self, policy: Option<policy::RequestPolicyContext>) -> Self {
-        self.request_policy = policy;
-        self
-    }
-
-    /// 附着本次逻辑请求共享的外部副作用水位；不会传给 Provider 或插件 wire
-    #[must_use]
-    pub fn with_execution_effects(
-        mut self,
-        effects: Option<Arc<nested::ExecutionEffects>>,
-    ) -> Self {
-        self.execution_effects = effects;
-        self
-    }
-
-    /// 附着与路由快照同代次的 attempt 中间件及可信绑定事实
-    #[must_use]
-    pub fn with_middleware(
-        mut self,
-        middleware: Option<middleware::FrozenMiddlewarePlan>,
-        account_group_ids: Arc<[crate::account::scope::AccountGroupId]>,
-        endpoint: String,
-        client_transport: execution::ClientTransport,
-    ) -> Self {
-        self.middleware = middleware;
-        self.account_group_ids = account_group_ids;
-        self.endpoint = endpoint;
-        self.client_transport = client_transport;
-        self
-    }
-
-    #[must_use]
-    pub fn with_extension_scope(mut self, extension_scope: extensions::ExtensionCallScope) -> Self {
-        self.extension_scope = extension_scope;
+    pub fn with_request_scope(mut self, request_scope: request_context::RequestScope) -> Self {
+        self.request_scope = request_scope;
         self
     }
 
@@ -511,33 +458,8 @@ impl RequestAttemptContext {
     }
 
     #[must_use]
-    pub const fn request_policy(&self) -> Option<&policy::RequestPolicyContext> {
-        self.request_policy.as_ref()
-    }
-
-    #[must_use]
-    pub const fn extension_scope(&self) -> &extensions::ExtensionCallScope {
-        &self.extension_scope
-    }
-
-    #[must_use]
-    pub const fn middleware(&self) -> Option<&middleware::FrozenMiddlewarePlan> {
-        self.middleware.as_ref()
-    }
-
-    #[must_use]
-    pub fn account_group_ids(&self) -> &[crate::account::scope::AccountGroupId] {
-        &self.account_group_ids
-    }
-
-    #[must_use]
-    pub fn endpoint(&self) -> &str {
-        &self.endpoint
-    }
-
-    #[must_use]
-    pub const fn client_transport(&self) -> execution::ClientTransport {
-        self.client_transport
+    pub const fn request_scope(&self) -> &request_context::RequestScope {
+        &self.request_scope
     }
 }
 
@@ -567,78 +489,8 @@ impl AttemptContext {
     }
 
     #[must_use]
-    pub fn execution_effects(&self) -> Option<Arc<nested::ExecutionEffects>> {
-        self.request.execution_effects.as_ref().map(Arc::clone)
-    }
-
-    #[must_use]
     pub const fn requested_model(&self) -> Option<&PublicModelId> {
         self.request.requested_model.as_ref()
-    }
-
-    /// 从本次请求冻结的发布代次选择上游适配器；不建立连接、不重新选号
-    pub fn upstream_adapter(
-        &self,
-        provider: &ProviderKind,
-        model: &UpstreamModelId,
-    ) -> Result<upstream_adapter::UpstreamAdapterSelection, ProviderError> {
-        let account = self
-            .required_account()
-            .or_else(|| match self.continuation_attempt() {
-                ContinuationAttempt::Native => self
-                    .continuation()
-                    .and_then(continuation::ContinuationBinding::pinned)
-                    .map(|pin| pin.account()),
-                ContinuationAttempt::ReplayOwner => self
-                    .account_state_owner()
-                    .filter(|owner| owner.provider() == provider)
-                    .map(|owner| owner.account()),
-                ContinuationAttempt::None | ContinuationAttempt::ReplayAny => None,
-            });
-        self.request.upstream_adapters.as_ref().map_or(
-            Ok(upstream_adapter::UpstreamAdapterSelection::Native),
-            |plan| plan.select(self, provider, model, account),
-        )
-    }
-
-    /// 账号候选资格检查和最终执行解析使用同一冻结计划，不调用插件进程
-    pub fn upstream_adapter_for_account(
-        &self,
-        provider: &ProviderKind,
-        model: &UpstreamModelId,
-        account: &ProviderAccountId,
-    ) -> Result<Option<Arc<dyn upstream_adapter::UpstreamAdapter>>, ProviderError> {
-        self.request
-            .upstream_adapters
-            .as_ref()
-            .map_or(Ok(None), |plan| {
-                match plan.select(self, provider, model, Some(account))? {
-                    upstream_adapter::UpstreamAdapterSelection::Native => Ok(None),
-                    upstream_adapter::UpstreamAdapterSelection::Adapter(adapter) => {
-                        Ok(Some(adapter))
-                    }
-                    // 已知账号的解析必须给出最终执行端，不能绕过资格检查进入原生路径
-                    upstream_adapter::UpstreamAdapterSelection::PendingAccount => Err(
-                        ProviderError::new(ProviderErrorKind::Protocol, UpstreamSendState::NotSent),
-                    ),
-                }
-            })
-    }
-
-    #[must_use]
-    pub fn account_group_ids(&self) -> &[crate::account::scope::AccountGroupId] {
-        &self.request.account_group_ids
-    }
-
-    #[must_use]
-    pub const fn client_transport(&self) -> execution::ClientTransport {
-        self.request.client_transport
-    }
-
-    /// 原生响应可交付可替换前导事件；中间件可能改变其输出语义
-    #[must_use]
-    pub fn allows_replayable_prelude(&self) -> bool {
-        self.request.middleware.is_none()
     }
 
     #[must_use]
@@ -740,134 +592,49 @@ impl AttemptContext {
         self.request.timing_started_at()
     }
 
-    /// 返回同一次请求冻结的插件策略上下文
     #[must_use]
-    pub const fn request_policy_context(&self) -> Option<&policy::RequestPolicyContext> {
-        self.request.request_policy()
+    pub const fn request_scope(&self) -> &request_context::RequestScope {
+        self.request.request_scope()
     }
 
-    #[must_use]
-    pub const fn extension_scope(&self) -> &extensions::ExtensionCallScope {
-        self.request.extension_scope()
+    /// 诊断只读取本次请求的审查事实；缺少摘要不能推断为已审查通过。
+    pub fn prompt_guard_assessment(&self) -> Option<prompt_guard::PromptGuardAssessment> {
+        self.request.prompt_guard_state.snapshot()
     }
 
-    /// 在已选账号并持有其 lease 后，以 owned terminal 执行本次 retry 的中间件链
-    ///
-    /// terminal 返回的 stream 仍须保持 cold；中间件不能取得 credential、发送状态、
-    /// canonical usage/cost 或结算所有权
-    pub async fn execute_middleware(
-        &self,
-        operation: crate::operation::Operation,
-        provider: ProviderKind,
-        model: Option<String>,
-        account_id: ProviderAccountId,
-        terminal: provider::ProviderMiddlewareTerminal,
-    ) -> Result<provider::ProviderStream, ProviderError> {
-        // 入口已校验原请求，此处复查中间件最终提交的 operation，每次重试均生效
-        let terminal: provider::ProviderMiddlewareTerminal = if self
-            .account_scope()
-            .is_some_and(|scope| !scope.allows_image_generation())
-        {
-            Box::new(move |operation, headers| {
-                Box::pin(async move {
-                    image_generation::check_image_generation(false, &operation).map_err(|_| {
-                        ProviderError::new(
-                            ProviderErrorKind::RequestPolicyDenied,
-                            UpstreamSendState::NotSent,
-                        )
-                        .with_retry_prohibited()
-                    })?;
-                    terminal(operation, headers).await
+    /// 正常响应内的拒绝保留原生交付；反馈持久化失败不得改变响应结果。
+    pub async fn observe_prompt_refusal(&self) {
+        if let Some(guard) = &self.request.prompt_guard {
+            guard
+                .observe_refusal(prompt_guard::PromptGuardContext {
+                    request_id: self.request_id().as_str(),
+                    client_key_id: self.client_api_key_ref().as_str(),
+                    state: &self.request.prompt_guard_state,
                 })
-            })
-        } else {
-            terminal
-        };
-        // 保护观察真正的 Provider terminal，先于 attempt 中间件的响应改写
-        let terminal: provider::ProviderMiddlewareTerminal =
-            if let Some(protection) = self.request.account_error_protection.clone() {
-                Box::new(move |operation, headers| {
-                    Box::pin(async move {
-                        let stream = terminal(operation, headers).await?;
-                        Ok(stream
-                            .with_account_error_protection(
-                                protection.store,
-                                protection.policy,
-                                protection.revision,
-                            )
-                            .await)
-                    })
-                })
-            } else {
-                terminal
-            };
-        let context = self.middleware_context(
-            middleware::MiddlewareMount::Attempt,
-            Some(operation.kind()),
-            provider,
-            model,
-            account_id,
-        );
-        provider::execute_attempt_middleware(
-            self.request.middleware.as_ref(),
-            context,
-            operation,
-            self.request.client_transport,
-            terminal,
-        )
-        .await
+                .await;
+        }
     }
 
-    /// 为当前实际账号冻结出站准备链，无此阶段时保留 Provider 原生路径
-    #[must_use]
-    pub fn outbound_middleware(
+    /// Provider 必须在最后一次正文改写之后、业务载荷发送之前调用
+    pub async fn check_prompt_guard(
         &self,
-        provider: ProviderKind,
-        model: Option<String>,
-        account_id: ProviderAccountId,
-    ) -> Option<middleware::outbound::Pipeline> {
-        let plan = self.request.middleware.as_ref()?;
-        let context = self.middleware_context(
-            middleware::MiddlewareMount::Outbound,
-            None,
-            provider,
-            model,
-            account_id,
-        );
-        plan.has_outbound(&context)
-            .then(|| middleware::outbound::Pipeline::new(plan.clone(), context))
-    }
-
-    fn middleware_context(
-        &self,
-        mount: middleware::MiddlewareMount,
-        operation: Option<crate::operation::OperationKind>,
-        provider: ProviderKind,
-        model: Option<String>,
-        account_id: ProviderAccountId,
-    ) -> middleware::MiddlewareContext {
-        middleware::MiddlewareContext::new(
-            middleware::MiddlewareTarget {
-                request_id: self.request.request_id.clone(),
-                mount,
-                attempt_index: Some(self.attempt_index),
-                operation,
-                endpoint: self.request.endpoint.clone(),
-                transport: self.request.client_transport,
-                provider: Some(provider),
-                model,
-                account_id: Some(account_id),
-            },
-            middleware::MiddlewareAuthority {
-                client_key_id: self.request.client_api_key_ref.clone(),
-                account_group_ids: Arc::clone(&self.request.account_group_ids),
-                cancellation: self.cancellation.clone(),
-                deadline: self.deadline,
-                extension_scope: self.request.extension_scope.clone(),
-                execution_effects: self.request.execution_effects.as_ref().map(Arc::clone),
-            },
-        )
-        .with_request_body_limit(self.request.request_body_limit)
+        operation: &crate::operation::Operation,
+    ) -> Result<(), ProviderError> {
+        if let Some(guard) = &self.request.prompt_guard {
+            guard
+                .check(
+                    operation,
+                    prompt_guard::PromptGuardContext {
+                        request_id: self.request_id().as_str(),
+                        client_key_id: self.client_api_key_ref().as_str(),
+                        state: &self.request.prompt_guard_state,
+                    },
+                    &self.cancellation,
+                    self.deadline,
+                )
+                .await?;
+        }
+        Ok(())
     }
 
     #[must_use]
@@ -894,6 +661,17 @@ impl AttemptContext {
     #[must_use]
     pub const fn excluded_accounts(&self) -> &BTreeSet<ProviderAccountId> {
         self.account.excluded_accounts()
+    }
+
+    #[must_use]
+    pub fn excludes_proxy(&self, proxy: Option<&crate::account::OutboundProxy>) -> bool {
+        !self.account.excluded_proxy_endpoints.is_empty()
+            && proxy.is_some_and(|proxy| {
+                self.account
+                    .excluded_proxy_endpoints
+                    .iter()
+                    .any(|endpoint| proxy.matches_endpoint(endpoint))
+            })
     }
 
     /// 管理端诊断或请求局部恢复 attempt 强制使用的唯一账号
@@ -954,24 +732,6 @@ impl AttemptContext {
     #[must_use]
     pub const fn cancellation(&self) -> &CancellationToken {
         &self.cancellation
-    }
-
-    /// 使用冻结策略选择账号；没有匹配策略时委托现有 `AccountSelector`
-    pub async fn select_account<'a>(
-        &self,
-        provider: &ProviderKind,
-        model: Option<&str>,
-        candidates: &'a [AccountCandidate],
-        context: &mut AccountSelectionContext,
-    ) -> Result<Option<AccountSelection<'a>>, policy::AccountPolicyError> {
-        match self.request.request_policy() {
-            Some(policy) => {
-                policy
-                    .select_account(self.attempt_index, provider, model, candidates, context)
-                    .await
-            }
-            None => Ok(crate::account::AccountSelector.select(candidates, context)),
-        }
     }
 }
 
@@ -1135,6 +895,15 @@ pub trait ExecutionStore: Send + Sync {
     }
 
     async fn create_model_request(&self, request: NewModelRequest) -> Result<(), StoreError>;
+    /// 零 attempt 的拒绝仍保留实际候选供应商；未知归属保持空值。
+    async fn create_model_request_for_provider(
+        &self,
+        request: NewModelRequest,
+        _provider: Option<ProviderKind>,
+    ) -> Result<(), StoreError> {
+        self.create_model_request(request).await
+    }
+
     async fn record_attempt(&self, attempt: AttemptRecord) -> Result<(), StoreError>;
     /// 请求插入与首次 attempt 合并持久化；两者写同一行，支持合并写的
     /// store 可覆写为单次往返，缩短首 token 前的关键路径
@@ -1182,6 +951,15 @@ pub trait ExecutionStore: Send + Sync {
         &self,
         finalization: ModelRequestFinalization,
     ) -> Result<(), StoreError>;
+
+    /// 审核摘要与终态作为同一观察队列项目；无持久化能力的临时 store 仍只收敛生命周期。
+    async fn finalize_model_request_with_prompt_guard(
+        &self,
+        finalization: ModelRequestFinalization,
+        _assessment: Option<prompt_guard::PromptGuardAssessment>,
+    ) -> Result<(), StoreError> {
+        self.finalize_model_request(finalization).await
+    }
 
     async fn recover_expired(&self, now: SystemTime) -> Result<RecoveryReport, StoreError>;
 }
@@ -1274,7 +1052,6 @@ pub struct GatewayEngine<S: ?Sized> {
     store: Arc<S>,
     providers: provider::ProviderRegistry,
     client_retry: Option<Arc<dyn client_retry::ClientRetryStore>>,
-    account_error_protection: Option<Arc<dyn crate::provider_ports::ProviderCooldownPort>>,
 }
 
 impl<S: ?Sized> GatewayEngine<S> {
@@ -1284,17 +1061,7 @@ impl<S: ?Sized> GatewayEngine<S> {
             store,
             providers,
             client_retry: None,
-            account_error_protection: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_account_error_protection(
-        mut self,
-        store: Arc<dyn crate::provider_ports::ProviderCooldownPort>,
-    ) -> Self {
-        self.account_error_protection = Some(store);
-        self
     }
 
     #[must_use]

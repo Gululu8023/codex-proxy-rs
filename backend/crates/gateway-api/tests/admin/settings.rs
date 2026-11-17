@@ -40,6 +40,11 @@ async fn response_json(response: axum::response::Response) -> Value {
 fn update_body() -> Value {
     json!({
         "configRevision": 7,
+        "anthropicModelMappings": {},
+        "anthropicAccountAffinity": "preferred",
+        "anthropicSessionAffinityTtlHours": 24,
+        "quotaResetWindowWeights": gateway_core::account::ResetWindowWeights::default(),
+        "minClaudeCodeVersion": null,
         "codexPrivacyPolicy": {"enabled":false,"onError":"skip_rule","rules":[]},
         "requestLocationEnabled": false,
         "requestLocation": {"country":"US", "region":"Ohio", "city":"Piketon", "timezone":"America/New_York"},
@@ -68,7 +73,6 @@ fn update_body() -> Value {
         "usageRetentionDays": 31,
         "opsEventRetentionDays": 31,
         "auditRetentionDays": 91,
-        "accountErrorProtection": gateway_core::account::AccountErrorProtection::default(),
         "accountWarmupEnabled": false,
         "accountWarmupCron": "0 8 * * *",
         "accountWarmupModel": null,
@@ -183,92 +187,11 @@ fn privacy_policy_is_required_and_rejects_unknown_contract_fields() {
 }
 
 #[tokio::test]
-async fn error_protection_rules_round_trip_and_invalid_policy_does_not_replace_them() {
-    let fixture = AdminTestFixture::new().await;
-    fixture.auth.insert_session("valid-session");
-    let mut body = update_body();
-    let policy = json!({
-        "enabled": true,
-        "rules": [{
-            "id": "custom-rejection", "name": "自定义上游拒绝",
-            "conditions": [
-                {"field": "provider", "operator": "equals", "values": ["openai", "xai"], "ignoreCase": false},
-                {"field": "code", "operator": "equals", "values": ["custom_vendor_rejection", null], "ignoreCase": true},
-                {"field": "message", "operator": "contains", "values": ["please pause"], "ignoreCase": false}
-            ]
-        }],
-        "threshold": 3, "windowSeconds": 120, "durationSeconds": 300,
-        "probeEnabled": false, "probeModel": null
-    });
-    body["accountErrorProtection"] = policy.clone();
-    let response = app(fixture.state())
-        .oneshot(request(
-            Method::POST,
-            "/api/admin/settings/update",
-            Some(body.clone()),
-        ))
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    let saved = response_json(response).await;
-    assert_eq!(saved["data"]["accountErrorProtection"], policy);
-    body["configRevision"] = saved["data"]["configRevision"].clone();
-
-    let mut invalid_policies = Vec::new();
-    let mut empty = policy.clone();
-    empty["rules"] = json!([]);
-    invalid_policies.push(empty);
-    let mut provider_only = policy.clone();
-    provider_only["rules"][0]["conditions"] = json!([
-        {"field": "provider", "operator": "equals", "values": ["openai"], "ignoreCase": false}
-    ]);
-    invalid_policies.push(provider_only);
-    let mut empty_contains = policy.clone();
-    empty_contains["rules"][0]["conditions"][2]["values"] = json!(["  "]);
-    invalid_policies.push(empty_contains);
-    for invalid in invalid_policies {
-        body["accountErrorProtection"] = invalid;
-        let response = app(fixture.state())
-            .oneshot(request(
-                Method::POST,
-                "/api/admin/settings/update",
-                Some(body.clone()),
-            ))
-            .await
-            .unwrap();
-        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
-    }
-    let response = app(fixture.state())
-        .oneshot(request(Method::GET, "/api/admin/settings", None))
-        .await
-        .unwrap();
-    let loaded = response_json(response).await;
-    assert_eq!(loaded["data"]["accountErrorProtection"], policy);
-    assert_eq!(
-        loaded["data"]["configRevision"],
-        saved["data"]["configRevision"]
-    );
-}
-
-#[test]
-fn error_protection_requires_an_explicit_policy_in_settings_replacement() {
-    let mut missing = update_body();
-    missing
-        .as_object_mut()
-        .unwrap()
-        .remove("accountErrorProtection");
-    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(missing).is_err());
-    let mut unknown = update_body();
-    unknown["accountErrorProtection"]["unknownField"] = json!(true);
-    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(unknown).is_err());
-}
-
-#[tokio::test]
 async fn smart_settings_round_trip_and_invalid_updates_leave_the_saved_value_intact() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     let mut body = update_body();
-    let custom = json!({"loadWeight": 2.0, "quotaWeight": 0.0, "healthWeight": 1.0, "latencyWeight": 0.5, "resetWeight": 1.2, "queueWeight": 2.3});
+    let custom = json!({"loadWeight": 2.0, "quotaWeight": 0.0, "healthWeight": 1.0, "latencyWeight": 0.5, "resetWeight": 1.2, "queueWeight": 2.3, "resetWindowWeights":{"fiveHour":0.0,"weekly":1.0,"monthly":0.0}});
     body["smartScheduling"] = custom.clone();
     let response = app(fixture.state())
         .oneshot(request(
@@ -348,7 +271,7 @@ async fn short_request_retention_round_trips_and_invalid_days_do_not_replace_it(
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     let mut body = update_body();
-    for days in [1, 3, 7, 15, 30, 31] {
+    for days in [1, 3, 7, 15, 30, 31, 32, u32::MAX] {
         body["usageRetentionDays"] = json!(days);
         let response = app(fixture.state())
             .oneshot(request(
@@ -365,8 +288,6 @@ async fn short_request_retention_round_trips_and_invalid_days_do_not_replace_it(
     }
     for (days, expected_status) in [
         (json!(0), StatusCode::BAD_REQUEST),
-        (json!(32), StatusCode::BAD_REQUEST),
-        (json!(u32::MAX), StatusCode::BAD_REQUEST),
         (json!(-1), StatusCode::UNPROCESSABLE_ENTITY),
         (json!(1.5), StatusCode::UNPROCESSABLE_ENTITY),
         (json!(null), StatusCode::UNPROCESSABLE_ENTITY),
@@ -389,7 +310,7 @@ async fn short_request_retention_round_trips_and_invalid_days_do_not_replace_it(
     assert_eq!(response.status(), StatusCode::OK);
     assert_eq!(
         response_json(response).await["data"]["usageRetentionDays"],
-        31
+        u32::MAX
     );
 }
 
@@ -869,15 +790,14 @@ async fn settings_update_rejects_unknown_fields_without_writing() {
 
 #[test]
 fn global_profile_can_be_omitted_but_cannot_be_cleared() {
-    for field in ["openaiClientProfile", "xaiClientProfile"] {
-        let mut body = update_body();
-        body.as_object_mut().unwrap().remove(field);
-        assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body.clone()).is_ok());
-        body[field] = json!(null);
-        assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body.clone()).is_err());
-        body[field] = json!({"versionMode":"latest"});
-        assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body).is_ok());
-    }
+    let field = "openaiClientProfile";
+    let mut body = update_body();
+    body.as_object_mut().unwrap().remove(field);
+    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body.clone()).is_ok());
+    body[field] = json!(null);
+    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body.clone()).is_err());
+    body[field] = json!({"versionMode":"latest"});
+    assert!(serde_json::from_value::<UpdateRuntimeSettingsRequest>(body).is_ok());
 }
 
 #[tokio::test]
@@ -885,11 +805,10 @@ async fn generic_global_profiles_decode_native_providers_and_reject_legacy_confl
     let mut body = update_body();
     body["providerRequestProfiles"] = json!({
         "openai":{"preset":"desktop"},
-        "xai":{"preset":"managed"},
     });
     body["openaiClientProfile"] = json!({"preset":"desktop"});
     let decoded = serde_json::from_value::<UpdateRuntimeSettingsRequest>(body.clone()).unwrap();
-    assert!(decoded.provider_request_profiles.contains_key("xai"));
+    assert!(decoded.provider_request_profiles.contains_key("openai"));
 
     body["openaiClientProfile"] = json!({"preset":"cli"});
     let fixture = AdminTestFixture::new().await;
@@ -906,12 +825,12 @@ async fn generic_global_profiles_decode_native_providers_and_reject_legacy_confl
 }
 
 #[tokio::test]
-async fn settings_update_rejects_a_new_unknown_profile() {
+async fn settings_update_rejects_unknown_profile_values_but_allows_removing_them() {
     let fixture = AdminTestFixture::new().await;
     fixture.auth.insert_session("valid-session");
     let mut body = update_body();
     body["providerRequestProfiles"] = json!({
-        "plugin.unknown":{"preset":"new"}
+        "retired-provider":{"preset":"new"}
     });
 
     let response = app(fixture.state())
@@ -925,7 +844,7 @@ async fn settings_update_rejects_a_new_unknown_profile() {
 
     assert_eq!(response.status(), StatusCode::BAD_REQUEST);
 
-    body["providerRequestProfiles"] = json!({"plugin.unknown":null});
+    body["providerRequestProfiles"] = json!({"retired-provider":null});
     let response = app(fixture.state())
         .oneshot(request(
             Method::POST,
@@ -934,7 +853,8 @@ async fn settings_update_rejects_a_new_unknown_profile() {
         ))
         .await
         .unwrap();
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    // 删除遗留供应商配置无需该供应商继续注册。
+    assert_eq!(response.status(), StatusCode::OK);
 }
 
 fn custom_pricing() -> Value {

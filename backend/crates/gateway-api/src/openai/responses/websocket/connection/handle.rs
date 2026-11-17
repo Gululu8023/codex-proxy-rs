@@ -8,10 +8,7 @@ use super::{
 };
 use axum::extract::ws::{CloseFrame, Message, Utf8Bytes, close_code};
 use futures::{Sink, Stream};
-use gateway_core::{
-    engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader},
-    lifecycle::CancellationToken,
-};
+use gateway_core::lifecycle::CancellationToken;
 use std::{
     collections::VecDeque,
     fmt,
@@ -50,8 +47,6 @@ impl ResponsesWebSocketConnection {
         socket: Socket,
         connection_id: String,
         cancellation: CancellationToken,
-        middleware: Option<FrozenMiddlewarePlan>,
-        headers: Arc<[MiddlewareHeader]>,
     ) -> Self {
         spawn_connection(
             socket.activity.clone(),
@@ -59,8 +54,6 @@ impl ResponsesWebSocketConnection {
             Arc::<str>::from(connection_id),
             cancellation,
             ConnectionConfig::PRODUCTION,
-            middleware,
-            headers,
         )
     }
 
@@ -349,8 +342,6 @@ pub fn spawn_connection<S, E>(
     connection_id: Arc<str>,
     cancellation: CancellationToken,
     config: ConnectionConfig,
-    middleware: Option<FrozenMiddlewarePlan>,
-    headers: Arc<[MiddlewareHeader]>,
 ) -> ResponsesWebSocketConnection
 where
     S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin + Send + 'static,
@@ -362,9 +353,6 @@ where
     let (command_tx, command_rx) = mpsc::channel(OUTBOUND_COMMAND_BUFFER);
     let (incoming_tx, incoming_rx) = mpsc::channel(INBOUND_EVENT_BUFFER);
     let (exit_tx, exit_rx) = oneshot::channel();
-    let extensions = crate::middleware::current()
-        .map(|context| context.extensions)
-        .unwrap_or_default();
     let input_gate = Arc::new(tokio::sync::Mutex::new(()));
     let pump_task = tokio::spawn(run_pump(
         socket,
@@ -379,9 +367,6 @@ where
         Arc::clone(&expired),
         Arc::clone(&stats),
         config,
-        middleware,
-        headers,
-        extensions,
     ));
     ResponsesWebSocketConnection {
         connection_id,

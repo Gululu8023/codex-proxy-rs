@@ -28,12 +28,14 @@ export function useApiKeyEditor(options: {
   const showFormModal = shallowRef(false)
   const showAllAccountsConfirm = shallowRef(false)
   const editingKey = shallowRef<ApiKey | null>(null)
+  const initialInstallationSeed = shallowRef('')
   const savingKeyAction = useAsyncAction()
   const savingKey = savingKeyAction.loading
   const form = ref<ApiKeyFormValue>(emptyForm())
 
   function openCreate() {
     editingKey.value = null
+    initialInstallationSeed.value = ''
     form.value = emptyForm()
     showFormModal.value = true
   }
@@ -41,15 +43,25 @@ export function useApiKeyEditor(options: {
   function openEdit(key: ApiKey) {
     editingKey.value = key
     const profiles = cloneDeep(key.providerRequestProfileOverrides)
-    const openai = profiles.openai
-    const identity = (openai?.inherit as Record<string, unknown> | undefined) ?? openai
-    const installationSeed = typeof identity?.installationSeed === 'string'
-      ? identity.installationSeed
-      : ''
-    if (openai?.inherit)
-      delete profiles.openai
-    else if (openai)
-      delete openai.installationSeed
+    const installationSeed = ['openai', 'anthropic'].map((provider) => {
+      const profile = profiles[provider]
+      const identity = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
+      return typeof identity?.installationSeed === 'string'
+        ? identity.installationSeed
+        : ''
+    }).find(Boolean) ?? ''
+    initialInstallationSeed.value = installationSeed
+    for (const provider of ['openai', 'anthropic']) {
+      const profile = profiles[provider]
+      const fields = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
+      // A manually distinct provider seed stays in that provider's profile.
+      if (fields?.installationSeed === installationSeed) {
+        if (profile?.inherit)
+          delete profiles[provider]
+        else if (profile)
+          delete profile.installationSeed
+      }
+    }
     form.value = {
       peerSharing: { ...key.peerSharing },
       providerRequestProfileOverrides: profiles,
@@ -103,11 +115,24 @@ export function useApiKeyEditor(options: {
         const installationSeed = form.value.installationSeed
         if (installationSeed) {
           // 仅设置种子时仍继承全局 UA，不在 Key 中复制当前全局值
-          profiles.openai = profiles.openai
-            ? { ...profiles.openai, installationSeed }
-            : {
-                inherit: { installationSeed },
-              }
+          for (const provider of ['openai', 'anthropic']) {
+            const profile = profiles[provider]
+            const identity = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
+            if (identity?.installationSeed)
+              continue
+            if (editingKey.value && installationSeed === initialInstallationSeed.value) {
+              const previous = editingKey.value.providerRequestProfileOverrides[provider]
+              const previousIdentity = (previous?.inherit as Record<string, unknown> | undefined) ?? previous
+              // Saving another field must not introduce a seed into a previously unseeded provider.
+              if (!previousIdentity?.installationSeed)
+                continue
+            }
+            profiles[provider] = profile
+              ? { ...profile, installationSeed }
+              : {
+                  inherit: { installationSeed },
+                }
+          }
         }
         const current = editingKey.value
         let created: { key: string, name: string } | undefined

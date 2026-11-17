@@ -39,8 +39,27 @@ remote_compaction = "v2"
 X-OpenAI-Actor-Authorization = "proxy-managed"
 
 [features]
+api_key_model_discovery = true
 image_generation = true
 goals = true`
+}
+
+interface ClaudeConfigInput {
+  apiKey: string
+  baseUrl: string
+}
+
+/** 生成 Claude Code 的 `settings.json`；CLI 与 VS Code 扩展共用该文件，模型由客户端经网关模型发现协商。 */
+export function buildClaudeConfig(input: ClaudeConfigInput): string {
+  return JSON.stringify({
+    env: {
+      ANTHROPIC_BASE_URL: input.baseUrl.trim().replace(/\/+$/, ''),
+      ANTHROPIC_AUTH_TOKEN: input.apiKey,
+      CLAUDE_CODE_ENABLE_GATEWAY_MODEL_DISCOVERY: '1',
+      CLAUDE_CODE_GATEWAY_HINT_HEADERS: '1',
+      CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC: '1',
+    },
+  }, null, 2)
 }
 
 interface CodexCcSwitchImportInput {

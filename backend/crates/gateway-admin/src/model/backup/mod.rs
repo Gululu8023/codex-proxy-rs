@@ -312,6 +312,8 @@ pub struct BackupRecord {
     pub object_key: String,
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
+    /// Claude 隐私存储快照；映射卷从未初始化时为空
+    pub privacy_store: Option<BackupObject>,
     pub attempt_count: u32,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -321,6 +323,43 @@ pub struct BackupRecord {
     pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
+}
+
+/// 与数据库归档并列上传的附属对象
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BackupObject {
+    pub object_key: String,
+    pub size_bytes: u64,
+    pub sha256: String,
+}
+
+/// 一条备份记录可下载的归档
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BackupArtifact {
+    #[default]
+    Database,
+    PrivacyStore,
+}
+
+impl BackupArtifact {
+    /// 稳定 wire 值
+    #[must_use]
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Database => "database",
+            Self::PrivacyStore => "privacyStore",
+        }
+    }
+
+    /// 解析 wire 值
+    #[must_use]
+    pub fn parse(value: &str) -> Option<Self> {
+        match value {
+            "database" => Some(Self::Database),
+            "privacyStore" => Some(Self::PrivacyStore),
+            _ => None,
+        }
+    }
 }
 
 /// 备份记录分页查询
@@ -510,7 +549,7 @@ pub fn build_object_key(
 ) -> Result<String, BackupError> {
     let prefix = normalize_prefix(prefix)?;
     Ok(format!(
-        "{prefix}/{}/{:02}/{:02}/codex-proxy-rs_{}_{}.sql.gz",
+        "{prefix}/{}/{:02}/{:02}/codex-proxy-rs_{}_{}{DATABASE_SUFFIX}",
         at.format("%Y"),
         at.format("%m"),
         at.format("%d"),
@@ -522,7 +561,31 @@ pub fn build_object_key(
 /// 下载文件名：`codex-proxy-rs_{短 id}.sql.gz`，与对象 key 的文件名一致
 #[must_use]
 pub fn build_download_file_name(backup_id: &str) -> String {
-    format!("codex-proxy-rs_{}.sql.gz", short_backup_id(backup_id))
+    format!(
+        "codex-proxy-rs_{}{DATABASE_SUFFIX}",
+        short_backup_id(backup_id)
+    )
+}
+
+const DATABASE_SUFFIX: &str = ".sql.gz";
+const PRIVACY_STORE_SUFFIX: &str = ".veil.tar.gz";
+
+/// 隐私存储对象与数据库归档同目录同名，仅后缀不同
+#[must_use]
+pub fn build_privacy_store_object_key(object_key: &str) -> String {
+    let stem = object_key
+        .strip_suffix(DATABASE_SUFFIX)
+        .unwrap_or(object_key);
+    format!("{stem}{PRIVACY_STORE_SUFFIX}")
+}
+
+/// 隐私存储下载文件名：`codex-proxy-rs_{短 id}.veil.tar.gz`
+#[must_use]
+pub fn build_privacy_store_file_name(backup_id: &str) -> String {
+    format!(
+        "codex-proxy-rs_{}{PRIVACY_STORE_SUFFIX}",
+        short_backup_id(backup_id)
+    )
 }
 
 /// 截取备份 id 的可读短标识：去掉 `backup_` 前缀，最多保留 8 位 hex

@@ -8,15 +8,13 @@ use crate::identity::ProviderKind;
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SettingsValues {
-    #[serde(default)]
-    pub(crate) account_error_protection: crate::account::AccountErrorProtection,
-    #[serde(skip, default = "initial_protection_revision")]
-    pub(crate) account_error_protection_revision: u64,
     pub(crate) pricing: Arc<crate::metering::PricingOverrides>,
     pub(crate) request_profiles: Arc<BTreeMap<ProviderKind, crate::account::OpaqueProviderData>>,
     pub(crate) codex_privacy_policy: super::privacy::CodexPrivacyPolicy,
     pub(crate) request_location_enabled: bool,
     pub(crate) request_location: crate::account::RequestLocation,
+    #[serde(default)]
+    pub(crate) anthropic_model_mappings: Arc<BTreeMap<String, String>>,
     pub(crate) max_concurrent_per_account: u32,
     pub(crate) max_waiting_per_key: u32,
     pub(crate) max_waiting_per_account: u32,
@@ -26,46 +24,26 @@ pub struct SettingsValues {
     pub(crate) max_retry_after_seconds: u32,
     pub(crate) openai_guardian_reserved_concurrency: u32,
     pub(crate) openai_account_affinity: crate::account::AccountAffinity,
+    #[serde(default)]
+    pub(crate) anthropic_account_affinity: crate::account::AccountAffinity,
     pub(crate) max_account_rotations: u32,
     pub(crate) openai_session_affinity_ttl_hours: u32,
+    #[serde(default = "crate::account::default_anthropic_session_affinity_ttl_hours")]
+    pub(crate) anthropic_session_affinity_ttl_hours: u32,
+    /// 历史字段名保留；Codex 与 Claude 共用同一个入口请求体上限。
     pub(crate) responses_max_decompressed_body_bytes: u64,
     pub(crate) smart_scheduling: crate::account::SmartSchedulingConfig,
+    #[serde(default)]
+    pub(crate) quota_reset_window_weights: crate::account::ResetWindowWeights,
     pub(crate) rotation_strategy: String,
     pub(crate) model_mappings: Arc<BTreeMap<String, String>>,
     pub(crate) min_codex_desktop_version: Option<String>,
     pub(crate) min_codex_cli_version: Option<String>,
-}
-
-fn initial_protection_revision() -> u64 {
-    1
+    #[serde(default)]
+    pub(crate) min_claude_code_version: Option<String>,
 }
 
 impl SettingsValues {
-    #[must_use]
-    pub const fn with_account_error_protection_revision(mut self, revision: u64) -> Self {
-        self.account_error_protection_revision = revision;
-        self
-    }
-
-    #[must_use]
-    pub const fn account_error_protection_revision(&self) -> u64 {
-        self.account_error_protection_revision
-    }
-
-    #[must_use]
-    pub fn with_account_error_protection(
-        mut self,
-        policy: crate::account::AccountErrorProtection,
-    ) -> Self {
-        self.account_error_protection = policy;
-        self
-    }
-
-    #[must_use]
-    pub const fn account_error_protection(&self) -> &crate::account::AccountErrorProtection {
-        &self.account_error_protection
-    }
-
     #[must_use]
     pub fn with_codex_privacy_policy(mut self, policy: super::privacy::CodexPrivacyPolicy) -> Self {
         self.codex_privacy_policy = policy;
@@ -84,6 +62,21 @@ impl SettingsValues {
         affinity: crate::account::AccountAffinity,
     ) -> Self {
         self.openai_account_affinity = affinity;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_anthropic_account_affinity(
+        mut self,
+        affinity: crate::account::AccountAffinity,
+    ) -> Self {
+        self.anthropic_account_affinity = affinity;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_anthropic_session_affinity_ttl_hours(mut self, hours: u32) -> Self {
+        self.anthropic_session_affinity_ttl_hours = hours;
         self
     }
 
@@ -109,6 +102,15 @@ impl SettingsValues {
     #[must_use]
     pub fn request_profiles(&self) -> &BTreeMap<ProviderKind, crate::account::OpaqueProviderData> {
         &self.request_profiles
+    }
+
+    #[must_use]
+    pub const fn with_quota_reset_window_weights(
+        mut self,
+        weights: crate::account::ResetWindowWeights,
+    ) -> Self {
+        self.quota_reset_window_weights = weights;
+        self
     }
 
     #[must_use]
@@ -156,6 +158,12 @@ impl SettingsValues {
     }
 
     #[must_use]
+    pub fn with_anthropic_model_mappings(mut self, mappings: BTreeMap<String, String>) -> Self {
+        self.anthropic_model_mappings = Arc::new(mappings);
+        self
+    }
+
+    #[must_use]
     pub const fn with_concurrency_queues(
         mut self,
         max_waiting_per_key: u32,
@@ -181,13 +189,12 @@ impl SettingsValues {
         min_codex_cli_version: Option<String>,
     ) -> Self {
         Self {
-            account_error_protection: Default::default(),
-            account_error_protection_revision: 1,
             request_profiles: Arc::default(),
             pricing: Arc::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: crate::account::RequestLocation::default(),
+            anthropic_model_mappings: Arc::default(),
             max_concurrent_per_account,
             max_waiting_per_key: 0,
             max_waiting_per_account: 0,
@@ -197,14 +204,19 @@ impl SettingsValues {
             max_retry_after_seconds: 240,
             openai_guardian_reserved_concurrency: 0,
             openai_account_affinity: crate::account::AccountAffinity::default(),
+            anthropic_account_affinity: crate::account::AccountAffinity::default(),
             max_account_rotations: 3,
             openai_session_affinity_ttl_hours: 24,
+            anthropic_session_affinity_ttl_hours:
+                crate::account::default_anthropic_session_affinity_ttl_hours(),
             responses_max_decompressed_body_bytes: 64 * 1024 * 1024,
             smart_scheduling: crate::account::SmartSchedulingConfig::default(),
+            quota_reset_window_weights: crate::account::ResetWindowWeights::default(),
             rotation_strategy: rotation_strategy.into(),
             model_mappings: Arc::new(model_mappings),
             min_codex_desktop_version,
             min_codex_cli_version,
+            min_claude_code_version: None,
         }
     }
 
@@ -221,6 +233,12 @@ impl SettingsValues {
     ) -> Self {
         self.min_codex_desktop_version = versions.desktop().map(ToString::to_string);
         self.min_codex_cli_version = versions.cli().map(ToString::to_string);
+        self
+    }
+
+    #[must_use]
+    pub fn with_min_claude_code_version(mut self, version: Option<String>) -> Self {
+        self.min_claude_code_version = version;
         self
     }
 }
@@ -285,4 +303,15 @@ pub fn client_min_versions(
             .transpose()
             .map_err(|_| "min_codex_cli_version")?,
     ))
+}
+
+/// 管理写入和请求覆盖共用 Claude Code 最低版本校验。
+pub fn claude_code_min_version(
+    version: Option<&str>,
+) -> Result<Option<crate::policy::ClaudeCodeVersion>, &'static str> {
+    version
+        .map(|version| {
+            crate::policy::ClaudeCodeVersion::parse(version).ok_or("min_claude_code_version")
+        })
+        .transpose()
 }

@@ -12,6 +12,9 @@ const refreshConcurrency = defineModel<string>('refreshConcurrency', { required:
 
 <template>
   <ZCard :title="t('settings.tokenRefresh.title')">
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <div class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2">
       <ZFormItem :show-message="Boolean(refreshMarginSeconds.trim())" prop="refreshMarginSeconds" :label="t('settings.tokenRefresh.leadTimeLabel')" :description="t('settings.tokenRefresh.leadTimeHelp')">
         <ZInput v-model="refreshMarginSeconds" :aria-label="t('settings.units.inSeconds', { label: t('settings.tokenRefresh.leadTimeLabel') })" type="number">
@@ -31,5 +34,6 @@ const refreshConcurrency = defineModel<string>('refreshConcurrency', { required:
         </ZInput>
       </ZFormItem>
     </div>
+    <slot name="footer" />
   </ZCard>
 </template>

@@ -1,4 +1,4 @@
-import type { BackupRecord, BackupStatus } from '@/api'
+import type { BackupArtifact, BackupRecord, BackupStatus } from '@/api'
 import { computed, onScopeDispose, shallowRef } from 'vue'
 
 import {
@@ -18,6 +18,11 @@ const POLL_INTERVAL_MS = 2000
 
 function isActive(status: BackupStatus): boolean {
   return ACTIVE_STATUSES.includes(status)
+}
+
+/** 下载状态的键：同一记录的数据库与隐私存储各自独立。 */
+export function downloadStateKey(backupId: string, artifact: BackupArtifact): string {
+  return `${backupId}:${artifact}`
 }
 
 /** 备份记录：分页、可见时轮询、手动创建、下载与请求删除。 */
@@ -126,12 +131,14 @@ export function useBackupRecords() {
     }
   }
 
-  async function downloadBackup(record: BackupRecord): Promise<void> {
-    if (downloadStates.value[record.id])
+  /** 下载状态按记录与归档分别跟踪，数据库与隐私存储可以独立下载。 */
+  async function downloadBackup(record: BackupRecord, artifact: BackupArtifact = 'database'): Promise<void> {
+    const stateKey = downloadStateKey(record.id, artifact)
+    if (downloadStates.value[stateKey])
       return
-    downloadStates.value = { ...downloadStates.value, [record.id]: true }
+    downloadStates.value = { ...downloadStates.value, [stateKey]: true }
     try {
-      const result = await getBackupDownloadUrl({ backupId: record.id })
+      const result = await getBackupDownloadUrl({ backupId: record.id, artifact })
       // 预签名 URL 带 S3 的 Content-Disposition，临时 anchor 触发浏览器下载即可。
       const link = document.createElement('a')
       link.href = result.url
@@ -148,7 +155,7 @@ export function useBackupRecords() {
       }
     }
     finally {
-      downloadStates.value = { ...downloadStates.value, [record.id]: false }
+      downloadStates.value = { ...downloadStates.value, [stateKey]: false }
     }
   }
 

@@ -2,8 +2,7 @@
 
 use chrono::{DateTime, Utc};
 use gateway_admin::model::{
-    client_keys::ClientKeySecret,
-    key_usage::{KeyUsageOverview, KeyUsageRecords},
+    key_usage::{KeyUsageConfig, KeyUsageOverview, KeyUsageRecords},
     observability::{
         CostCoverage, CurrencyCost, Granularity, RequestMetrics, RequestOutcome, UsageListRecord,
     },
@@ -36,13 +35,23 @@ pub(super) fn version(version: SystemVersion) -> VersionView {
 pub(super) struct ConfigView {
     name: String,
     plaintext_key: String,
+    provider_kinds: Vec<String>,
+    claude_public_url: String,
 }
 
-pub(super) fn config(secret: ClientKeySecret) -> ConfigView {
+pub(super) fn config(config: KeyUsageConfig) -> ConfigView {
+    let secret = config.secret;
     let plaintext_key = secret.expose_for_response().to_owned();
     ConfigView {
         name: secret.record.name,
         plaintext_key,
+        provider_kinds: secret
+            .record
+            .provider_kinds
+            .iter()
+            .map(|kind| kind.as_str().to_owned())
+            .collect(),
+        claude_public_url: config.claude_public_url,
     }
 }
 

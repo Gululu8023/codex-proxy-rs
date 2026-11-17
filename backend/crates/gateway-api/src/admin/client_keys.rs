@@ -157,7 +157,6 @@ pub struct CreateClientKeyRequest {
     #[serde(default)]
     provider_request_profile_overrides: ProviderRequestProfileOverrides,
     openai_client_profile_override: Option<serde_json::Map<String, serde_json::Value>>,
-    xai_client_profile_override: Option<serde_json::Map<String, serde_json::Value>>,
     custom_key: Option<String>,
     name: String,
     label: Option<String>,
@@ -189,7 +188,6 @@ impl CreateClientKeyRequest {
         let request_profile_overrides = normalize_request_profile_overrides(
             self.provider_request_profile_overrides,
             self.openai_client_profile_override,
-            self.xai_client_profile_override,
         )?;
         Ok(CreateClientKey {
             peer_sharing: self.peer_sharing,
@@ -225,8 +223,6 @@ pub struct UpdateClientKeyRequest {
     provider_request_profile_overrides: ProviderRequestProfileOverrideUpdates,
     #[serde(default, deserialize_with = "deserialize_profile_override")]
     openai_client_profile_override: Option<Option<serde_json::Map<String, serde_json::Value>>>,
-    #[serde(default, deserialize_with = "deserialize_profile_override")]
-    xai_client_profile_override: Option<Option<serde_json::Map<String, serde_json::Value>>>,
     id: String,
     name: String,
     label: Option<String>,
@@ -249,7 +245,6 @@ impl UpdateClientKeyRequest {
         let request_profile_override_updates = normalize_request_profile_override_updates(
             self.provider_request_profile_overrides,
             self.openai_client_profile_override,
-            self.xai_client_profile_override,
         )?;
         Ok(UpdateClientKey {
             peer_sharing: self.peer_sharing,
@@ -343,8 +338,6 @@ pub struct ClientKeyView {
     provider_request_profile_overrides: ProviderRequestProfileOverrides,
     /// 固定兼容字段；值始终从 provider_request_profile_overrides 派生
     openai_client_profile_override: Option<serde_json::Map<String, serde_json::Value>>,
-    /// 固定兼容字段；值始终从 provider_request_profile_overrides 派生
-    xai_client_profile_override: Option<serde_json::Map<String, serde_json::Value>>,
     id: String,
     name: String,
     label: Option<String>,
@@ -388,7 +381,6 @@ impl From<(ClientKeyRecord, crate::time::TimePresenter)> for ClientKeyView {
             openai_client_profile_override: provider_request_profile_overrides
                 .get("openai")
                 .cloned(),
-            xai_client_profile_override: provider_request_profile_overrides.get("xai").cloned(),
             provider_request_profile_overrides,
             peer_sharing: record.peer_sharing,
             id: record.id.to_string(),
@@ -740,15 +732,11 @@ fn validate_limit(value: u64, field: &'static str) -> Result<(), WireValidationE
 fn normalize_request_profile_overrides(
     profiles: ProviderRequestProfileOverrides,
     openai: Option<serde_json::Map<String, serde_json::Value>>,
-    xai: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<gateway_admin::model::client_keys::ProviderRequestProfileOverrides, WireValidationError>
 {
     let mut normalized = profiles
         .into_iter()
         .map(|(provider, profile)| {
-            if !matches!(provider.as_str(), "openai" | "xai") {
-                return Err(WireValidationError::new("providerRequestProfileOverrides"));
-            }
             validate_request_profile_size(&profile)?;
             Ok((
                 ProviderKind::new(provider)
@@ -758,7 +746,7 @@ fn normalize_request_profile_overrides(
         })
         .collect::<Result<gateway_admin::model::client_keys::ProviderRequestProfileOverrides, _>>(
         )?;
-    for (provider, profile) in [("openai", openai), ("xai", xai)] {
+    for (provider, profile) in [("openai", openai)] {
         let Some(profile) = profile else {
             continue;
         };
@@ -779,7 +767,6 @@ fn normalize_request_profile_overrides(
 fn normalize_request_profile_override_updates(
     profiles: ProviderRequestProfileOverrideUpdates,
     openai: Option<Option<serde_json::Map<String, serde_json::Value>>>,
-    xai: Option<Option<serde_json::Map<String, serde_json::Value>>>,
 ) -> Result<
     gateway_admin::model::client_keys::ProviderRequestProfileOverrideUpdates,
     WireValidationError,
@@ -787,9 +774,6 @@ fn normalize_request_profile_override_updates(
     let mut normalized = profiles
         .into_iter()
         .map(|(provider, profile)| {
-            if !matches!(provider.as_str(), "openai" | "xai") {
-                return Err(WireValidationError::new("providerRequestProfileOverrides"));
-            }
             if let Some(profile) = profile.as_ref() {
                 validate_request_profile_size(profile)?;
             }
@@ -804,7 +788,7 @@ fn normalize_request_profile_override_updates(
             gateway_admin::model::client_keys::ProviderRequestProfileOverrideUpdates,
             _,
         >>()?;
-    for (provider, profile) in [("openai", openai), ("xai", xai)] {
+    for (provider, profile) in [("openai", openai)] {
         let Some(profile) = profile else {
             continue;
         };
@@ -992,7 +976,6 @@ where
         .reset_budget(
             &auth.context().mutation_context(),
             payload.into_command().map_err(map_wire_error)?,
-            gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin::Admin,
         )
         .await
         .map_err(map_service_error)?;

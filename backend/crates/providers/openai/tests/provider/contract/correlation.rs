@@ -161,9 +161,9 @@ async fn account_correlation_preserves_turns_across_transports_and_account_switc
                 flat["ws_request_header_baggage"],
                 "sentry-environment=synthetic"
             );
-            assert_eq!(
-                headers["x-codex-installation-id"].to_str().unwrap(),
-                flat["x-codex-installation-id"]
+            assert!(!headers.contains_key("x-codex-installation-id"));
+            assert!(
+                uuid::Uuid::parse_str(flat["x-codex-installation-id"].as_str().unwrap()).is_ok()
             );
             let header: Value =
                 serde_json::from_str(headers["x-codex-turn-metadata"].to_str().unwrap()).unwrap();

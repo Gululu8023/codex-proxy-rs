@@ -43,7 +43,7 @@ impl ResponseCommit {
     }
 
     pub(crate) fn finish(&self) {
-        // 执行已结束且未提交时保留原 HTTP 错误，不能因外层插件迟迟返回再改成 200
+        // 执行已结束且未提交时保留原 HTTP 错误，不能因交付延迟再改成 200
         let _ = self.first.set(TransportState::Finished);
     }
 

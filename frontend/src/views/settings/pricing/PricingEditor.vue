@@ -45,13 +45,7 @@ const priceMode = computed({
 const bandOptions = computed(() => bands.value
   .filter(band => props.row?.base.bands.image
     ? ['standard', 'image'].includes(band.value)
-    : props.provider !== 'xai' || ![
-      'flex',
-      'long_flex',
-      'ultrafast',
-      'long_ultrafast',
-      'image',
-    ].includes(band.value))
+    : props.provider === 'openai' || ['standard', 'long_standard'].includes(band.value))
   .map(band => ({
     ...band,
     label: band.value === 'standard' && props.row?.base.bands.image

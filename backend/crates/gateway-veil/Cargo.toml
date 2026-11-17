@@ -1,0 +1,31 @@
+[package]
+name = "gateway-veil"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+veil = { path = "../../../.deps/veil/crates/veil" }
+veil-engine = { path = "../../../.deps/veil/crates/veil-engine" }
+veil-store = { path = "../../../.deps/veil/crates/veil-store" }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1.52.3", features = ["rt", "sync"] }
+toml = "0.8"
+hex = "0.4"
+thiserror = "2.0.18"
+sha2 = "0.10"
+zeroize = "1.8"
+fancy-regex = "0.19"
+getrandom = "0.4.3"
+# 与 veil-store 共用同一 rusqlite／libsqlite3-sys，仅用于独立只读快照连接
+rusqlite = { version = "0.41.1", features = ["bundled"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+tokio = { version = "1.52.3", features = ["macros", "rt"] }

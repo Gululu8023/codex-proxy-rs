@@ -4,6 +4,7 @@ use gateway_core::metering::{CalculatedCost, Usage};
 
 use super::*;
 use crate::credential::CodexSelectionModel;
+use crate::transport::CodexTransportDecision;
 use gateway_core::operation::RawJsonPayload;
 
 impl CodexProvider {
@@ -52,7 +53,7 @@ impl CodexProvider {
     async fn image_session_affinity(
         &self,
         payload: &RawJsonPayload,
-        headers: &[MiddlewareHeader],
+        headers: &[RequestHeader],
         context: &AttemptContext,
     ) -> Result<Option<CodexSessionAffinity>, ProviderError> {
         if context.is_diagnostic_required_account() {
@@ -167,40 +168,20 @@ impl CodexProvider {
         let account_selection_wait_ms =
             u64::try_from(selection_started_at.elapsed().as_millis()).unwrap_or(u64::MAX);
         let operation = request.operation.clone();
-        let provider_kind = ProviderKind::new(PROVIDER_NAME)
-            .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
-        let account_id = lease.account_id().clone();
-        let provider = Arc::clone(&self);
-        let terminal_context = context.clone();
-        context
-            .execute_middleware(
-                operation,
-                provider_kind,
-                requested_model.map(|model| model.as_str().to_owned()),
-                account_id,
-                Box::new(move |operation, middleware_headers| {
-                    Box::pin(async move {
-                        provider
-                            .execute_selected_raw_json_endpoint(
-                                terminal_context,
-                                operation,
-                                middleware_headers,
-                                request,
-                                lease,
-                                account_selection_wait_ms,
-                            )
-                            .await
-                    })
-                }),
-            )
-            .await
+        self.execute_selected_raw_json_endpoint(
+            context,
+            operation,
+            request,
+            lease,
+            account_selection_wait_ms,
+        )
+        .await
     }
 
     async fn execute_selected_raw_json_endpoint(
         self: Arc<Self>,
         context: AttemptContext,
         operation: Operation,
-        middleware_headers: Vec<MiddlewareHeader>,
         mut request: RawJsonEndpointRequest,
         mut lease: CodexCredentialLease,
         account_selection_wait_ms: u64,
@@ -224,14 +205,14 @@ impl CodexProvider {
                     )
                     .with_retry_prohibited());
                 }
-                self.image_session_affinity(image.payload(), &middleware_headers, &context)
+                self.image_session_affinity(image.payload(), &[], &context)
                     .await?
             }
             Operation::Search(search) => derive_endpoint_affinity_with_headers(
                 search.payload(),
                 context.client_api_key_ref(),
                 "id",
-                &middleware_headers,
+                &[],
             ),
             _ => None,
         };
@@ -308,11 +289,6 @@ impl CodexProvider {
         let allows_account_state_mutation = lease.allows_account_state_mutation();
         let provider_kind = ProviderKind::new(PROVIDER_NAME)
             .map_err(|_| provider_error(ProviderErrorKind::Protocol, UpstreamSendState::NotSent))?;
-        let outbound_middleware = context.outbound_middleware(
-            provider_kind.clone(),
-            endpoint_requested_model(payload).map(|model| model.as_str().to_owned()),
-            lease.account_id().clone(),
-        );
         let metadata = ProviderCallMetadata::for_provider_endpoint(
             provider_kind,
             lease.account_id().clone(),
@@ -330,7 +306,7 @@ impl CodexProvider {
         ));
         // Standalone Provider 端点没有可证明的账号 owner；Images/Search metadata 必须按
         // 跨账号输入收敛到当前 lease，不能沿用下游声明的账号或 installation identity
-        let client = self.client_for_request(&context)?;
+        let client = self.client_for_request(&context, lease.account())?;
         let installation_id = client.profile_state().effective_installation_id(
             context.client_api_key_ref(),
             lease.account_id(),
@@ -353,8 +329,6 @@ impl CodexProvider {
                 .for_account(lease.account())
                 .map_err(|error| map_client_error(error, UpstreamSendState::NotSent, None).error)?
                 .with_responses_api_base_url(lease.authentication().responses_api_base_url())
-                .with_middleware_headers(middleware_headers)
-                .with_outbound_middleware(outbound_middleware)
                 .with_privacy(context.privacy(), context.cancellation().clone()),
             response_origin: request.response_origin,
             endpoint_path: request.endpoint_path,
@@ -558,7 +532,7 @@ pub(super) fn terminal_response_output(event: &ProviderEvent) -> Option<&[Value]
 }
 
 pub(super) enum CodexHandshakeAttemptError {
-    Client(CodexClientError),
+    Client(Box<CodexClientError>),
     Cancelled,
     Timeout,
 }
@@ -582,7 +556,7 @@ pub(super) async fn create_response_attempt(
             request,
             request_context,
             Some(account_id),
-        ) => response.map_err(CodexHandshakeAttemptError::Client),
+        ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
     }
 }
 
@@ -592,7 +566,7 @@ pub(super) fn map_handshake_attempt_error(
 ) -> MappedProviderFailure {
     match error {
         CodexHandshakeAttemptError::Client(error) => {
-            map_client_error(error, UpstreamSendState::Ambiguous, Some(account))
+            map_client_error(*error, UpstreamSendState::Ambiguous, Some(account))
         }
         CodexHandshakeAttemptError::Cancelled => MappedProviderFailure::plain(provider_error(
             ProviderErrorKind::Cancelled,
@@ -637,7 +611,7 @@ pub(super) async fn create_json_attempt(
             &request.passthrough_headers,
             request.image_turn_id.as_deref(),
             request_context,
-        ) => response.map_err(CodexHandshakeAttemptError::Client),
+        ) => response.map_err(|error| CodexHandshakeAttemptError::Client(Box::new(error))),
     }
 }
 
@@ -650,7 +624,6 @@ pub(super) fn cold_json_response_stream(request: ColdJsonResponse) -> EventStrea
             selector: &request.selector,
             quota: &request.quota,
             response_origin: &request.response_origin,
-            cyber_policy_scope: None,
             allows_account_state_mutation,
             image_endpoint,
             upstream_model: None,
@@ -822,7 +795,6 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             selector: &selector,
             quota: &quota,
             response_origin: &response_origin,
-            cyber_policy_scope: cyber_policy_scope.as_ref(),
             allows_account_state_mutation,
             upstream_model: Some(&upstream_model),
         };
@@ -904,7 +876,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                 }
                 apply_failure(&failure_context, &active_account, &failure)
                 .await;
-                Err(quota_continuation_replay_error(
+                Err(continuation_recovery_error(
                     failure.error,
                     &request,
                     ReplayBoundary::BeforeSemanticOutput,
@@ -924,6 +896,8 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             return;
         }
         if let Some(capture) = session_capture.as_mut() {
+            capture.oversized_http = response.transport_metrics.decision
+                == Some(CodexTransportDecision::Http2WebSocketMessageTooLarge);
             capture.continuation_scope = Some(if capture.response_store {
                 OpenAiContinuationScope::Persisted
             } else if response.transport == CodexBackendTransport::WebSocket
@@ -943,7 +917,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             yield ProviderEvent::observation(observation);
         }
         if let Some(etag) = response.response_metadata.models_etag.as_deref()
-            && let Err(error) = catalog.observe_response_etag(etag)
+            && let Err(error) = catalog.observe_response_etag(&active_account,etag)
         {
             tracing::warn!(
                 error = %error,
@@ -1011,7 +985,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
             .with_requested_service_tier(request.service_tier())
             .with_request_tool_pricing(upstream_model.as_str(), request.tools())
             .with_raw_sse_passthrough();
-        let mut client_events = ClientEventDelivery::new(context.allows_replayable_prelude());
+        let mut client_events = ClientEventDelivery::new();
         loop {
             if context.deadline().is_elapsed() {
                 if allows_account_state_mutation {
@@ -1108,7 +1082,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     }
                     apply_failure(&failure_context, &active_account, &failure)
                     .await;
-                    Err(quota_continuation_replay_error(
+                    Err(continuation_recovery_error(
                         failure.error,
                         &request,
                         ReplayBoundary::from_semantic_output(client_events.replay_closed()),
@@ -1263,7 +1237,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                         .error
                         .with_atomic_client_events(events);
                 }
-                Err(quota_continuation_replay_error(
+                Err(continuation_recovery_error(
                     failure.error,
                     &request,
                     ReplayBoundary::from_semantic_output(failure_after_commit),
@@ -1392,7 +1366,7 @@ pub(super) fn cold_response_stream(response: ColdResponse) -> EventStream {
                     .error
                     .with_atomic_client_events(events);
             }
-            Err(quota_continuation_replay_error(
+            Err(continuation_recovery_error(
                 failure.error,
                 &request,
                 ReplayBoundary::from_semantic_output(failure_after_commit),

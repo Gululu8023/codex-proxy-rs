@@ -20,6 +20,7 @@ pub(crate) fn account_status_projection(
 ) -> AccountStatusProjection {
     resolve_account_status(
         &AccountStatusFacts {
+            quota_paused: account.quota_paused,
             enabled: account.enabled,
             credential_state: account.credential_state,
             access_token_expires_at: account.access_token_expires_at.map(Into::into),
@@ -62,6 +63,7 @@ pub(crate) async fn load_cooldown(
 
 /// Dashboard 仅需状态事实、账号标识和并发覆盖，不读取身份资料与代理位置
 pub(crate) struct ProviderAccountStatus {
+    pub provider_kind: String,
     pub id: String,
     pub concurrency_limit: Option<gateway_core::account::AccountConcurrencyLimit>,
     pub quota_version: Option<gateway_core::account::QuotaObservationVersion>,
@@ -73,7 +75,7 @@ pub(crate) async fn load_account_statuses<'e, E: sqlx::Executor<'e, Database = s
 ) -> crate::StoreResult<Vec<ProviderAccountStatus>> {
     use super::rows::{account_status_facts_from_row, get};
     let rows = sqlx::query(
-        "select id, enabled, concurrency_limit, credential_revision, quota_observed_at, credential_state, access_token_expires_at,
+        "select id, provider_kind, enabled, quota_paused, concurrency_limit, credential_revision, quota_observed_at, credential_state, access_token_expires_at,
                 quota_access_state, quota_evidence, quota_access_observed_at, quota_reset_at,
                 last_error_reason, last_error_message
          from provider_accounts",
@@ -92,6 +94,7 @@ pub(crate) async fn load_account_statuses<'e, E: sqlx::Executor<'e, Database = s
                 })
                 .transpose()?;
             Ok(ProviderAccountStatus {
+                provider_kind: get(row, "provider_kind")?,
                 quota_version: if concurrency_limit.is_none() {
                     super::quota_version_from_row(row)?
                 } else {

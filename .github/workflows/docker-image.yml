@@ -1,0 +1,96 @@
+# main 的 CI 通过后构建 linux/amd64 镜像并发布到 GHCR。
+# 服务器上执行 docker compose pull && docker compose up -d 即可更新到最新提交。
+name: Docker image
+
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+  packages: write
+
+jobs:
+  image:
+    # workflow_run 有写权限，只接受本仓库 main 的 push 检查结果，不能消费 PR 源码。
+    if: >-
+      ${{ (github.event_name == 'workflow_run' &&
+           github.event.workflow_run.conclusion == 'success' &&
+           github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_repository.full_name == github.repository) ||
+          (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
+    # 只排队通过条件的任务；CI 完成事件可能乱序，旧事件不能取消较新提交的发布。
+    concurrency:
+      group: docker-image-main
+      cancel-in-progress: false
+      queue: max
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+
+      - name: Require current main and successful CI
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # 旧 CI 重跑不能覆盖新 main；手动重建也必须有同一提交的 CI 成功记录。
+          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
+          test "$SOURCE_SHA" = "$main_sha"
+          conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=${SOURCE_SHA}&per_page=1" --jq '.workflow_runs[0].conclusion')"
+          test "$conclusion" = success
+
+      - name: Build metadata
+        id: meta
+        run: |
+          # GHCR 镜像名必须小写
+          version="$(ruby -r './.github/scripts/release-metadata' -e 'puts ReleaseMetadata.version(YAML.load_file("release/version.yaml").fetch("version"))')"
+          {
+            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
+            echo "version=$version"
+            echo "short_sha=${SOURCE_SHA::12}"
+            echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            if [[ "$version" == *-exp.* ]]; then
+              echo 'build_type=experimental'
+            else
+              echo 'build_type=release'
+            fi
+          } >> "$GITHUB_OUTPUT"
+
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: deploy/Dockerfile
+          target: runtime
+          platforms: linux/amd64
+          push: true
+          tags: |
+            ${{ steps.meta.outputs.image }}:latest
+            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
+            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
+          build-args: |
+            CPR_VERSION=${{ steps.meta.outputs.version }}
+            CPR_GIT_SHA=${{ env.SOURCE_SHA }}
+            CPR_BUILD_TIME=${{ steps.meta.outputs.build_time }}
+            CPR_BUILD_TYPE=${{ steps.meta.outputs.build_type }}
+          no-cache-filters: runtime-base
+          cache-from: type=gha,scope=docker-main
+          cache-to: type=gha,mode=max,scope=docker-main

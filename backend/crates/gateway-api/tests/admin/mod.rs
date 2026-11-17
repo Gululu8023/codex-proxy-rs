@@ -1,6 +1,5 @@
 //! 管理控制面 HTTP 接口的测试入口
 
-mod plugins;
 mod upstream_info;
 use std::{
     collections::BTreeMap,
@@ -72,6 +71,7 @@ use gateway_admin::{
         },
     },
 };
+use gateway_admin::{model::usage_data::*, ports::usage_data::*};
 use gateway_api::auth::SessionState;
 use gateway_core::{
     account::FastMode,
@@ -105,8 +105,6 @@ pub(super) struct ProviderQuotaGate {
 
 pub(super) struct AdminTestFixture {
     pub services: AdminServices,
-    plugin_ports: Arc<plugins::TestPluginPorts>,
-    published_snapshot: gateway_core::runtime::RuntimeSnapshotHandle,
     pub client_key: Arc<Mutex<Option<ClientKeyRecord>>>,
     pub observations: Arc<Mutex<MemoryObservations>>,
     pub auth: Arc<MemoryAuthStore>,
@@ -177,8 +175,6 @@ impl AdminTestFixture {
             account: Arc::clone(&account),
             account_usage: Arc::clone(&account_usage),
         });
-        let plugin_ports = Arc::new(plugins::TestPluginPorts::default());
-        let published_snapshot = gateway_core::runtime::RuntimeSnapshotHandle::default();
         let stores = AdminStorePorts::new(
             AdminAccountStorePorts::new(
                 unused.clone(),
@@ -188,13 +184,10 @@ impl AdminTestFixture {
             ),
             auth.clone(),
             client_keys.clone(),
-            unused,
+            unused.clone(),
             settings.clone(),
             gateway_admin::ports::backup::BackupStorePorts::disabled(),
-            plugin_ports.clone(),
-            plugin_ports.clone(),
-            plugin_ports.clone(),
-            plugin_ports.clone(),
+            unused,
         );
         let provider_quota = Arc::new(Mutex::new(None));
         let provider_quota_gate = Arc::new(Mutex::new(None));
@@ -229,12 +222,6 @@ impl AdminTestFixture {
                     &provider_quota,
                 )))),
                 timezone,
-                service_middleware: std::sync::Arc::new(|| None),
-                plugin_preparation: plugin_ports.clone(),
-                plugin_management: plugin_ports.clone(),
-                published_snapshot: published_snapshot.clone(),
-                plugin_inspector: plugin_ports.clone(),
-                plugin_distribution: plugin_ports.clone(),
                 pricing_source: Arc::new(StaticPricingSource),
                 providers: gateway_admin::ports::provider::ProviderAdminRegistry::new(providers)
                     .unwrap(),
@@ -250,8 +237,6 @@ impl AdminTestFixture {
         .expect("initialize test admin services");
         Self {
             services: bundle.services(),
-            plugin_ports,
-            published_snapshot,
             client_key,
             observations,
             auth,
@@ -642,6 +627,14 @@ impl SettingsStore for MemorySettingsStore {
             rotation_strategy: command.rotation_strategy,
             updated_at: Utc::now(),
             values: gateway_admin::model::settings::RuntimeSettingsValues {
+                anthropic_model_mappings: Default::default(),
+                anthropic_account_affinity: Default::default(),
+                anthropic_session_affinity_ttl_hours: 24,
+                quota_reset_window_weights: Default::default(),
+                min_claude_code_version: None,
+                reset_credit_on_low_weekly_quota: false,
+                claude_public_url: String::new(),
+                prompt_guard: Default::default(),
                 codex_privacy_policy: command.values.codex_privacy_policy,
                 request_location_enabled: command.values.request_location_enabled,
                 request_location: command.values.request_location,
@@ -669,7 +662,6 @@ impl SettingsStore for MemorySettingsStore {
                 usage_retention_days: command.values.usage_retention_days,
                 ops_event_retention_days: command.values.ops_event_retention_days,
                 audit_retention_days: command.values.audit_retention_days,
-                account_error_protection: command.values.account_error_protection,
                 account_warmup_enabled: false,
                 account_warmup_cron: "0 8 * * *".to_owned(),
                 account_warmup_model: None,
@@ -890,6 +882,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
                 group_id: group_id(PRIMARY_GROUP_ID),
                 account_id: "acct_group_ready".to_owned(),
                 status: AccountStatusFacts {
+                    quota_paused: false,
                     enabled: true,
                     credential_state: CredentialState::Ready,
                     access_token_expires_at: None,
@@ -905,6 +898,7 @@ impl AccountGroupStore for MemoryAccountGroupStore {
                 group_id: group_id(PRIMARY_GROUP_ID),
                 account_id: "acct_group_disabled".to_owned(),
                 status: AccountStatusFacts {
+                    quota_paused: false,
                     enabled: false,
                     credential_state: CredentialState::Ready,
                     access_token_expires_at: None,
@@ -1032,7 +1026,6 @@ impl ClientKeyStore for MemoryClientKeyStore {
     async fn set_client_key_budget_window(
         &self,
         _: gateway_admin::model::client_keys::SetClientKeyBudgetWindow,
-        _: gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin,
         _: &MutationContext,
     ) -> gateway_admin::ports::store::AdminStoreResult<u64> {
         Err(gateway_admin::ports::store::AdminStoreError::new(
@@ -1045,7 +1038,6 @@ impl ClientKeyStore for MemoryClientKeyStore {
     async fn update_client_key_budget_limits(
         &self,
         _: gateway_admin::model::client_keys::UpdateClientKeyBudgetLimits,
-        _: gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin,
         _: &MutationContext,
     ) -> AdminStoreResult<Option<Revision>> {
         Err(AdminStoreError::new(
@@ -1058,7 +1050,6 @@ impl ClientKeyStore for MemoryClientKeyStore {
     async fn reset_client_key_budget(
         &self,
         command: gateway_admin::model::client_keys::ResetClientKeyBudget,
-        _: gateway_admin::model::client_keys::ClientKeyBudgetMutationOrigin,
         _: &MutationContext,
     ) -> AdminStoreResult<()> {
         use gateway_admin::model::client_keys::ClientKeyBudgetPeriod;
@@ -1206,13 +1197,6 @@ impl AccountStore for UnusedStore {
             .is_some_and(|account| account.account.id == id))
     }
 
-    async fn list_plugin_accounts(
-        &self,
-        _: gateway_admin::model::provider_credentials::PluginAccountListQuery,
-    ) -> AdminStoreResult<gateway_admin::model::provider_credentials::PluginAccountPage> {
-        Err(unavailable("plugin account list"))
-    }
-
     async fn list_accounts(
         &self,
         _: AccountListQuery,
@@ -1225,6 +1209,7 @@ impl AccountStore for UnusedStore {
                 items: vec![account.clone()],
                 total: 1,
                 summary: gateway_admin::model::accounts::AccountSummary {
+                    quota_paused: 0,
                     total: 1,
                     normal: u64::from(status == gateway_core::account::AccountStatus::Normal),
                     quota_exhausted: u64::from(
@@ -1323,13 +1308,6 @@ impl AccountStore for UnusedStore {
         Err(unavailable("credential export"))
     }
 
-    async fn load_credential_for_plugin(
-        &self,
-        _: &ProviderAccountId,
-    ) -> AdminStoreResult<Option<ProviderExportCredentialInput>> {
-        Err(unavailable("plugin credential export"))
-    }
-
     async fn commit_credential_import(
         &self,
         _: CredentialImportCommit,
@@ -1391,6 +1369,7 @@ impl AccountStore for UnusedStore {
     async fn batch_update_accounts(
         &self,
         _: BatchUpdateAccounts,
+        _pauses: gateway_admin::model::accounts::PreparedQuotaPauses,
         _: &MutationContext,
     ) -> AdminStoreResult<AccountsUpdateResult> {
         Err(unavailable("account batch update"))
@@ -1444,7 +1423,6 @@ impl AccountRuntimeStore for UnusedStore {
     async fn active_rate_limits(&self) -> AdminStoreResult<AccountRuntimeSnapshot> {
         Ok(AccountRuntimeSnapshot {
             cooldown: BTreeMap::new(),
-            protection_rules: BTreeMap::new(),
             in_flight: Some(BTreeMap::new()),
         })
     }
@@ -1452,24 +1430,8 @@ impl AccountRuntimeStore for UnusedStore {
     async fn account_runtime(&self, _: &[String]) -> AdminStoreResult<AccountRuntimeSnapshot> {
         Ok(AccountRuntimeSnapshot {
             cooldown: BTreeMap::new(),
-            protection_rules: BTreeMap::new(),
             in_flight: Some(BTreeMap::new()),
         })
-    }
-
-    async fn active_freezes(
-        &self,
-    ) -> AdminStoreResult<BTreeMap<String, gateway_admin::model::accounts::AccountFreeze>> {
-        Ok(BTreeMap::new())
-    }
-
-    async fn finish_freeze(
-        &self,
-        _account_id: &str,
-        _expected: &gateway_admin::model::accounts::AccountFreeze,
-        _postpone_until: Option<DateTime<Utc>>,
-    ) -> AdminStoreResult<bool> {
-        Ok(false)
     }
 }
 
@@ -1873,7 +1835,6 @@ impl SystemOperations for UnusedSystem {
         &self,
         _: Option<String>,
         _: Option<gateway_admin::model::system::SystemUpdateChannel>,
-        _: Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
     ) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
@@ -1882,17 +1843,11 @@ impl SystemOperations for UnusedSystem {
         Err(unavailable_system())
     }
 
-    async fn rollback(
-        &self,
-        _: Arc<dyn gateway_admin::ports::system::SystemUpdatePreflight>,
-    ) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn rollback(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
 
-    async fn restart(
-        &self,
-        _preflight: Arc<dyn gateway_admin::ports::system::SystemRestartPreflight>,
-    ) -> Result<SystemOperationAccepted, SystemOperationError> {
+    async fn restart(&self) -> Result<SystemOperationAccepted, SystemOperationError> {
         Err(unavailable_system())
     }
 }
@@ -1915,6 +1870,14 @@ fn test_runtime_settings() -> RuntimeSettings {
         rotation_strategy: RotationStrategy::Smart,
         updated_at: Utc::now(),
         values: gateway_admin::model::settings::RuntimeSettingsValues {
+            anthropic_model_mappings: Default::default(),
+            anthropic_account_affinity: Default::default(),
+            anthropic_session_affinity_ttl_hours: 24,
+            quota_reset_window_weights: Default::default(),
+            min_claude_code_version: None,
+            reset_credit_on_low_weekly_quota: false,
+            claude_public_url: String::new(),
+            prompt_guard: Default::default(),
             codex_privacy_policy: Default::default(),
             request_location_enabled: false,
             request_location: Default::default(),
@@ -1938,7 +1901,6 @@ fn test_runtime_settings() -> RuntimeSettings {
             usage_retention_days: 31,
             ops_event_retention_days: 30,
             audit_retention_days: 90,
-            account_error_protection: Default::default(),
             account_warmup_enabled: false,
             account_warmup_cron: "0 8 * * *".to_owned(),
             account_warmup_model: None,
@@ -2024,5 +1986,36 @@ impl gateway_admin::ports::reset_credit_automation::ResetCreditAutomationStore f
         _: Option<&gateway_admin::model::MutationContext>,
     ) -> AdminStoreResult<u64> {
         Err(unavailable("reset-credit automation"))
+    }
+}
+
+// 这些管理用例不访问通用用量端口，意外调用应直接失败。
+#[async_trait::async_trait]
+impl UsageDataStore for UnusedStore {
+    async fn open_read(
+        &self,
+        _: UsageReadQuery,
+        _: gateway_core::lifecycle::CancellationToken,
+    ) -> UsageDataResult<Box<dyn UsageReadSession>> {
+        Err(UsageDataError::unavailable("test usage reader unavailable"))
+    }
+
+    async fn get_record(&self, _: GetUsageRecord) -> UsageDataResult<UsageRecord> {
+        unreachable!("unexpected usage call")
+    }
+    async fn list_records(&self, _: ListUsageRecords) -> UsageDataResult<UsageRecordPage> {
+        unreachable!("unexpected usage call")
+    }
+    async fn write_records(&self, _: StoredUsageWrite) -> UsageDataResult<UsageWriteResult> {
+        unreachable!("unexpected usage call")
+    }
+    async fn list_aggregates(&self, _: ListUsageAggregates) -> UsageDataResult<UsageAggregatePage> {
+        unreachable!("unexpected usage call")
+    }
+    async fn write_aggregates(
+        &self,
+        _: StoredAggregateWrite,
+    ) -> UsageDataResult<UsageAggregateWriteResult> {
+        unreachable!("unexpected usage call")
     }
 }

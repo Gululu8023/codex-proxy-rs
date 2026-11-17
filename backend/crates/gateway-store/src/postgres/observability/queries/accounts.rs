@@ -24,7 +24,15 @@ pub(crate) async fn provider_account_usage(
         statement.push(" join lateral (select mr.started_at from model_requests mr where mr.provider_account_ref=pa.id and mr.started_at >= ").push_bind(query.range.start)
             .push(" and mr.started_at < ").push_bind(query.range.end);
         push_completed_usage_fact_filter(&mut statement, "mr");
-        statement.push(" order by mr.started_at desc,mr.id desc limit 1) latest on true order by latest.started_at desc,pa.name,pa.id limit ").push_bind(i64::from(query.limit));
+        statement.push(" order by mr.started_at desc,mr.id desc limit 1) latest on true");
+        if let Some(provider) = &query.provider_kind {
+            statement
+                .push(" where pa.provider_kind=")
+                .push_bind(provider);
+        }
+        statement
+            .push(" order by latest.started_at desc,pa.name,pa.id limit ")
+            .push_bind(i64::from(query.limit));
     }
     let rows = statement
         .build()

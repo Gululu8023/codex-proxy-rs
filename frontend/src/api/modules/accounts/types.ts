@@ -2,7 +2,7 @@ import type { RelativeTimeView } from '../../types/time'
 import type { AccountGroupRef } from '../groups'
 
 export type AccountStatus
-  = 'normal' | 'quota_exhausted' | 'rate_limited' | 'disabled' | 'error'
+  = 'normal' | 'quota_paused' | 'quota_exhausted' | 'rate_limited' | 'disabled' | 'error'
 
 export type AccountErrorReason
   = 'account_unverified'
@@ -12,6 +12,8 @@ export type AccountErrorReason
     | 'account_banned'
 
 export interface AccountQuotaWindow {
+  providerData?: { source?: string, observedAt?: string, scope?: string }
+  accountWide: boolean
   sourceAccountId?: string | null
   amount?: { usedDisplay: string, remainingDisplay: string, totalDisplay: string } | null
   observedAtDisplay?: string | null
@@ -37,12 +39,8 @@ export interface AccountQuotaCredits {
   balance: string | null
 }
 
-export interface AccountProtectionRule {
-  id: string
-  name: string
-}
-
 export interface AccountQuota {
+  providerData?: { schemaVersion?: number, state?: string, source?: string, scope?: string, responseHeaders?: { observedAt?: string } }
   refreshedAt: string | null
   refreshedAtRelative: RelativeTimeView | null
   refreshedAtDisplay: string
@@ -50,9 +48,8 @@ export interface AccountQuota {
   // 429 临时限流（Redis 冷却）到期时间；非限流中为 null。
   rateLimitedUntil: string | null
   rateLimitRecoveryDisplay: string | null
-  rateLimitReason: 'upstream_rate_limit' | 'error_protection' | null
-  protectionRules: AccountProtectionRule[]
-  recoveryProbeRequired: boolean
+  rateLimitReason: 'upstream_rate_limit' | null
+  pausedWindows: string[]
   windows: AccountQuotaWindow[]
   credits: AccountQuotaCredits | null
 }
@@ -138,6 +135,7 @@ export interface AccountModelAccess {
 }
 
 export interface Account {
+  quotaLimits: Record<string, number>
   autoUseQuotaCredits: boolean
   upstream: AccountUpstream | null
   capabilities: AccountCapabilities
@@ -200,6 +198,7 @@ export interface AccountUpstream {
 }
 
 export interface AccountCapabilities {
+  quotaLimitsSupported: boolean
   quotaCredits: boolean
   quota: boolean
   quotaRefresh: boolean

@@ -51,15 +51,15 @@ const emptyCards: DashboardSummaryResponse['cards'] = {
     todayTokensValue: 0,
     yesterdayTokensValue: 0,
     totalTokens: '0',
-    totalBillingAmountUsd: '$0.00',
+    totalBillingAmountUsd: '—',
   },
   cache: {
-    todayHitRate: '0%',
+    todayHitRate: '—',
     todayHitRateValue: null,
     yesterdayHitRateValue: null,
-    totalHitRate: '0%',
+    totalHitRate: '—',
     totalCachedInputTokens: '0',
-    averageFirstTokenLatencyMs: '0 ms',
+    averageFirstTokenLatencyMs: '—',
   },
 }
 
@@ -178,7 +178,7 @@ function metricCards(
         },
         {
           label: t('usage.averageTtft'),
-          value: numericMetricDisplay(cache.averageFirstTokenLatencyMs, '0 ms'),
+          value: numericMetricDisplay(cache.averageFirstTokenLatencyMs),
           tone: 'info',
         },
       ],
@@ -205,14 +205,14 @@ function metricCards(
         },
         {
           label: t('dashboard.metrics.totalCharges'),
-          value: formatDashboardUsd(numericMetricDisplay(tokens.totalBillingAmountUsd, '$0.00')),
+          value: formatDashboardUsd(numericMetricDisplay(tokens.totalBillingAmountUsd)),
           tone: 'success',
         },
       ],
     },
     {
       title: t('dashboard.metrics.cacheHits'),
-      value: numericMetricDisplay(cache.todayHitRate, '0%'),
+      value: numericMetricDisplay(cache.todayHitRate),
       valueRaw: cache.todayHitRateValue,
       valueFormatter: formatDashboardRate,
       icon: Timer,
@@ -229,7 +229,7 @@ function metricCards(
       details: [
         {
           label: t('dashboard.metrics.totalCacheHits'),
-          value: numericMetricDisplay(cache.totalHitRate, '0%'),
+          value: numericMetricDisplay(cache.totalHitRate),
           tone: 'warning',
         },
         {
@@ -242,9 +242,9 @@ function metricCards(
   ]
 }
 
-function numericMetricDisplay(value: string, zero: string) {
+function numericMetricDisplay(value: string) {
   return !value || value === '—' || value === '-'
-    ? zero
+    ? '—'
     : value
 }
 

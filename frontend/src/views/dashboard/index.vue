@@ -3,6 +3,7 @@ import DashboardContent from './components/DashboardContent.vue'
 import { useDashboard } from './composables/useDashboard'
 
 const {
+  provider,
   loading,
   refreshing,
   activeTrendKind,
@@ -28,6 +29,7 @@ const {
 
 <template>
   <DashboardContent
+    v-model:provider="provider"
     v-model:trend-kind="activeTrendKind"
     :loading="loading"
     :refreshing="refreshing"

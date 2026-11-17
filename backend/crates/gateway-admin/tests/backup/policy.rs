@@ -26,6 +26,7 @@ fn record(
         object_key: format!("k/{id}"),
         size_bytes: Some(1),
         sha256: Some("a".repeat(64)),
+        privacy_store: None,
         attempt_count: 0,
         error_code: None,
         error_message: None,

@@ -2,14 +2,8 @@
 
 use crate::{
     engine::{
-        CoordinatedEvent, EngineError, ModelRequestId,
-        authentication::ClientAuthenticationRequest,
-        continuation::PreviousResponseId,
-        extensions::ExtensionCallScope,
-        middleware::{
-            FrozenMiddlewarePlan, MiddlewareAuthority, MiddlewareContext, MiddlewareTarget,
-        },
-        nested::ExecutionEffects,
+        CoordinatedEvent, EngineError, ModelRequestId, authentication::ClientAuthenticationRequest,
+        continuation::PreviousResponseId, request_context::RequestScope,
     },
     error::{GatewayError, GatewayErrorKind},
     event::{ProviderEvent, ProviderResponseHeader},
@@ -37,7 +31,6 @@ pub enum ClientTransport {
     HttpSse,
     WebSocket,
     InternalProbe,
-    InternalPlugin,
 }
 
 impl ClientTransport {
@@ -48,7 +41,6 @@ impl ClientTransport {
             Self::HttpSse => "http_sse",
             Self::WebSocket => "websocket",
             Self::InternalProbe => "internal",
-            Self::InternalPlugin => "internal_plugin",
         }
     }
 }
@@ -66,7 +58,7 @@ pub struct ExecutionRequestMetadata {
 }
 
 impl ExecutionRequestMetadata {
-    pub(super) fn inherit_request_origin(&mut self, scope: &ExtensionCallScope) {
+    pub(super) fn inherit_request_origin(&mut self, scope: &RequestScope) {
         let Some(request) = scope.request() else {
             return;
         };
@@ -90,12 +82,6 @@ pub struct AuthenticatedClient {
 }
 
 impl AuthenticatedClient {
-    pub(super) fn execution_timeout(&self) -> Option<Duration> {
-        self.settings
-            .as_ref()
-            .and_then(|settings| settings.execution_timeout(self.policy.key_id()))
-    }
-
     #[must_use]
     pub fn request_settings(&self) -> Option<&RequestSettings> {
         self.settings.as_ref()
@@ -135,8 +121,6 @@ pub enum ClientAuthenticationError {
     InvalidKey,
     #[error("runtime snapshot is unavailable")]
     SnapshotUnavailable,
-    #[error("frontend authentication provider is unavailable")]
-    ProviderUnavailable,
 }
 
 pub struct StartExecution {
@@ -146,64 +130,31 @@ pub struct StartExecution {
     pub metadata: ExecutionRequestMetadata,
 }
 
-/// 入口中间件开始前冻结的根请求身份与生命周期
+/// 解码前冻结的根请求身份与生命周期
 ///
-/// 中间件短路时本值直接释放；调用 `next` 后必须原样交回
+/// 入口拒绝时本值直接释放；解码成功后必须原样交回
 /// [`ExecutionService::start_prepared`]，不能重新认证为另一个 Key
 pub struct PreparedRootExecution {
-    pub(super) extension_scope: ExtensionCallScope,
+    pub(super) request_scope: RequestScope,
     pub(super) response_control: crate::engine::response_control::ResponseControl,
     pub(super) client: AuthenticatedClient,
     pub(super) request_id: ModelRequestId,
     pub(super) started_at: SystemTime,
     pub(super) deadline_at: Deadline,
     pub(super) cancellation: CancellationToken,
-    pub(super) execution_effects: Arc<ExecutionEffects>,
-    pub(super) execution_effects_baseline: usize,
 }
 
 impl PreparedRootExecution {
+    /// 保留入口请求事实及已校验的节点转发路径。
     #[must_use]
-    pub fn request_settings(&self) -> RequestSettings {
-        self.client
-            .settings
-            .clone()
-            .unwrap_or_else(|| RequestSettings::new(self.client.snapshot.clone()))
-            .with_execution(
-                &self.client.policy,
-                self.deadline_at
-                    .at()
-                    .map(|at| duration_ms(at.duration_since(self.started_at).unwrap_or_default())),
-            )
-    }
-
-    /// 入口延续发起实例集合；保留已经交给调用方的取消句柄
-    #[must_use]
-    pub fn with_extension_scope(mut self, scope: ExtensionCallScope) -> Self {
-        self.extension_scope = scope;
+    pub fn with_request_scope(mut self, scope: RequestScope) -> Self {
+        self.request_scope = scope;
         self
     }
 
     #[must_use]
-    pub fn extension_scope(&self) -> ExtensionCallScope {
-        self.extension_scope.clone()
-    }
-
-    /// 设置已经在改写时完成编译；此处只将同一份结果应用到冻结身份和生命周期
-    pub fn apply_settings(&mut self, settings: &RequestSettings) -> Result<(), GatewayError> {
-        let deadline = settings
-            .execution_deadline(self.client.policy.key_id(), self.started_at)
-            .map_err(|_| {
-                GatewayError::new(
-                    GatewayErrorKind::InvalidRequest,
-                    "Execution settings are invalid.",
-                )
-            })?;
-        self.client.policy = settings.apply_policy(self.client.policy.clone());
-        self.client.snapshot = settings.snapshot();
-        self.client.settings = Some(settings.clone());
-        self.deadline_at = deadline;
-        Ok(())
+    pub fn request_scope(&self) -> RequestScope {
+        self.request_scope.clone()
     }
 
     #[must_use]
@@ -222,22 +173,14 @@ impl PreparedRootExecution {
 
     pub(super) fn new(client: AuthenticatedClient) -> Result<Self, GatewayError> {
         let started_at = SystemTime::now();
-        let deadline_at = Deadline::from_timeout(started_at, client.execution_timeout())
-            .ok_or_else(|| {
-                GatewayError::new(GatewayErrorKind::Internal, "System clock is invalid.")
-            })?;
-        let execution_effects = Arc::new(ExecutionEffects::default());
-        let execution_effects_baseline = execution_effects.epoch();
         Ok(Self {
-            extension_scope: ExtensionCallScope::default(),
+            request_scope: RequestScope::default(),
             client,
             response_control: crate::engine::response_control::ResponseControl::default(),
             request_id: new_request_id()?,
             started_at,
-            deadline_at,
+            deadline_at: Deadline::default(),
             cancellation: CancellationToken::new(),
-            execution_effects,
-            execution_effects_baseline,
         })
     }
 
@@ -264,36 +207,6 @@ impl PreparedRootExecution {
     #[must_use]
     pub fn cancellation(&self) -> CancellationToken {
         self.cancellation.clone()
-    }
-
-    /// 以冻结的入口身份补齐 Runtime-only binding 事实；调用位置事实由 API/Core 提供
-    #[must_use]
-    pub fn middleware_context(
-        &self,
-        mut target: MiddlewareTarget,
-        extension_scope: ExtensionCallScope,
-    ) -> MiddlewareContext {
-        target.request_id = self.request_id.clone();
-        let account_group_ids = self
-            .client
-            .policy
-            .account_scope()
-            .routing_snapshot()
-            .groups_snapshot()
-            .iter()
-            .map(|group| group.id().clone())
-            .collect::<Vec<_>>();
-        MiddlewareContext::new(
-            target,
-            MiddlewareAuthority {
-                client_key_id: self.client.policy.key_id().clone(),
-                account_group_ids: Arc::from(account_group_ids),
-                cancellation: self.cancellation.clone(),
-                deadline: self.deadline_at,
-                extension_scope,
-                execution_effects: Some(Arc::clone(&self.execution_effects)),
-            },
-        )
     }
 }
 
@@ -384,11 +297,25 @@ pub trait ExecutionService: Send + Sync {
         Box::pin(async { Err(ClientAuthenticationError::InvalidKey) })
     }
     fn public_models(&self, client: &AuthenticatedClient) -> Vec<PublicModelId>;
+    /// 仅供已认证管理员检查指定 Key 的目录，不读取明文或写入 Key 使用事实。
+    fn inspect_client_model_catalog<'a>(
+        &'a self,
+        _key: &'a ClientApiKeyId,
+        _protocol: &'a str,
+    ) -> BoxFuture<'a, Result<Vec<PublicModelDescriptor>, GatewayError>> {
+        Box::pin(async {
+            Err(GatewayError::new(
+                GatewayErrorKind::Internal,
+                "catalog inspection unavailable",
+            ))
+        })
+    }
     fn client_model_catalog<'a>(
         &'a self,
         _client: &'a AuthenticatedClient,
         _protocol: &'a str,
         _client_version: &'a str,
+        _peer_route: Option<&'a http::HeaderValue>,
     ) -> BoxFuture<'a, Result<Vec<PublicModelDescriptor>, ProviderCatalogUnavailable>> {
         Box::pin(async { Err(ProviderCatalogUnavailable) })
     }
@@ -402,31 +329,12 @@ pub trait ExecutionService: Send + Sync {
         Box::pin(async move { PreparedRootExecution::new(client) })
     }
 
-    /// 由已经验证管理会话与插件 models 域的宿主入口选择 Key
-    /// 不向页面提供明文，也不跳过普通请求的扩展、准入和计量
-    fn prepare_plugin_execution(
-        &self,
-        _client_key_id: &ClientApiKeyId,
-    ) -> BoxFuture<'_, Result<PreparedRootExecution, GatewayError>> {
-        Box::pin(async {
-            Err(GatewayError::new(
-                GatewayErrorKind::Unauthorized,
-                "Plugin model entry is unavailable.",
-            ))
-        })
-    }
-
-    /// 为已经通过 `verify_request` 的只读入口建立中间件生命周期，不重复写 Key 使用事实
+    /// 为已经通过 `verify_request` 的只读入口冻结请求生命周期，不重复写 Key 使用事实
     fn prepare_verified_execution(
         &self,
         client: AuthenticatedClient,
     ) -> Result<PreparedRootExecution, GatewayError> {
         PreparedRootExecution::new(client)
-    }
-
-    /// 解析与准备阶段冻结的发布代次一致的中间件计划
-    fn middleware_plan(&self, _prepared: &PreparedRootExecution) -> Option<FrozenMiddlewarePlan> {
-        None
     }
 
     /// 消费一次已准备身份并进入原有 Core 路由、准入、attempt 与结算路径

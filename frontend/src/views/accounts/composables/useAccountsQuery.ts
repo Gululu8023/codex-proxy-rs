@@ -2,20 +2,25 @@ import type { TableSort } from '@codex-proxy/ui'
 import type { Account } from '@/api'
 
 import { computed, onMounted, shallowRef, watch } from 'vue'
+import { useRoute } from 'vue-router'
 import { getAccounts } from '@/api'
 import { usePagedQuery } from '@/composables/usePagedQuery'
 import { useTableSort } from '@/composables/useTableSort'
 import { accountColumns } from '../constants'
 
 export function useAccountsQuery() {
+  const route = useRoute()
   const searchQuery = shallowRef('')
-  const providerQuery = shallowRef('')
+  const providerQuery = shallowRef(typeof route.query.provider === 'string'
+    ? route.query.provider
+    : '')
   const statusQuery = shallowRef('')
   const groupQuery = shallowRef('')
   const sort = useTableSort(accountColumns, 'accounts')
   const accountSummary = shallowRef({
     total: 0,
     normal: 0,
+    quotaPaused: 0,
     quotaExhausted: 0,
     rateLimited: 0,
     disabled: 0,
@@ -81,6 +86,11 @@ export function useAccountsQuery() {
 
   watch([providerQuery, statusQuery, groupQuery], () => {
     void query.reloadFromStart()
+  })
+  watch(() => route.query.provider, (value) => {
+    providerQuery.value = typeof value === 'string'
+      ? value
+      : ''
   })
 
   onMounted(() => {

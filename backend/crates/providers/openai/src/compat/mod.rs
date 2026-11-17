@@ -6,7 +6,7 @@ mod request;
 mod search_history;
 mod search_tools;
 
-use gateway_core::engine::middleware::MiddlewareHeader;
+use gateway_core::engine::middleware::RequestHeader;
 use serde_json::{Map, Value};
 
 pub(crate) use headers::is_non_codex_request_header;
@@ -17,7 +17,7 @@ pub(crate) use search_tools::declares_hosted_search;
 pub(crate) fn normalize_selected_codex_downstream_body(
     body: &mut Map<String, Value>,
     responses_lite: bool,
-    middleware_headers: &[MiddlewareHeader],
+    middleware_headers: &[RequestHeader],
     request_id: &str,
 ) {
     request::normalize_non_codex_request_body(body);

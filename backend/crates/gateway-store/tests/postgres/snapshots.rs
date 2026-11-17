@@ -1473,7 +1473,7 @@ async fn queued_history_keeps_frozen_identity_after_configuration_deletion() {
                     started_at,
                     UsageRecordFilter {
                         client_api_key_name: key_name.map(str::to_owned),
-                        provider_account_name: account_name.map(str::to_owned),
+                        provider_account_search: account_name.map(str::to_owned),
                         ..Default::default()
                     },
                 );

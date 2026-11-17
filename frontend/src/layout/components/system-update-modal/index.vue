@@ -1,7 +1,7 @@
 <script setup lang="ts">
-import type { SystemRestartPlan, SystemUpdateChannel } from '@/api'
+import type { SystemUpdateChannel } from '@/api'
 
-import { ZButton, ZConfirmDialog, ZDialog, ZMarkdown, ZPopover, ZScrollbar, ZSegmented, ZSkeleton } from '@codex-proxy/ui'
+import { ZButton, ZDialog, ZMarkdown, ZPopover, ZScrollbar, ZSegmented, ZSkeleton } from '@codex-proxy/ui'
 import {
   ArrowUpCircle,
   Circle,
@@ -17,9 +17,8 @@ import {
 } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
 
-import { computed, nextTick, shallowRef, useTemplateRef, watch } from 'vue'
+import { computed, nextTick, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { checkSystemRestart } from '@/api'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
@@ -57,9 +56,6 @@ const {
 const { loadSystem, checkUpdates, changeChannel, updateNow, restartNow } = systemUpdateStore
 
 const updateLogScrollbar = useTemplateRef<InstanceType<typeof ZScrollbar>>('updateLogScrollbar')
-const checkingRestart = shallowRef(false)
-const restartConfirmOpen = shallowRef(false)
-const restartPlan = shallowRef<SystemRestartPlan | null>(null)
 
 const presentation = computed(() => resolveSystemUpdatePresentation({
   version: version.value,
@@ -173,36 +169,12 @@ async function handleUpdateRequest() {
 }
 
 async function handleRestart() {
-  if (checkingRestart.value || !canRestart.value)
-    return
-  checkingRestart.value = true
-  try {
-    restartPlan.value = await checkSystemRestart()
-    if (restartPlan.value.incompatiblePlugins.length) {
-      restartConfirmOpen.value = true
-      return
-    }
-    await restartNow(restartPlan.value)
-  }
-  catch (error: unknown) {
-    ZNotification.error({
-      message: errorMessage(error, t('systemUpdate.errors.preRestartCheck')),
-    })
-  }
-  finally {
-    checkingRestart.value = false
-  }
-}
-
-async function handleConfirmRestart() {
-  if (!restartPlan.value)
+  if (!canRestart.value)
     return
   try {
-    await restartNow(restartPlan.value)
-    restartConfirmOpen.value = false
+    await restartNow()
   }
   catch (error: unknown) {
-    restartConfirmOpen.value = false
     ZNotification.error({
       message: errorMessage(error, t('systemUpdate.errors.restart')),
     })
@@ -474,8 +446,8 @@ watch(
       <ZButton
         v-if="needRestart"
         type="primary"
-        :loading="restarting || checkingRestart"
-        :disabled="!canRestart || restartConfirmOpen"
+        :loading="restarting"
+        :disabled="!canRestart"
         @click="handleRestart"
       >
         <template #icon>
@@ -497,32 +469,4 @@ watch(
       </ZButton>
     </template>
   </ZDialog>
-
-  <ZConfirmDialog
-    v-model="restartConfirmOpen"
-    :title="t('systemUpdate.plugins.title')"
-    :description="t('systemUpdate.plugins.description')"
-    :confirm-text="t('systemUpdate.actions.continueRestart')"
-    :loading="restarting"
-    @confirm="handleConfirmRestart"
-  >
-    <div class="grid gap-4">
-      <div v-if="restartPlan?.targetVersion" class="flex items-center justify-between gap-3 text-z-sm">
-        <span class="text-z-text-secondary">{{ t('systemUpdate.versionAfterRestart') }}</span>
-        <span class="font-mono font-emphasis text-z-text">v{{ restartPlan.targetVersion }}</span>
-      </div>
-      <ul class="m-0 max-h-64 list-none overflow-y-auto p-0" :aria-label="t('systemUpdate.plugins.incompatible')">
-        <li v-for="plugin in restartPlan?.incompatiblePlugins" :key="plugin.instanceId" class="flex items-start gap-3 py-3 first:pt-0 last:pb-0">
-          <TriangleAlert class="mt-0.5 size-4 shrink-0 text-z-warning" aria-hidden="true" />
-          <div class="grid min-w-0 gap-1">
-            <strong class="wrap-anywhere text-z-sm font-heavy text-z-text">{{ plugin.name }}</strong>
-            <span class="wrap-anywhere text-z-xs leading-relaxed font-normal text-z-text-secondary">{{ plugin.reason }}</span>
-          </div>
-        </li>
-      </ul>
-      <p class="m-0 rounded-z bg-z-fill-quaternary px-3 py-2.5 text-z-sm leading-relaxed font-normal text-z-text-secondary">
-        {{ t('systemUpdate.plugins.requestErrorHelp') }}
-      </p>
-    </div>
-  </ZConfirmDialog>
 </template>

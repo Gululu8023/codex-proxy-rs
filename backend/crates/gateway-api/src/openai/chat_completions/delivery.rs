@@ -7,8 +7,8 @@ use bytes::Bytes;
 use futures::future::BoxFuture;
 use gateway_core::{
     engine::middleware::{
-        MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareHeader,
-        MiddlewareResponse,
+        MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareResponse,
+        RequestHeader,
     },
     error::{GatewayError, GatewayErrorKind},
 };
@@ -29,14 +29,14 @@ pub(super) fn project_middleware_response(
     if !(200..300).contains(&response.status_code()) {
         return response;
     }
-    let (protocol, status, mut headers, body, envelope) = response.into_parts();
+    let (protocol, status, mut headers, body) = response.into_parts();
     // 投影改变正文长度和表示形式 不继承 Responses 的实体长度或编码
     headers.retain(|header| {
         !["content-length", "content-type", "content-encoding"]
             .iter()
             .any(|name| header.name().eq_ignore_ascii_case(name))
     });
-    headers.push(MiddlewareHeader::new(
+    headers.push(RequestHeader::new(
         "content-type",
         Bytes::from_static(if streaming {
             b"text/event-stream"
@@ -53,7 +53,7 @@ pub(super) fn project_middleware_response(
     } else {
         Projection::Json(identity)
     };
-    let mut response = MiddlewareResponse::new(
+    MiddlewareResponse::new(
         protocol,
         status,
         headers,
@@ -64,11 +64,7 @@ pub(super) fn project_middleware_response(
             committed: false,
             finished: false,
         }),
-    );
-    if let Some(envelope) = envelope {
-        response = response.with_envelope(envelope);
-    }
-    response
+    )
 }
 
 pub(super) fn chat_error_frame(data: &Value) -> Bytes {
@@ -141,8 +137,7 @@ impl ChatBody {
             self.finished = true;
             return Ok(());
         };
-        let transformed = frame.transformed();
-        let (bytes, framing, terminal, envelope) = frame.into_parts();
+        let (bytes, framing, terminal) = frame.into_parts();
         let output = match &mut self.projection {
             Projection::Json(identity) => {
                 if framing != MiddlewareFraming::JsonDocument || !terminal {
@@ -181,15 +176,6 @@ impl ChatBody {
                     .collect()
             }
         };
-        let mut output: VecDeque<_> = output
-            .into_iter()
-            .map(|frame| frame.with_transformed(transformed))
-            .collect();
-        if let Some(envelope) = envelope
-            && let Some(last) = output.pop_back()
-        {
-            output.push_back(last.with_envelope(envelope));
-        }
         self.pending.extend(output);
         Ok(())
     }

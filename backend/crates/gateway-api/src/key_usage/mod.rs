@@ -18,6 +18,63 @@ use crate::{
 mod presenter;
 mod query;
 
+pub(crate) fn claude_models_router() -> Router<crate::ApiState> {
+    Router::new()
+        .route("/api/key-usage/claude-models", get(claude_models))
+        .layer(middleware::map_response(no_store))
+}
+
+async fn claude_models(
+    State(state): State<crate::ApiState>,
+    headers: HeaderMap,
+) -> Result<impl IntoResponse, AdminError> {
+    use gateway_admin::model::auth::SessionSubject;
+    let session = state
+        .admin
+        .auth()
+        .session(session_cookie::value(&headers).as_deref())
+        .await
+        .map_err(map_admin_service_error)?
+        .ok_or_else(AdminError::session_required)?;
+    // 只从服务端会话取得 Key ID；自助入口不接受调用方指定其他 Key。
+    let SessionSubject::Key { client_key_id } = session.subject else {
+        return Err(AdminError::forbidden());
+    };
+    state
+        .claude_privacy
+        .get()
+        .ok_or_else(AdminError::internal)?
+        .ensure_ready()
+        .map_err(|_| AdminError::service_unavailable())?;
+    let models = state
+        .execution
+        .inspect_client_model_catalog(&client_key_id, "anthropic")
+        .await
+        .map_err(|error| match error.kind() {
+            gateway_core::error::GatewayErrorKind::Unauthorized
+            | gateway_core::error::GatewayErrorKind::PolicyDenied => AdminError::forbidden(),
+            _ => AdminError::service_unavailable(),
+        })?;
+    let models = models
+        .into_iter()
+        .filter_map(|model| match model {
+            gateway_core::routing::PublicModelDescriptor::Native { payload, .. }
+                if payload.protocol() == "anthropic" =>
+            {
+                Some(
+                    serde_json::from_slice::<serde_json::Value>(payload.body())
+                        .map_err(|_| AdminError::internal()),
+                )
+            }
+            _ => None,
+        })
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(AdminResponse::new(
+        StatusCode::OK,
+        AdminEnvelope::ok(serde_json::json!({"models":models})),
+    ))
+}
+
 pub(crate) fn router<S>() -> Router<S>
 where
     S: SessionState + Clone + Send + Sync + 'static,

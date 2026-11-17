@@ -44,10 +44,6 @@ impl PgAdminAccountStore {
         query_budget: ObservabilityQueryBudget,
     ) -> Self {
         let accounts = PgProviderAccountRepository::new(pool.clone());
-        let accounts = match &cooldowns {
-            Some(port) => accounts.with_account_error_protection(port.clone()),
-            None => accounts,
-        };
         Self {
             pool: pool.clone(),
             accounts,
@@ -272,45 +268,6 @@ impl AccountStore for PgAdminAccountStore {
             })
     }
 
-    async fn list_plugin_accounts(
-        &self,
-        query: PluginAccountListQuery,
-    ) -> AdminStoreResult<PluginAccountPage> {
-        let limit = i64::from(query.limit.get());
-        let mut accounts = self
-            .accounts
-            .list_plugin_accounts(
-                query.provider_kind.as_ref().map(ProviderKind::as_str),
-                query.cursor.as_ref().map(CoreProviderAccountId::as_str),
-                limit + 1,
-            )
-            .await
-            .map_err(|error| admin_store_error(ENTITY, error))?;
-        let has_more = accounts.len() > usize::from(query.limit.get());
-        if has_more {
-            accounts.pop();
-        }
-        let next_cursor = has_more
-            .then(|| accounts.last().map(|account| account.id.clone()))
-            .flatten()
-            .map(CoreProviderAccountId::new)
-            .transpose()
-            .map_err(|_| {
-                AdminStoreError::new(
-                    AdminStoreErrorKind::Invalid,
-                    ENTITY,
-                    "plugin account cursor is invalid",
-                )
-            })?;
-        Ok(PluginAccountPage {
-            accounts: accounts
-                .into_iter()
-                .map(admin_account_record)
-                .collect::<AdminStoreResult<_>>()?,
-            next_cursor,
-        })
-    }
-
     async fn list_accounts(
         &self,
         query: AdminAccountListQuery,
@@ -358,11 +315,6 @@ impl AccountStore for PgAdminAccountStore {
                 let mut account = admin_account_record(summary)?;
                 account.groups = groups_by_account.remove(&account_id).unwrap_or_default();
                 Ok(AccountPageItem {
-                    protection_rules: runtime
-                        .protection_rules
-                        .get(&account.id)
-                        .cloned()
-                        .unwrap_or_default(),
                     capacity: account_capacity(
                         &account,
                         page.default_concurrency,
@@ -422,11 +374,6 @@ impl AccountStore for PgAdminAccountStore {
             )
         })?;
         Ok(Some(AccountPageItem {
-            protection_rules: runtime
-                .protection_rules
-                .get(&account_id)
-                .cloned()
-                .unwrap_or_default(),
             capacity: account_capacity(&account, default_concurrency, runtime.in_flight.as_ref()),
             account,
             projection,
@@ -543,25 +490,6 @@ impl AccountStore for PgAdminAccountStore {
         Ok(credentials)
     }
 
-    async fn load_credential_for_plugin(
-        &self,
-        account_id: &CoreProviderAccountId,
-    ) -> AdminStoreResult<Option<ProviderExportCredentialInput>> {
-        self.accounts
-            .load_provider_account(account_id.as_str())
-            .await
-            .map_err(|error| admin_store_error(ENTITY, error))?
-            .map(|record| {
-                Ok(ProviderExportCredentialInput {
-                    account: admin_account_record(record.summary)?,
-                    provider_material: ProviderDocument::new(OpaqueProviderData::new(
-                        record.provider_credentials_json.fields().clone(),
-                    )),
-                })
-            })
-            .transpose()
-    }
-
     async fn commit_credential_import(
         &self,
         command: CredentialImportCommit,
@@ -664,6 +592,8 @@ impl AccountStore for PgAdminAccountStore {
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: vec![command.account_id.clone()],
+                pauses: Default::default(),
+                quota_limits: None,
                 auto_use_quota_credits: None,
                 name: command.name,
                 notes: command.notes,
@@ -726,6 +656,7 @@ impl AccountStore for PgAdminAccountStore {
     async fn batch_update_accounts(
         &self,
         command: BatchUpdateAccounts,
+        pauses: gateway_admin::model::accounts::PreparedQuotaPauses,
         context: &MutationContext,
     ) -> AdminStoreResult<AccountsUpdateResult> {
         let account_ids = command
@@ -748,6 +679,7 @@ impl AccountStore for PgAdminAccountStore {
         };
         let mut changed_fields = Vec::new();
         for (changed, field) in [
+            (command.quota_limits.is_some(), "quota_limits"),
             (
                 command.auto_use_quota_credits.is_some(),
                 "auto_use_quota_credits",
@@ -771,6 +703,8 @@ impl AccountStore for PgAdminAccountStore {
             .accounts
             .batch_update_provider_accounts_admin(BatchUpdateProviderAccountsAdmin {
                 account_ids: command.account_ids,
+                pauses,
+                quota_limits: command.quota_limits,
                 auto_use_quota_credits: command.auto_use_quota_credits,
                 name: None,
                 notes: None,

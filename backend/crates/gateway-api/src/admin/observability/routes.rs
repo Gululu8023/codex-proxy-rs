@@ -63,7 +63,7 @@ where
     let result = state
         .admin_services()
         .observability()
-        .dashboard_summary(range, domain_trend_kind(kind))
+        .dashboard_summary_for_provider(range, domain_trend_kind(kind), non_empty(query.provider))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -93,7 +93,7 @@ where
     let result = state
         .admin_services()
         .observability()
-        .dashboard_trend(range, domain_trend_kind(kind))
+        .dashboard_trend_for_provider(range, domain_trend_kind(kind), non_empty(query.provider))
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(

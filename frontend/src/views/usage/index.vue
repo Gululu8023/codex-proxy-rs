@@ -7,6 +7,7 @@ import { Eye } from '@lucide/vue'
 
 import { computed, shallowRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
+import { useRoute } from 'vue-router'
 import ProviderFilter from '@/components/ProviderFilter.vue'
 import { usageRecordColumns } from '@/components/usage/shared/columns'
 import UsageRecordsTable from '@/components/usage/UsageRecordsTable.vue'
@@ -68,7 +69,12 @@ const {
   status: recordView,
 })
 
-const { showDetailModal, selectedUsageRecord, detailIsError, detailLoading, detailError, handleViewDetail, reloadDetail } = useUsageRecordDetail()
+const { showDetailModal, selectedUsageRecord, detailIsError, detailLoading, detailError, handleViewDetail, reloadDetail, openRequest } = useUsageRecordDetail()
+const route = useRoute()
+watch(() => route.query.requestId, (id) => {
+  if (typeof id === 'string' && id)
+    void openRequest(id)
+}, { immediate: true })
 const detailComponent = computed(() => detailIsError.value
   ? UsageErrorDetailModal
   : UsageRecordDetailModal)
@@ -81,27 +87,20 @@ watch(timeRange, () => {
 
 <template>
   <div class="@container w-full">
-    <ZPageHeader class="justify-end" :title="t('navigation.usage')" :description="t('usage.page.description')">
-      <template #actions>
-        <div class="flex w-[100cqw] max-w-[100cqw] flex-wrap items-center justify-end gap-2 @min-[21rem]:flex-nowrap @min-[28rem]:w-auto">
-          <ZDatePicker
-            v-model="timeRange"
-            type="daterange"
-            :clearable="false"
-            :editable="false"
-            :disabled-date="disabledDate"
-            single-panel
-            :aria-label="t('usage.page.dateRangeLabel')"
-            class="min-w-0 flex-1 basis-full @min-[21rem]:basis-auto @min-[28rem]:w-60 @min-[28rem]:flex-none @max-[28rem]:[&>div]:gap-1.5 @max-[28rem]:[&>div]:px-2"
-          />
-          <ProviderFilter
-            v-model="providerQuery"
-            :disabled="refreshingList"
-            class="shrink-0"
-          />
-        </div>
-      </template>
-    </ZPageHeader>
+    <ZPageHeader :title="t('navigation.usage')" :description="t('usage.page.description')" />
+    <div class="mt-4 mb-5 flex min-w-0 flex-wrap items-center gap-3">
+      <ProviderFilter v-model="providerQuery" :disabled="refreshingList" />
+      <ZDatePicker
+        v-model="timeRange"
+        type="daterange"
+        :clearable="false"
+        :editable="false"
+        :disabled-date="disabledDate"
+        single-panel
+        :aria-label="t('usage.page.dateRangeLabel')"
+        class="min-w-0 flex-1 basis-full @min-[21rem]:basis-auto @min-[28rem]:w-60 @min-[28rem]:flex-none @max-[28rem]:[&>div]:gap-1.5 @max-[28rem]:[&>div]:px-2"
+      />
+    </div>
 
     <UsageSummaryCards :summary="summary.data" :error="summary.error" />
     <UsageInsightsGrid

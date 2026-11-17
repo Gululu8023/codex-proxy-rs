@@ -37,3 +37,9 @@ pub struct KeyUsageOverview {
 }
 
 pub type KeyUsageRecords = UsagePage;
+
+/// 客户端配置仅投影入口与当前 Key，不公开其他运行设置
+pub struct KeyUsageConfig {
+    pub secret: super::client_keys::ClientKeySecret,
+    pub claude_public_url: String,
+}

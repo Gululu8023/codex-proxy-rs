@@ -235,7 +235,6 @@ async fn account_capacity_should_resolve_limits_for_list_and_detail() {
             Some(BTreeMap::from([("acct_override".to_owned(), 2)])),
         ] {
             let runtime = AccountRuntimeSnapshot {
-                protection_rules: std::collections::BTreeMap::new(),
                 in_flight: counts,
                 ..Default::default()
             };
@@ -391,93 +390,6 @@ async fn provider_filter_applies_before_pagination_even_on_an_empty_page() {
     database.close().await;
 }
 
-#[tokio::test]
-async fn plugin_account_provider_filter_is_optional_and_applied_before_cursor_pagination() {
-    let Some(database) = TestDatabase::create("plugin_account_scope").await else {
-        return;
-    };
-    let repository = PgProviderAccountRepository::new(database.pool.clone());
-    for id in ["acct_plugin_a", "acct_plugin_b", "acct_plugin_c"] {
-        repository
-            .insert_provider_account(account(id, &format!("user-{id}")))
-            .await
-            .unwrap();
-    }
-    let mut other_provider = account("acct_plugin_other", "user-other");
-    other_provider.provider_kind = "xai".to_owned();
-    repository
-        .insert_provider_account(other_provider)
-        .await
-        .unwrap();
-    let store = admin_account_store(&database.pool);
-    let first = store
-        .list_plugin_accounts(PluginAccountListQuery {
-            provider_kind: Some(ProviderKind::new("openai").unwrap()),
-            cursor: None,
-            limit: PageSize::new(1).unwrap(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        first
-            .accounts
-            .iter()
-            .map(|account| account.id.as_str())
-            .collect::<Vec<_>>(),
-        ["acct_plugin_a"]
-    );
-    assert_eq!(
-        first.next_cursor.as_ref().map(ProviderAccountId::as_str),
-        Some("acct_plugin_a")
-    );
-
-    let second = store
-        .list_plugin_accounts(PluginAccountListQuery {
-            provider_kind: Some(ProviderKind::new("openai").unwrap()),
-            cursor: first.next_cursor,
-            limit: PageSize::new(1).unwrap(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        second
-            .accounts
-            .iter()
-            .map(|account| account.id.as_str())
-            .collect::<Vec<_>>(),
-        ["acct_plugin_b"]
-    );
-    assert_eq!(
-        second.next_cursor.as_ref().map(ProviderAccountId::as_str),
-        Some("acct_plugin_b")
-    );
-
-    // 未指定 Provider 时按全局账号 ID 跨 Provider 分页，Provider 归属来自持久记录
-    let all = store
-        .list_plugin_accounts(PluginAccountListQuery {
-            provider_kind: None,
-            cursor: None,
-            limit: PageSize::new(16).unwrap(),
-        })
-        .await
-        .unwrap();
-    assert_eq!(
-        all.accounts
-            .iter()
-            .map(|account| account.id.as_str())
-            .collect::<Vec<_>>(),
-        [
-            "acct_plugin_a",
-            "acct_plugin_b",
-            "acct_plugin_c",
-            "acct_plugin_other"
-        ]
-    );
-    assert!(all.next_cursor.is_none());
-
-    database.close().await;
-}
-
 pub(super) fn credential(id: &str, user: &str) -> PreparedCredentialCreate {
     PreparedCredentialCreate {
         account_id: ProviderAccountId::new(id).unwrap(),
@@ -624,6 +536,8 @@ async fn reset_credit_automation_persists_pending_checks_cas_and_follows_account
         revision: 0,
         next_run_at: now + TimeDelta::hours(2),
         state: ResetCreditAutomationState {
+            awaiting_weekly_recovery_since: None,
+            next_weekly_check_at: None,
             next_discovery_at: now + TimeDelta::days(1),
             credits: vec![],
             pending: Some(PendingResetCredit {

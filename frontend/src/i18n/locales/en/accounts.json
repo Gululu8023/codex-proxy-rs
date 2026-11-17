@@ -1,5 +1,17 @@
 {
   "accounts": {
+    "quotaLimits": {
+      "badge": "Quota paused",
+      "title": "General quota scheduling limits",
+      "reached": "Scheduling limit reached: {windows}",
+      "expectedReset": "Expected reset",
+      "windowReset": "{window} reset",
+      "recovery": "Wait for usage to reset or adjust the window limit.",
+      "help": "Pause at any window limit. Resume when all are below their limits.",
+      "unlimited": "No limit",
+      "empty": "No general quota windows observed",
+      "invalid": "Enter a whole number from 1 to 100 or leave blank for no limit"
+    },
     "quota": {
       "general": "General quota",
       "usageInThisWindow": "Usage in this window: {localUsageDisplay}",
@@ -54,7 +66,19 @@
         "days": "{duration} d limit",
         "hours": "{duration} h limit",
         "minutes": "{duration} min limit"
-      }
+      },
+      "states": {
+        "unsampled": "Not sampled",
+        "stale": "Observation expired",
+        "query_failed": "Query failed",
+        "exhausted": "Subscription exhausted",
+        "sampled": "Official subscription observation"
+      },
+      "sources": {
+        "oauth_usage": "Subscription query"
+      },
+      "accountScope": "Account-wide",
+      "headerObserved": "Response headers (scope reported by upstream)"
     },
     "account": "Account",
     "connectionTest": {
@@ -187,6 +211,13 @@
       "importAccount": "Import",
       "editSelected": "Edit ({count})"
     },
+    "modelCatalog": {
+      "title": "Model catalog",
+      "modelId": "Model ID",
+      "modelName": "Model name",
+      "observedAt": "Catalog updated",
+      "search": "Search models"
+    },
     "modelAccess": {
       "reserve": "Reserve",
       "allowlist": "Allowlist",
@@ -207,6 +238,8 @@
       "addToDenylistHint": "Saving blocks this ID on the account",
       "loadingModel": "Loading model",
       "noModels": "No models",
+      "retryHint": "Refresh to retry loading the model catalog",
+      "noMatchingModels": "No matching models",
       "selectOrAddAtLeastOneModel": "Please select or add at least one model",
       "configureUpToModels": "Configure up to 256 models",
       "invalidModelId": "Enter an exact model ID, wildcards are not supported",
@@ -234,15 +267,14 @@
     "proxy": {
       "keepCurrent": "Keep current",
       "keepExisting": "Keep each account's connection settings",
-      "directConnection": "Direct",
-      "notUsingProxy": "No proxy",
+      "direct": "Direct",
       "disabledSuffix": "(disabled)",
       "testFailed": "(test failed)",
       "notTested": "(not tested)",
       "outboundTunnel": "Outbound tunnel",
       "testExit": "Test egress",
-      "selectToTest": "Select a direct connection or managed proxy to test egress",
-      "disabledUsesDirect": "The proxy is disabled, so the test uses the server’s direct connection",
+      "selectToTest": "Select an egress route to test",
+      "disabledUsesDirect": "Proxy disabled; the test uses a direct connection",
       "connected": "Egress connected · {latencyMs} ms",
       "testIncomplete": "No test result received, run the test again"
     },
@@ -346,7 +378,6 @@
       "reauthorizeAccount": "Reauthorize account",
       "settingsDescription": "These settings apply to accounts in this import",
       "reauthorizeDescription": "Update account credentials after authorization",
-      "callbackLabel": "Callback URL or authorization code",
       "callbackAddress": "Callback address",
       "callbackPlaceholder": "Callback URL, ?code=...&state=..., or authorization code",
       "callbackHelp": "Open the authorization link, authorize in your browser, then paste the callback URL or authorization code",
@@ -511,20 +542,21 @@
         "unconfirmed": "The last automatic reset is unconfirmed",
         "expiredUnconfirmed": "The last reset could not be confirmed and the reset credit has expired",
         "queryFailed": "The last query failed, retrying on schedule",
+        "awaitingWeeklyRecovery": "Waiting for weekly quota to recover after the last credit",
         "aboveThreshold": "Remaining weekly quota exceeds the threshold, checking again later",
         "quotaUnavailable": "Weekly quota is unavailable, checking again later",
         "resetNotNeeded": "This quota window does not need a reset, checking again later",
         "resetIncomplete": "The upstream service did not complete the last automatic reset",
         "scheduleHelp": "Check once a day at a random time, staggered across accounts",
-        "verifyHelp": "Verify reset credits before expiry, automatically skip credits already used elsewhere",
+        "verifyHelp": "Recheck the credit and any weekly quota conditions before use",
         "label": "Automatically use expiring reset credits"
       },
       "automaticallyUseResetCard": "Automatically use resets",
       "automaticUsageRules": "Automatic usage rules",
-      "setGlobalLeadTime": "Set global lead time",
+      "setTiming": "Set when to use credits",
+      "weeklyThreshold": "Weekly quota remaining ≤ {percent}%",
       "minutesInAdvance": "{leadMinutes} min in advance",
-      "leadTime": "Lead time",
-      "nextUse": "Next use: {nextConsumeAtDisplay}",
+      "nextUse": "Scheduled expiry use: {nextConsumeAtDisplay}",
       "limitReset": "Limit reset",
       "confirmLastReset": "Confirm last reset",
       "confirmResetAmount": "Confirm reset amount",
@@ -580,15 +612,9 @@
       "reauthorizeHelp": "Reauthorize the account to resume scheduling",
       "replaceCredentialsHelp": "Update or reimport credentials, then test the connection again",
       "upstreamRestrictionHelp": "Check the upstream account and resolve its restrictions before enabling it",
-      "recoveryProbeHelp": "After cooldown, a successful recovery probe resumes scheduling, or you can restore the account manually",
-      "recoveryHelp": "Scheduling resumes after cooldown, or you can restore the account manually",
       "nextAttempt": ", next attempt: {nextRefreshDisplay}",
       "clickOrFocusToViewDetails": "{title}, {description}{retry}, click or focus to view details",
-      "resumeDetection": "Resume detection",
-      "expectedToRecover": "Expected to recover",
-      "errorProtection": "Error protection",
-      "protectionFailuresHelp": "Failures matching your rules reached the threshold, scheduling is paused for this account",
-      "matchedProtectionRules": "Rules matched when protection started"
+      "expectedToRecover": "Expected to recover"
     },
     "fields": {
       "platformType": "Provider",

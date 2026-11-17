@@ -140,6 +140,7 @@ async fn dashboard_summary_should_include_quota_exhaustion_in_unavailable_headli
         range: TimeRange::new(now - Duration::hours(1), now).expect("dashboard range"),
         totals: Default::default(),
         provider_accounts: AccountPoolMetrics {
+            quota_paused: 0,
             total: 1002,
             normal: 943,
             quota_exhausted: 52,
@@ -425,7 +426,7 @@ async fn usage_detail_should_keep_attempt_snapshot_contract() {
                 upstream_transport: Some("http_sse".to_owned()),
                 upstream_send_state: Some("sent".to_owned()),
                 outcome: gateway_admin::model::observability::RequestOutcome::Failed,
-                downstream_committed: false,
+                downstream_committed: Some(false),
                 status_code: Some(429),
                 provider_error_code: Some("rate_limit".to_owned()),
                 failure_kind: Some("rate_limited".to_owned()),
@@ -930,7 +931,7 @@ async fn usage_route_should_forward_name_and_model_contains_filters() {
         .with_state(fixture.state())
         .oneshot(
             Request::builder()
-                .uri("/api/admin/usage/records?model=%20coding%20&clientApiKeyName=%20Key%20%25%20&accountName=%20Account%20Name%20")
+                .uri("/api/admin/usage/records?model=%20coding%20&clientApiKeyName=%20Key%20%25%20&accountSearch=%20Account%20Name%20")
                 .header(header::COOKIE, "cpr_session=valid-session")
                 .header("x-request-id", "req_usage_other_outcome")
                 .body(Body::empty())
@@ -945,7 +946,7 @@ async fn usage_route_should_forward_name_and_model_contains_filters() {
     assert_eq!(filter.client_api_key_name.as_deref(), Some("Key %"));
     assert_eq!(filter.model_contains.as_deref(), Some("coding"));
     assert_eq!(
-        filter.provider_account_name.as_deref(),
+        filter.provider_account_search.as_deref(),
         Some("Account Name")
     );
     assert!(filter.client_api_key_ref.is_none());
@@ -980,6 +981,8 @@ async fn usage_route_projects_request_facts_and_billing() {
         .lock()
         .expect("usage records")
         .push(UsageListRecord {
+            has_upstream_error: false,
+            upstream_status_code: None,
             provider_account_upstream_peer: None,
             error_code: None,
             error_message: None,
@@ -2161,4 +2164,45 @@ async fn dashboard_relative_time_preserves_server_anchor_boundaries_and_deployme
             assert_eq!(account["lastUsedAt"], json!(last_used_at));
         }
     }
+}
+
+#[tokio::test]
+async fn account_search_is_provider_scoped_and_legacy_parameter_is_rejected() {
+    use crate::admin::{AdminTestFixture, AdminTestState};
+    use axum::{
+        body::Body,
+        http::{Request, StatusCode, header},
+    };
+    use gateway_api::admin::observability;
+    use tower::ServiceExt as _;
+    let fixture = AdminTestFixture::new().await;
+    fixture.auth.insert_session("valid-session");
+    let app = observability::router::<AdminTestState>().with_state(fixture.state());
+    for provider in ["openai", "anthropic"] {
+        let response = app.clone().oneshot(Request::get(format!("/api/admin/usage/records?provider={provider}&accountSearch=%20alice%2B_%25%40example.invalid%20"))
+            .header("x-request-id", "req_account_search").header(header::COOKIE, "cpr_session=valid-session").body(Body::empty()).unwrap()).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let observations = fixture.observations.lock().unwrap();
+        let filter = &observations.records.last().unwrap().filter;
+        assert_eq!(filter.provider_kind.as_deref(), Some(provider));
+        assert_eq!(
+            filter.provider_account_search.as_deref(),
+            Some("alice+_%@example.invalid")
+        );
+    }
+    for query in ["accountName=Alice", "accountName=Alice&accountSearch=Bob"] {
+        let response = app
+            .clone()
+            .oneshot(
+                Request::get(format!("/api/admin/usage/records?{query}"))
+                    .header("x-request-id", "req_account_search")
+                    .header(header::COOKIE, "cpr_session=valid-session")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
+    assert_eq!(fixture.observations.lock().unwrap().records.len(), 2);
 }

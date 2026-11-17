@@ -1,5 +1,17 @@
 {
   "accounts": {
+    "quotaLimits": {
+      "badge": "額度暫停",
+      "title": "通用額度調度上限",
+      "reached": "{windows}已達調度上限",
+      "expectedReset": "預計重置",
+      "windowReset": "{window}預計重置",
+      "recovery": "等待額度恢復，或調整視窗上限",
+      "help": "任一視窗達限即暫停調度，均低於上限後恢復",
+      "unlimited": "不限制",
+      "empty": "沒有已觀測的通用額度視窗",
+      "invalid": "請輸入 1～100 的整數，留空表示不限制"
+    },
     "quota": {
       "general": "通用額度",
       "usageInThisWindow": "窗口消耗：{localUsageDisplay}",
@@ -54,7 +66,19 @@
         "days": "{duration}日額度",
         "hours": "{duration}小時額度",
         "minutes": "{duration}分鐘額度"
-      }
+      },
+      "states": {
+        "unsampled": "尚未取樣",
+        "sampled": "已觀測",
+        "stale": "觀測已過期",
+        "query_failed": "查詢失敗",
+        "exhausted": "額度已耗盡"
+      },
+      "sources": {
+        "oauth_usage": "訂閱查詢"
+      },
+      "accountScope": "整個帳號",
+      "headerObserved": "回應標頭觀測（以上游聲明範圍為準）"
     },
     "account": "賬號",
     "connectionTest": {
@@ -187,6 +211,13 @@
       "importAccount": "導入賬號",
       "editSelected": "編輯 ({count})"
     },
+    "modelCatalog": {
+      "title": "模型目錄",
+      "modelId": "模型 ID",
+      "modelName": "模型名稱",
+      "observedAt": "目錄更新時間",
+      "search": "搜索模型"
+    },
     "modelAccess": {
       "reserve": "保留",
       "allowlist": "白名單",
@@ -207,6 +238,8 @@
       "addToDenylistHint": "保存後，此賬號將拒絕該模型",
       "loadingModel": "加載模型中",
       "noModels": "暫無模型",
+      "retryHint": "請重新整理以重新載入模型目錄",
+      "noMatchingModels": "沒有符合的模型",
       "selectOrAddAtLeastOneModel": "請至少選擇或添加一個模型",
       "configureUpToModels": "最多配置 256 個模型",
       "invalidModelId": "請使用有效的精確模型 ID，不支持通配符",
@@ -234,15 +267,14 @@
     "proxy": {
       "keepCurrent": "保持當前",
       "keepExisting": "保留各賬號的連接設置",
-      "directConnection": "直連",
-      "notUsingProxy": "不使用代理",
+      "direct": "直連",
       "disabledSuffix": "（已禁用）",
       "testFailed": "（測試失敗）",
       "notTested": "（未測試）",
       "outboundTunnel": "出站隧道",
       "testExit": "測試出口",
-      "selectToTest": "選擇直連或受管理的代理後可測試出口",
-      "disabledUsesDirect": "代理已禁用，將測試服務器直連出口",
+      "selectToTest": "選擇出口後可測試連線",
+      "disabledUsesDirect": "代理已停用，將測試直連出口",
       "connected": "出口連通 · {latencyMs} ms",
       "testIncomplete": "未取得測試結果，請重新測試"
     },
@@ -346,7 +378,6 @@
       "reauthorizeAccount": "重新授權賬號",
       "settingsDescription": "設置將應用於本次導入的賬號",
       "reauthorizeDescription": "完成授權後更新賬號憑據",
-      "callbackLabel": "回調地址或授權碼",
       "callbackAddress": "回調地址",
       "callbackPlaceholder": "回調地址、?code=...&state=... 或授權碼",
       "callbackHelp": "打開授權鏈接，完成瀏覽器授權後粘貼回調地址或授權碼",
@@ -511,20 +542,21 @@
         "unconfirmed": "上次自動重置結果待確認",
         "expiredUnconfirmed": "上次重置結果未能確認，卡片已到期",
         "queryFailed": "最近查詢失敗，將按計劃重試",
+        "awaitingWeeklyRecovery": "已用卡，等待週額度恢復",
         "aboveThreshold": "剩餘周額度高於上限，稍後檢查",
         "quotaUnavailable": "暫時無法確認周額度，稍後檢查",
         "resetNotNeeded": "當前額度窗口不需要重置，稍後檢查",
         "resetIncomplete": "上游未完成最近一次自動重置",
         "scheduleHelp": "每天隨機查詢一次，各賬號錯開時間",
-        "verifyHelp": "臨期使用前核對卡片，已在其他地方使用的會自動跳過",
+        "verifyHelp": "使用前重新核對卡片和適用的週額度條件",
         "label": "自動使用臨期重置卡"
       },
       "automaticallyUseResetCard": "自動使用重置卡",
       "automaticUsageRules": "自動使用規則",
-      "setGlobalLeadTime": "設置全局提前時間",
+      "setTiming": "設定用卡時機",
+      "weeklyThreshold": "剩餘週額度 ≤ {percent}%",
       "minutesInAdvance": "提前 {leadMinutes} 分鐘",
-      "leadTime": "提前時間",
-      "nextUse": "下次使用 {nextConsumeAtDisplay}",
+      "nextUse": "臨期用卡時間 {nextConsumeAtDisplay}",
       "limitReset": "額度重置",
       "confirmLastReset": "確認上次重置",
       "confirmResetAmount": "確認重置額度",
@@ -580,15 +612,9 @@
       "reauthorizeHelp": "重新授權後，賬號會重新參與調度",
       "replaceCredentialsHelp": "請更新或重新導入憑據，再次測試連接",
       "upstreamRestrictionHelp": "請確認上游賬號狀態，解除限制後再啓用",
-      "recoveryProbeHelp": "冷卻結束後進行恢復探測，成功後恢復調度，也可手動恢復賬號",
-      "recoveryHelp": "冷卻結束後自動恢復調度，也可手動恢復賬號",
       "nextAttempt": "，下次嘗試：{nextRefreshDisplay}",
       "clickOrFocusToViewDetails": "{title}，{description}{retry}，點擊或聚焦查看詳情",
-      "resumeDetection": "恢復探測",
-      "expectedToRecover": "預計恢復",
-      "errorProtection": "錯誤保護",
-      "protectionFailuresHelp": "匹配規則的失敗累計達到閾值，系統已暫停該賬號的調度",
-      "matchedProtectionRules": "觸發時命中的規則"
+      "expectedToRecover": "預計恢復"
     },
     "fields": {
       "platformType": "平臺",

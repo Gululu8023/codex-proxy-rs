@@ -80,7 +80,7 @@
 - 专业缩写在三种语言中保留原样及规范大小写，例如 `TTFT`、`RPM`、`TPM`、`API`、`HTTP`、`WS`、`RC`，直接显示时不翻译或展开，必要的全称和解释放入帮助提示
 - 英文使用句首大写和美式拼写，统一 Account、Proxy、Usage、Rate limit、API key、TTFT 等术语，协议标识和用户值保留原样
 - 繁体中文只转换简体原文的字形，保持措辞与语序，不替换地区用词，例如 `数据 → 數據`、`设置 → 設置`
-- 只翻译应用拥有的文本，具体后端错误、上游诊断、日志和独立插件内容保留原文；固定错误码在请求层映射，业务分类码优先保留后端公开的具体原因，无原因时使用本地兜底文案
+- 只翻译应用拥有的文本，具体后端错误、上游诊断和日志保留原文；固定错误码在请求层映射，业务分类码优先保留后端公开的具体原因，无原因时使用本地兜底文案
 - 侧边栏语言图标展开就地选项，选择后切换并收起；品牌区固定显示 `Codex Proxy`、`Rust build` 和版本号
 - UI 库默认文案由 `ZConfigProvider` 提供，命令式通知通过 `utils/notification.ts` 绑定同一个语言来源，组件约定见 [UI 国际化](../modules/ui/playground/guide/i18n.md)
 
@@ -114,9 +114,7 @@ flowchart LR
 | 状态 | [`stores/modules/theme.ts`](../frontend/src/stores/modules/theme.ts) | 持久化配置、系统明暗偏好、切换动作与动画 |
 | 编辑器状态 | [`useThemeEditor.ts`](../frontend/src/views/theme/composables/useThemeEditor.ts) | 草稿、修改计数、恢复与保存 |
 
-`codex-proxy-ui` 的组件与主题不依赖宿主 Store、路由或 API。应用通过上述公开入口消费；插件页面把 UI、Vue 和 Tailwind CSS 4 样式编译进包内静态资源，不借用宿主运行时模块。
-插件页面的标题与副标题由宿主呈现，内容区只渲染业务；主题变化通过宿主桥同步，接入方式见
-[SDK 页面与宿主桥](../backend/crates/gateway-plugin/sdk/docs/capabilities.md#页面宿主桥-v2)。
+`codex-proxy-ui` 的组件与主题不依赖宿主 Store、路由或 API。应用通过上述公开入口消费。
 `theme/` 根目录只保留公开入口 `index.ts` 和唯一类型文件 `types.ts`；内部实现按 `core/`、`derive/`、`runtime/` 分层，不增加嵌套 barrel。
 纯派生模块不访问 DOM，`theme/runtime/browser.ts` 不包含派生规则，Theme Store 不复制算法。
 普通 Map 字段按 camelCase → kebab-case 统一生成 `--z-*`；Semantic 与 Preset Color 仅维护各自的短角色表。
@@ -255,7 +253,7 @@ Token 直接覆盖时不会自动重算同组件的其他状态；需要保持�
 | Scrollbar | `--z-scrollbar-thumb-bg / hover-bg` |
 | BrandMark | `--z-brand-mark-bg` |
 
-管理端侧栏由 UI 库的 `ZSidebar` 提供容器、折叠展示、两级导航与选中状态。应用提供菜单数据、品牌和底部操作插槽，在 `select` 中执行路由或插件导航；移动端遮罩与模态焦点由宿主布局持有
+管理端侧栏由 UI 库的 `ZSidebar` 提供容器、折叠展示、两级导航与选中状态。应用提供菜单数据、品牌和底部操作插槽，在 `select` 中执行路由导航；移动端遮罩与模态焦点由宿主布局持有
 
 组件状态由 UI 库的 Component 派生层统一生成，页面不维护混色系数：
 
@@ -352,7 +350,6 @@ UI 构建插件 `CodexProxyUI({ themePrefix: 'z' })` 同时配置变量生成与
 - 初始化、系统主题变化或减少动态效果时直接提交，不播放扩散动画
 - 每次有效提交只增加一次 `themeRevision`，相同签名不会重复刷新
 - `useThemeColor()` 接收语义 Token 名，通过 `getThemeVarName()` 读取当前前缀下的 CSS Variables；影子预览优先读取注入的局部变量
-- 插件桥接传递语义 Token，由插件构建元数据指定的前缀生成 CSS 变量，宿主与插件可独立配置
 - 图表 Option 在主题 revision 或预览 Token 改变后重算，`BaseChart` 通过 `setOption` 更新现有 Canvas
 
 ## 主题编辑器

@@ -2,8 +2,6 @@
 
 use std::sync::Arc;
 
-use super::system_preflight::{ConfirmedPluginRestart, PluginSystemUpdatePreflight};
-use crate::model::{MutationContext, system::SystemRestartPlan};
 use async_trait::async_trait;
 
 use crate::{
@@ -36,30 +34,18 @@ pub trait SystemService: Send + Sync {
     ) -> Result<SystemOperationAccepted, AdminError>;
     async fn update_status(&self) -> Result<SystemUpdateStatus, AdminError>;
     async fn rollback(&self) -> Result<SystemOperationAccepted, AdminError>;
-    async fn restart_plan(&self) -> Result<SystemRestartPlan, AdminError>;
-    async fn restart(
-        &self,
-        confirmation: Option<SystemRestartPlan>,
-        context: &MutationContext,
-    ) -> Result<SystemOperationAccepted, AdminError>;
+    async fn restart(&self) -> Result<SystemOperationAccepted, AdminError>;
 }
 
 /// 保持 Host 能力窄边界的默认系统用例
 pub(crate) struct DefaultSystemService {
     operations: Arc<dyn SystemOperations>,
-    preflight: Arc<PluginSystemUpdatePreflight>,
 }
 
 impl DefaultSystemService {
     #[must_use]
-    pub(crate) fn new(
-        operations: Arc<dyn SystemOperations>,
-        preflight: Arc<PluginSystemUpdatePreflight>,
-    ) -> Self {
-        Self {
-            operations,
-            preflight,
-        }
+    pub(crate) fn new(operations: Arc<dyn SystemOperations>) -> Self {
+        Self { operations }
     }
 }
 
@@ -93,7 +79,7 @@ impl SystemService for DefaultSystemService {
             .map(|version| version.trim().to_owned())
             .filter(|version| !version.is_empty());
         self.operations
-            .perform_update(target_version, channel, self.preflight.clone())
+            .perform_update(target_version, channel)
             .await
             .map_err(map_system_error)
     }
@@ -106,36 +92,11 @@ impl SystemService for DefaultSystemService {
     }
 
     async fn rollback(&self) -> Result<SystemOperationAccepted, AdminError> {
-        self.operations
-            .rollback(self.preflight.clone())
-            .await
-            .map_err(map_system_error)
+        self.operations.rollback().await.map_err(map_system_error)
     }
 
-    async fn restart_plan(&self) -> Result<SystemRestartPlan, AdminError> {
-        let candidate = self
-            .operations
-            .restart_candidate()
-            .await
-            .map_err(map_system_error)?;
-        self.preflight
-            .plan(candidate)
-            .await
-            .map_err(map_system_error)
-    }
-
-    async fn restart(
-        &self,
-        confirmation: Option<SystemRestartPlan>,
-        _context: &MutationContext,
-    ) -> Result<SystemOperationAccepted, AdminError> {
-        self.operations
-            .restart(Arc::new(ConfirmedPluginRestart {
-                preflight: self.preflight.clone(),
-                confirmation,
-            }))
-            .await
-            .map_err(map_system_error)
+    async fn restart(&self) -> Result<SystemOperationAccepted, AdminError> {
+        self.operations.restart().await.map_err(map_system_error)
     }
 }
 

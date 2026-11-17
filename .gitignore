@@ -33,6 +33,7 @@ Thumbs.db
 *~
 
 # Local tools and worktrees
+/.deps/
 /.codegraph/
 /.playwright-cli/
 /.codex-ws-audit/

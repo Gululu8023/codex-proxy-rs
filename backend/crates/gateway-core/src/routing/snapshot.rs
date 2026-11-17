@@ -234,8 +234,6 @@ pub trait SnapshotStorePort: Send + Sync {
 /// 快照未发布时可安全记录的稳定错误
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum RuntimeSnapshotCompileError {
-    #[error("runtime extensions could not be prepared")]
-    ExtensionsUnavailable,
     #[error("runtime snapshot store is unavailable")]
     StoreUnavailable,
     #[error("runtime configuration changed while the snapshot was loading")]
@@ -252,7 +250,6 @@ pub struct RuntimeSnapshotCompiler {
     store: Arc<dyn SnapshotStorePort>,
     privacy_compiler: Option<Arc<dyn crate::settings::privacy::PrivacyPolicyCompiler>>,
     catalogs: Arc<dyn ProviderCatalogPort>,
-    extensions: Option<Arc<dyn crate::routing::extensions::ExtensionPreparationPort>>,
 }
 
 impl RuntimeSnapshotCompiler {
@@ -265,17 +262,7 @@ impl RuntimeSnapshotCompiler {
             store,
             privacy_compiler: None,
             catalogs,
-            extensions: None,
         }
-    }
-
-    #[must_use]
-    pub fn with_extensions(
-        mut self,
-        extensions: Arc<dyn crate::routing::extensions::ExtensionPreparationPort>,
-    ) -> Self {
-        self.extensions = Some(extensions);
-        self
     }
 
     #[must_use]
@@ -302,7 +289,7 @@ impl RuntimeSnapshotCompiler {
         self.compile_inner(None, true).await
     }
 
-    /// 配置提交复用同一扩展集合的已发布目录，目录留待对账刷新
+    /// 配置提交复用已发布的 Provider 目录，目录留待对账刷新
     pub(crate) async fn compile_with_cached_catalog(
         &self,
         previous: &RuntimeSnapshot,
@@ -310,7 +297,7 @@ impl RuntimeSnapshotCompiler {
         self.compile_inner(Some(previous), false).await
     }
 
-    /// 刷新目录，单个 Provider 读取失败时保留同一扩展集合的已知模型归属
+    /// 刷新目录，单个 Provider 读取失败时保留已知模型归属
     pub(crate) async fn compile_with_catalog_fallback(
         &self,
         previous: &RuntimeSnapshot,
@@ -323,11 +310,6 @@ impl RuntimeSnapshotCompiler {
         previous: Option<&RuntimeSnapshot>,
         refresh_catalog: bool,
     ) -> Result<RuntimeSnapshot, RuntimeSnapshotCompileError> {
-        // 同一配置 revision 的重试复用扩展候选，保留插件策略的发布一致性
-        let mut prepared_extensions: Option<(
-            ConfigRevision,
-            crate::routing::extensions::ExtensionSetReference,
-        )> = None;
         let mut instability = RuntimeSnapshotCompileError::CatalogChanged;
         for _ in 0..MAXIMUM_SNAPSHOT_STABILITY_ATTEMPTS {
             let facts = self
@@ -340,54 +322,10 @@ impl RuntimeSnapshotCompiler {
                 instability = RuntimeSnapshotCompileError::RevisionChanged;
                 continue;
             }
-            let revision = facts.config_revision;
-            let extensions = match &self.extensions {
-                Some(preparer) => {
-                    let must_prepare =
-                        prepared_extensions
-                            .as_ref()
-                            .is_none_or(|(prepared_revision, prepared)| {
-                                *prepared_revision != revision || !prepared.is_ready()
-                            });
-                    if must_prepare {
-                        let prepared = match preparer
-                            .prepare_with_request_body_limit(
-                                revision,
-                                usize::try_from(
-                                    facts.settings.responses_max_decompressed_body_bytes,
-                                )
-                                .unwrap_or(usize::MAX),
-                            )
-                            .await
-                        {
-                            Ok(prepared) => prepared,
-                            Err(_) => {
-                                // 扩展读取也可能遇到并发提交；只有版本已变才重读事实
-                                let observed =
-                                    self.store.current_config_revision().await.map_err(|_| {
-                                        RuntimeSnapshotCompileError::StoreUnavailable
-                                    })?;
-                                if observed == revision {
-                                    return Err(RuntimeSnapshotCompileError::ExtensionsUnavailable);
-                                }
-                                instability = RuntimeSnapshotCompileError::RevisionChanged;
-                                continue;
-                            }
-                        };
-                        prepared_extensions = Some((revision, prepared));
-                    }
-                    prepared_extensions
-                        .as_ref()
-                        .map(|(_, prepared)| prepared.clone())
-                }
-                None => None,
-            };
             let catalogs = &self.catalogs;
             let catalog_generations = catalogs.catalog_generations();
             let provider_kinds = catalog_generations.keys().cloned().collect();
-            let cached = previous.filter(|previous| {
-                previous.extensions().map(|set| set.id()) == extensions.as_ref().map(|set| set.id())
-            });
+            let cached = previous;
             let snapshot = compile_runtime_snapshot(
                 facts,
                 catalogs.as_ref(),
@@ -399,24 +337,13 @@ impl RuntimeSnapshotCompiler {
             .await?;
             let observed_generations = catalogs.catalog_generations();
             if catalog_generations == observed_generations {
-                if extensions.is_some()
-                    && self
-                        .store
-                        .current_config_revision()
-                        .await
-                        .map_err(|_| RuntimeSnapshotCompileError::StoreUnavailable)?
-                        != revision
-                {
-                    instability = RuntimeSnapshotCompileError::RevisionChanged;
-                    continue;
-                }
-                let snapshot = snapshot
-                    .with_provider_catalog_generations(if cached.is_some() && !refresh_catalog {
+                let snapshot = snapshot.with_provider_catalog_generations(
+                    if cached.is_some() && !refresh_catalog {
                         BTreeMap::new()
                     } else {
                         observed_generations
-                    })
-                    .with_extensions(extensions);
+                    },
+                );
                 return Ok(snapshot);
             }
             instability = RuntimeSnapshotCompileError::CatalogChanged;
@@ -630,7 +557,6 @@ async fn compile_runtime_snapshot(
 pub struct RuntimeSnapshot {
     settings: Arc<CompiledSettings>,
     privacy_compiler: Option<Arc<dyn crate::settings::privacy::PrivacyPolicyCompiler>>,
-    extensions: Option<crate::routing::extensions::ExtensionSetReference>,
     revision: ConfigRevision,
     providers: Arc<BTreeSet<ProviderKind>>,
     provider_models: Arc<BTreeMap<ProviderKind, BTreeMap<UpstreamModelId, ModelCapabilities>>>,
@@ -650,16 +576,6 @@ impl RuntimeSnapshot {
         &self.settings.values
     }
 
-    pub(crate) fn resolve_settings(
-        self: &Arc<Self>,
-        values: &SettingsValues,
-    ) -> Result<Arc<Self>, RuntimeSnapshotCompileError> {
-        if self.settings() == values {
-            return Ok(self.clone());
-        }
-        self.with_settings(values).map(Arc::new)
-    }
-
     /// 只替换设置及其编译结果，目录、发布代次和身份事实共享原快照
     pub fn with_settings(
         &self,
@@ -675,50 +591,6 @@ impl RuntimeSnapshot {
             settings: Arc::new(settings),
             ..self.clone()
         })
-    }
-
-    #[must_use]
-    pub fn with_extensions(
-        mut self,
-        extensions: Option<crate::routing::extensions::ExtensionSetReference>,
-    ) -> Self {
-        self.extensions = extensions;
-        self
-    }
-
-    #[must_use]
-    pub const fn extensions(&self) -> Option<&crate::routing::extensions::ExtensionSetReference> {
-        self.extensions.as_ref()
-    }
-
-    fn model_aliases(&self) -> &[super::ContributedModelAlias] {
-        self.extensions
-            .as_ref()
-            .map_or(&[], |set| set.model_aliases())
-    }
-
-    fn contributed_models(&self) -> &[super::ContributedModel] {
-        self.extensions.as_ref().map_or(&[], |set| set.models())
-    }
-
-    pub(crate) fn contributed_models_for_scope(
-        &self,
-        provider: &ProviderKind,
-        scope: &FrozenAccountScope,
-    ) -> impl Iterator<Item = &super::ContributedModel> {
-        self.contributed_models().iter().filter(move |model| {
-            &model.provider == provider
-                && model.accounts.iter().any(|account| {
-                    scope.account_provider(account) == Some(provider)
-                        && scope.allows_model(account, &self.mapped_model(model.id.as_str()))
-                })
-        })
-    }
-
-    fn model_alias(&self, model: &str) -> Option<&super::ContributedModelAlias> {
-        self.model_aliases()
-            .iter()
-            .find(|alias| alias.id.as_str() == model)
     }
 
     #[must_use]
@@ -821,7 +693,6 @@ impl RuntimeSnapshot {
         Ok(Self {
             settings: Arc::new(settings),
             privacy_compiler,
-            extensions: None,
             revision,
             providers: Arc::new(provider_set),
             provider_models: Arc::new(model_map),
@@ -895,23 +766,9 @@ impl RuntimeSnapshot {
             );
         }
         models.extend(
-            self.settings
-                .values
-                .model_mappings
+            self.model_mappings_for_provider(provider)
                 .keys()
                 .filter_map(|model| PublicModelId::new(model.clone()).ok()),
-        );
-        models.extend(
-            self.model_aliases()
-                .iter()
-                .filter(|alias| &alias.provider == provider)
-                .map(|alias| alias.id.clone()),
-        );
-        models.extend(
-            self.contributed_models()
-                .iter()
-                .filter(|model| &model.provider == provider)
-                .map(|model| model.id.clone()),
         );
         models.into_iter().collect()
     }
@@ -931,8 +788,8 @@ impl RuntimeSnapshot {
                 profiles.insert(public_model, presentation.clone());
             }
         }
-        for alias in self.settings.values.model_mappings.keys() {
-            let target = self.mapped_model(alias);
+        for alias in self.model_mappings_for_provider(provider).keys() {
+            let target = self.mapped_model(provider, alias);
             let Some(presentation) = presentations.iter().find_map(|(model, presentation)| {
                 (model.as_str() == target).then_some(presentation)
             }) else {
@@ -940,15 +797,6 @@ impl RuntimeSnapshot {
             };
             if let Ok(public_model) = PublicModelId::new(alias.clone()) {
                 profiles.insert(public_model, presentation.clone());
-            }
-        }
-        for alias in self
-            .model_aliases()
-            .iter()
-            .filter(|alias| &alias.provider == provider)
-        {
-            if let Some(presentation) = presentations.get(&alias.target) {
-                profiles.insert(alias.id.clone(), presentation.clone());
             }
         }
         profiles
@@ -1012,16 +860,6 @@ impl RuntimeSnapshot {
         profiles.retain(|profile| {
             self.native_catalog_model_allowed_for_scope(provider, profile.model(), scope)
         });
-        // Provider 画像按公开 ID 排序，追加的插件画像保留注册顺序，不参与二分查找
-        let provider_count = profiles.len();
-        for model in self.contributed_models_for_scope(provider, scope) {
-            match profiles[..provider_count]
-                .binary_search_by(|profile| profile.model().cmp(&model.id))
-            {
-                Ok(index) => profiles[index].presentation.clone_from(&model.presentation),
-                Err(_) => profiles.push(model.public_profile()),
-            }
-        }
         profiles
     }
 
@@ -1035,29 +873,15 @@ impl RuntimeSnapshot {
         if !self.providers.contains(provider) {
             return false;
         }
-        if self
-            .model_alias(public_model.as_str())
-            .is_some_and(|alias| &alias.provider != provider)
-        {
-            return false;
-        }
         let Ok(upstream_model) =
-            UpstreamModelId::from_client_wire(self.mapped_model(public_model.as_str()))
+            UpstreamModelId::from_client_wire(self.mapped_model(provider, public_model.as_str()))
         else {
             return false;
         };
         self.provider_models
             .get(provider)
             .is_some_and(|models| models.contains_key(&upstream_model))
-            || self
-                .contributed_models()
-                .iter()
-                .any(|model| &model.provider == provider && &model.id == public_model)
             || (!self.exhaustive_provider_catalogs.contains(provider)
-                && !self
-                    .contributed_models()
-                    .iter()
-                    .any(|model| &model.id == public_model)
                 && !self.is_known_upstream_model(&upstream_model))
     }
 
@@ -1072,40 +896,19 @@ impl RuntimeSnapshot {
         let Some(provider) = scope.account_provider(account) else {
             return false;
         };
-        let upstream = self.mapped_model(public_model.as_str());
+        let upstream = self.mapped_model(provider, public_model.as_str());
         if !scope.allows_model(account, &upstream)
             || !self.contains_public_model_for_provider(public_model, provider)
         {
             return false;
         }
-        let Ok(upstream) = UpstreamModelId::from_client_wire(upstream) else {
-            return false;
-        };
-        let native = self
-            .provider_models
-            .get(provider)
-            .is_some_and(|models| models.contains_key(&upstream));
-        // 仅由适配器贡献的模型仍受声明账号范围限制，不能借发现型目录扩大资格
-        native
-            || !self
-                .contributed_models()
-                .iter()
-                .any(|model| &model.provider == provider && &model.id == public_model)
-            || self.contributed_models().iter().any(|model| {
-                &model.provider == provider
-                    && &model.id == public_model
-                    && model.accounts.contains(account)
-            })
+        true
     }
 
     fn is_known_upstream_model(&self, upstream_model: &UpstreamModelId) -> bool {
         self.provider_models
             .values()
             .any(|models| models.contains_key(upstream_model))
-            || self
-                .contributed_models()
-                .iter()
-                .any(|model| model.id.as_str() == upstream_model.as_str())
     }
 
     #[must_use]
@@ -1127,15 +930,6 @@ impl RuntimeSnapshot {
         scope: &FrozenAccountScope,
     ) -> bool {
         self.native_catalog_model_allowed_for_scope(provider, public_model, scope)
-            || self.contributed_models().iter().any(|model| {
-                &model.provider == provider
-                    && &model.id == public_model
-                    && model.accounts.iter().any(|account| {
-                        scope.account_provider(account) == Some(provider)
-                            && scope
-                                .allows_model(account, &self.mapped_model(public_model.as_str()))
-                    })
-            })
     }
 
     fn native_catalog_model_allowed_for_scope(
@@ -1144,7 +938,7 @@ impl RuntimeSnapshot {
         public_model: &PublicModelId,
         scope: &FrozenAccountScope,
     ) -> bool {
-        let upstream_model = self.mapped_model(public_model.as_str());
+        let upstream_model = self.mapped_model(provider, public_model.as_str());
         match self
             .model_catalog_accounts
             .get(provider)
@@ -1154,33 +948,18 @@ impl RuntimeSnapshot {
                 scope.account_provider(account) == Some(provider)
                     && scope.allows_model(account, &upstream_model)
             }),
-            None => {
-                // 只有插件声明的模型不能借非完整原生目录扩大到其他账号
-                let native = self.provider_models.get(provider).is_some_and(|models| {
-                    models.keys().any(|model| model.as_str() == upstream_model)
-                });
-                let contributed = self
-                    .contributed_models()
-                    .iter()
-                    .any(|model| &model.provider == provider && &model.id == public_model);
-                (native || !contributed) && scope.allows_provider_model(provider, &upstream_model)
-            }
+            None => scope.allows_provider_model(provider, &upstream_model),
         }
     }
 
     #[must_use]
-    pub fn mapped_model(&self, requested: &str) -> String {
-        if let Some(alias) = self.model_alias(requested) {
-            return alias.target.as_str().to_owned();
-        }
+    pub fn mapped_model(&self, provider: &ProviderKind, requested: &str) -> String {
         let original = requested;
         let mut current = original.to_owned();
         let mut seen = BTreeSet::new();
         for _ in 0..20 {
             let Some(target) = self
-                .settings
-                .values
-                .model_mappings
+                .model_mappings_for_provider(provider)
                 .get(&current)
                 .map(String::as_str)
             else {
@@ -1192,6 +971,18 @@ impl RuntimeSnapshot {
             current = target.to_owned();
         }
         original.to_owned()
+    }
+
+    /// 映射只在所属供应商内部解释；同名别名不能改变协议或扩大账号授权。
+    fn model_mappings_for_provider(&self, provider: &ProviderKind) -> &BTreeMap<String, String> {
+        match provider.as_str() {
+            "openai" => &self.settings.values.model_mappings,
+            "anthropic" => &self.settings.values.anthropic_model_mappings,
+            _ => {
+                static EMPTY: BTreeMap<String, String> = BTreeMap::new();
+                &EMPTY
+            }
+        }
     }
 
     pub fn client_policies(&self) -> impl Iterator<Item = &ClientPolicy> {
@@ -1230,6 +1021,11 @@ impl RuntimeSnapshot {
         &self.settings.min_codex_client_versions
     }
 
+    #[must_use]
+    pub fn min_claude_code_version(&self) -> Option<&crate::policy::ClaudeCodeVersion> {
+        self.settings.min_claude_code_version.as_ref()
+    }
+
     pub fn plan(
         &self,
         public_model: &PublicModelId,
@@ -1247,13 +1043,13 @@ impl RuntimeSnapshot {
         operation: &Operation,
         context: &RoutingContext,
     ) -> Result<RoutingPlan, RoutingError> {
-        self.plan_inner(
-            public_model,
-            operation,
-            self.all_account_scope(),
-            context,
-            false,
-        )
+        // 探测没有 Client Key，沿用同一发布快照的全局画像
+        let scope = self
+            .all_account_scope()
+            .as_ref()
+            .clone()
+            .with_request_profiles(self.settings().request_profiles().clone());
+        self.plan_inner(public_model, operation, Arc::new(scope), context, false)
     }
 
     fn plan_inner(
@@ -1272,38 +1068,27 @@ impl RuntimeSnapshot {
         }
 
         let requested_model = public_model.as_str();
-        let mapped_model = self.mapped_model(requested_model);
-        let upstream_model = if self
-            .settings
-            .values
-            .model_mappings
-            .contains_key(requested_model)
-            || self.model_alias(requested_model).is_some()
-        {
-            UpstreamModelId::new(mapped_model)
-        } else {
-            UpstreamModelId::from_client_wire(mapped_model)
-        }
-        .map_err(|_| RoutingError::InvalidIdentifier)?;
-        // 归属先于账号范围、能力与路由约束判定，原 Provider 被排除不能变成跨平台透传
-        let known_model = self.is_known_upstream_model(&upstream_model)
-            || self
-                .contributed_models()
-                .iter()
-                .any(|model| &model.id == public_model);
+        let mut known_model = false;
 
         let providers = context.required_provider.as_ref().map_or_else(
             || account_scope.provider_kinds().clone(),
             |provider| BTreeSet::from([provider.clone()]),
         );
         for provider in &providers {
-            if !self.providers.contains(provider) {
-                continue;
-            }
-            if self
-                .model_alias(public_model.as_str())
-                .is_some_and(|alias| &alias.provider != provider)
+            let mapped = self.mapped_model(provider, requested_model);
+            let upstream_model = if self
+                .model_mappings_for_provider(provider)
+                .contains_key(requested_model)
             {
+                UpstreamModelId::new(mapped)
+            } else {
+                UpstreamModelId::from_client_wire(mapped)
+            }
+            .map_err(|_| RoutingError::InvalidIdentifier)?;
+            // 先记录模型归属，路由限制不能把其他供应商的已知模型变成未知透传。
+            let provider_known_model = self.is_known_upstream_model(&upstream_model);
+            known_model |= provider_known_model;
+            if !self.providers.contains(provider) {
                 continue;
             }
             if context
@@ -1324,64 +1109,19 @@ impl RuntimeSnapshot {
                 .provider_models
                 .get(provider)
                 .and_then(|models| models.get(&upstream_model));
-            let contributions: Vec<_> = self
-                .contributed_models()
-                .iter()
-                .filter(|model| &model.provider == provider && &model.id == public_model)
-                .collect();
-            let mut candidate_scope = Arc::clone(&account_scope);
-            let emulated_features = if contributions.is_empty() {
-                match capabilities {
-                    Some(capabilities) => {
-                        let Some(emulated) = capabilities.match_requirements(&requirements) else {
-                            continue;
-                        };
-                        emulated
-                    }
-                    None if known_model || self.exhaustive_provider_catalogs.contains(provider) => {
+            let emulated_features = match capabilities {
+                Some(capabilities) => {
+                    let Some(emulated) = capabilities.match_requirements(&requirements) else {
                         continue;
-                    }
-                    None => BTreeSet::new(),
+                    };
+                    emulated
                 }
-            } else {
-                let native = capabilities.and_then(|value| value.match_requirements(&requirements));
-                let capable_accounts: BTreeSet<_> = contributions
-                    .iter()
-                    .filter(|model| {
-                        model
-                            .capabilities
-                            .match_requirements(&requirements)
-                            .is_some()
-                    })
-                    .flat_map(|model| model.accounts.iter())
-                    .filter(|account| {
-                        account_scope.account_provider(account) == Some(provider)
-                            && account_scope.allows_model(account, upstream_model.as_str())
-                    })
-                    .cloned()
-                    .collect();
-                if native.is_some() {
-                    // 这些账号实际由适配器执行，不能借用同名原生模型的能力
-                    let mut restricted = account_scope.as_ref().clone();
-                    for account in contributions.iter().flat_map(|model| &model.accounts) {
-                        if !capable_accounts.contains(account) {
-                            restricted = restricted.excluding_account(account.clone());
-                        }
-                    }
-                    candidate_scope = Arc::new(restricted);
-                } else {
-                    // restricted_to 的空集合表示不收窄，因此必须先拒绝空候选
-                    if capable_accounts.is_empty() {
-                        continue;
-                    }
-                    candidate_scope = Arc::new(
-                        account_scope.restricted_to(&Default::default(), &capable_accounts),
-                    );
-                }
-                if !candidate_scope.allows_provider_model(provider, upstream_model.as_str()) {
+                None if provider_known_model
+                    || self.exhaustive_provider_catalogs.contains(provider) =>
+                {
                     continue;
                 }
-                native.unwrap_or_default()
+                None => BTreeSet::new(),
             };
             candidates.push(ProviderCandidate {
                 provider: provider.clone(),
@@ -1389,15 +1129,10 @@ impl RuntimeSnapshot {
                     .provider_model_presentations
                     .get(provider)
                     .and_then(|models| models.get(&upstream_model))
-                    .cloned()
-                    .or_else(|| {
-                        contributions
-                            .first()
-                            .map(|model| model.presentation.clone())
-                    }),
+                    .cloned(),
                 upstream_model: Some(upstream_model.clone()),
                 emulated_features,
-                account_scope: candidate_scope,
+                account_scope: Arc::clone(&account_scope),
             });
         }
 
@@ -1419,7 +1154,10 @@ impl RuntimeSnapshot {
             {
                 return Err(RoutingError::ModelNotFound {
                     model: public_model.as_str().to_owned(),
-                    mapped_model: self.mapped_model(public_model.as_str()),
+                    mapped_model: context.required_provider.as_ref().map_or_else(
+                        || public_model.as_str().to_owned(),
+                        |provider| self.mapped_model(provider, public_model.as_str()),
+                    ),
                 });
             }
             return Err(RoutingError::NoCapableProvider {
@@ -1436,11 +1174,6 @@ impl RuntimeSnapshot {
             pricing: Arc::clone(&self.settings.values.pricing),
             request_location: self.settings.request_location.clone(),
             privacy: self.settings.privacy.clone(),
-            account_error_protection: Arc::clone(&self.settings.account_error_protection),
-            account_error_protection_revision: self
-                .settings
-                .values
-                .account_error_protection_revision,
             account_selection_policy: self.settings.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)
@@ -1463,6 +1196,13 @@ impl RuntimeSnapshot {
         account_scope: Arc<FrozenAccountScope>,
         context: &RoutingContext,
     ) -> Result<RoutingPlan, RoutingError> {
+        // 原生 Claude 的生成与计数共享映射；原始模型仍留在根请求事实中。
+        let mapped_model = upstream_model
+            .filter(|_| provider.as_str() == "anthropic")
+            .map(|model| UpstreamModelId::new(self.mapped_model(provider, model.as_str())))
+            .transpose()
+            .map_err(|_| RoutingError::InvalidIdentifier)?;
+        let upstream_model = mapped_model.as_ref().or(upstream_model);
         let available = !account_scope.provider_kinds().is_empty()
             && account_scope.provider_kinds().contains(provider)
             && self.providers.contains(provider)
@@ -1526,11 +1266,6 @@ impl RuntimeSnapshot {
             pricing: Arc::clone(&self.settings.values.pricing),
             request_location: self.settings.request_location.clone(),
             privacy: self.settings.privacy.clone(),
-            account_error_protection: Arc::clone(&self.settings.account_error_protection),
-            account_error_protection_revision: self
-                .settings
-                .values
-                .account_error_protection_revision,
             account_selection_policy: self.settings.account_selection_policy,
             operation: operation.kind(),
             max_attempts: NonZeroU32::new(super::MAX_REQUEST_ATTEMPTS)

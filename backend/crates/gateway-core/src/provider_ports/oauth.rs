@@ -114,8 +114,8 @@ pub enum OAuthPendingPutOutcome {
 
 /// OAuth 回调处理取得临时 flow 的独占权结果
 ///
-/// 与一次性消费不同，Provider 在上游换取令牌失败时可以释放 claim，让同一 flow
-/// 使用新的回调地址重试；只有完整校验成功后才会消费 flow
+/// 释放 claim 不回滚已持久化的阶段；Provider 必须区分可重试失败、已换码和结果未知。
+/// 只有完整提交成功后才会消费 flow，不能因重试再次消费一次性授权材料。
 #[derive(Clone, PartialEq)]
 pub enum OAuthPendingClaimOutcome {
     Claimed(OpaqueProviderData),
@@ -173,6 +173,24 @@ pub trait OAuthPendingFlowPort: Send + Sync {
         owner: &'a OAuthPendingBinding,
         claim: &'a OAuthPendingBinding,
     ) -> BoxFuture<'a, Result<OAuthPendingReleaseOutcome, ProviderStoreError>>;
+
+    /// 仅当前未到期的领取者可更新阶段；不得延长 flow TTL。秘密材料由 Provider 加密后传入。
+    /// 未实现恢复能力的 adapter 明确失败，不能将旧的 claim 能力误当作已保存检查点。
+    fn checkpoint_claim<'a>(
+        &'a self,
+        _provider_kind: &'a ProviderKind,
+        _flow: &'a OAuthPendingBinding,
+        _owner: &'a OAuthPendingBinding,
+        _claim: &'a OAuthPendingBinding,
+        _payload: &'a OpaqueProviderData,
+    ) -> BoxFuture<'a, Result<bool, ProviderStoreError>> {
+        Box::pin(async {
+            Err(ProviderStoreError::new(
+                ProviderStoreErrorKind::Unavailable,
+                "OAuth checkpoints are not supported",
+            ))
+        })
+    }
 
     fn consume_claim<'a>(
         &'a self,

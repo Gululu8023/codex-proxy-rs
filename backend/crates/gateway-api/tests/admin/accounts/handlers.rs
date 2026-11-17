@@ -16,6 +16,7 @@ async fn peer_refresh_uses_the_account_quota_endpoint_and_requires_admin() {
     fixture.auth.insert_session("valid-session");
     *fixture.account.lock().unwrap() = Some(account_page_item(
         AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: CredentialState::Ready,
             access_token_expires_at: None,
@@ -73,6 +74,7 @@ async fn account_model_reads_and_refreshes_preserve_provider_observation_time() 
     let observed_at: DateTime<Utc> = "2026-09-12T08:00:00Z".parse().unwrap();
     *fixture.account.lock().unwrap() = Some(account_page_item(
         AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: CredentialState::Ready,
             access_token_expires_at: None,
@@ -124,7 +126,7 @@ async fn account_model_reads_and_refreshes_preserve_provider_observation_time() 
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
             assert_eq!(
                 value["data"]["models"],
-                json!([{ "id": "model-a", "label": "model-a" }])
+                json!([{ "id": "model-a", "label": "Model A" }])
             );
             assert_eq!(
                 value["data"]["observedAt"],
@@ -161,6 +163,7 @@ async fn account_proxy_binding_is_distinct_from_the_redacted_endpoint() {
     ] {
         let now = Utc::now();
         let facts = AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: CredentialState::Ready,
             access_token_expires_at: None,
@@ -220,18 +223,13 @@ async fn account_cooldown_returns_an_instant_and_server_formatted_recovery() {
             ),
             (
                 Some(7200),
-                AccountCooldownKind::ErrorProtection,
+                AccountCooldownKind::RateLimit,
                 Some("剩余 2 小时"),
             ),
             (
                 Some(7500),
-                AccountCooldownKind::ErrorProtectionProbe,
+                AccountCooldownKind::RateLimit,
                 Some("剩余 2 小时 5 分"),
-            ),
-            (
-                Some(-60),
-                AccountCooldownKind::ErrorProtectionProbe,
-                Some("等待探测成功"),
             ),
             (Some(20), AccountCooldownKind::RateLimit, None),
             (None, AccountCooldownKind::RateLimit, None),
@@ -239,6 +237,7 @@ async fn account_cooldown_returns_an_instant_and_server_formatted_recovery() {
             let now = Utc::now();
             let until = seconds.map(|seconds| now + Duration::seconds(seconds));
             let facts = AccountStatusFacts {
+                quota_paused: false,
                 enabled: true,
                 credential_state: CredentialState::Ready,
                 access_token_expires_at: None,
@@ -250,13 +249,7 @@ async fn account_cooldown_returns_an_instant_and_server_formatted_recovery() {
                 last_error_reason: None,
                 last_error_message: None,
             };
-            let mut item = account_page_item(facts, now, "oauth");
-            if kind.is_error_protection() {
-                item.protection_rules = vec![gateway_core::account::AccountProtectionMatch {
-                    id: "removed-rule".to_owned(),
-                    name: "触发时的规则名称".to_owned(),
-                }];
-            }
+            let item = account_page_item(facts, now, "oauth");
             *fixture.account.lock().unwrap() = Some(item);
             let response = admin::accounts::router::<AdminTestState>()
                 .with_state(fixture.state())
@@ -274,17 +267,6 @@ async fn account_cooldown_returns_an_instant_and_server_formatted_recovery() {
             let body = to_bytes(response.into_body(), 32768).await.unwrap();
             let value: serde_json::Value = serde_json::from_slice(&body).unwrap();
             let quota = &value["data"]["items"][0]["quota"];
-            if kind.is_error_protection() {
-                assert_eq!(quota["rateLimitReason"], "error_protection");
-                assert_eq!(
-                    quota["protectionRules"],
-                    serde_json::json!([
-                        {"id":"removed-rule", "name":"触发时的规则名称"}
-                    ])
-                );
-            } else {
-                assert_eq!(quota["protectionRules"], serde_json::json!([]));
-            }
             match until {
                 Some(until) => {
                     assert_eq!(
@@ -323,6 +305,7 @@ async fn account_quota_refresh_time_uses_server_clock_and_deployment_timezone() 
         let now = Utc::now();
         *fixture.account.lock().unwrap() = Some(account_page_item(
             AccountStatusFacts {
+                quota_paused: false,
                 enabled: true,
                 credential_state: CredentialState::Ready,
                 access_token_expires_at: None,
@@ -356,6 +339,7 @@ async fn account_quota_refresh_time_uses_server_clock_and_deployment_timezone() 
             ),
         ] {
             *fixture.provider_quota.lock().unwrap() = Some(ProviderQuota {
+                paused_windows: Vec::new(),
                 upstream: None,
                 plan_type: None,
                 observed_at,
@@ -404,8 +388,9 @@ fn account_page_item(
     use gateway_core::account::resolve_account_status;
 
     AccountPageItem {
-        protection_rules: Vec::new(),
         account: AccountRecord {
+            quota_limits: Default::default(),
+            quota_paused: false,
             auto_use_quota_credits: false,
             outbound_proxy_id: None,
             outbound_proxy_enabled: true,
@@ -458,6 +443,7 @@ async fn account_usage_preserves_periods_cache_counts_and_missing_values() {
     fixture.auth.insert_session("valid-session");
     let now = Utc::now();
     let facts = AccountStatusFacts {
+        quota_paused: false,
         enabled: true,
         credential_state: CredentialState::Ready,
         access_token_expires_at: None,
@@ -741,6 +727,7 @@ async fn concurrency_details_require_admin_validate_paging_and_report_lease_time
     fixture.auth.insert_session("valid-session");
     *fixture.account.lock().unwrap() = Some(account_page_item(
         gateway_core::account::AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: gateway_core::account::CredentialState::Ready,
             access_token_expires_at: None,

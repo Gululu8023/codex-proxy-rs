@@ -1,5 +1,17 @@
 {
   "accounts": {
+    "quotaLimits": {
+      "badge": "额度暂停",
+      "title": "通用额度调度上限",
+      "reached": "{windows}已达调度上限",
+      "expectedReset": "预计重置",
+      "windowReset": "{window}预计重置",
+      "recovery": "等待额度恢复，或调整窗口上限",
+      "help": "任一窗口达限即暂停调度，均低于上限后恢复",
+      "unlimited": "不限制",
+      "empty": "没有已观测的通用额度窗口",
+      "invalid": "请输入 1～100 的整数，留空表示不限制"
+    },
     "quota": {
       "general": "通用额度",
       "usageInThisWindow": "窗口消耗：{localUsageDisplay}",
@@ -54,7 +66,19 @@
         "days": "{duration}日额度",
         "hours": "{duration}小时额度",
         "minutes": "{duration}分钟额度"
-      }
+      },
+      "states": {
+        "unsampled": "未采样",
+        "stale": "观测已过期",
+        "query_failed": "查询失败",
+        "exhausted": "订阅额度已耗尽",
+        "sampled": "官方订阅观测"
+      },
+      "sources": {
+        "oauth_usage": "订阅查询"
+      },
+      "accountScope": "整个账号",
+      "headerObserved": "响应头观测（以上游声明范围为准）"
     },
     "account": "账号",
     "connectionTest": {
@@ -187,6 +211,13 @@
       "importAccount": "导入账号",
       "editSelected": "编辑 ({count})"
     },
+    "modelCatalog": {
+      "title": "模型目录",
+      "modelId": "模型 ID",
+      "modelName": "模型名称",
+      "observedAt": "目录更新时间",
+      "search": "搜索模型"
+    },
     "modelAccess": {
       "reserve": "保留",
       "allowlist": "白名单",
@@ -207,6 +238,8 @@
       "addToDenylistHint": "保存后，此账号将拒绝该模型",
       "loadingModel": "加载模型中",
       "noModels": "暂无模型",
+      "retryHint": "请刷新以重新加载模型目录",
+      "noMatchingModels": "没有匹配的模型",
       "selectOrAddAtLeastOneModel": "请至少选择或添加一个模型",
       "configureUpToModels": "最多配置 256 个模型",
       "invalidModelId": "请使用有效的精确模型 ID，不支持通配符",
@@ -234,15 +267,14 @@
     "proxy": {
       "keepCurrent": "保持当前",
       "keepExisting": "保留各账号的连接设置",
-      "directConnection": "直连",
-      "notUsingProxy": "不使用代理",
+      "direct": "直连",
       "disabledSuffix": "（已禁用）",
       "testFailed": "（测试失败）",
       "notTested": "（未测试）",
       "outboundTunnel": "出站隧道",
       "testExit": "测试出口",
-      "selectToTest": "选择直连或受管理的代理后可测试出口",
-      "disabledUsesDirect": "代理已禁用，将测试服务器直连出口",
+      "selectToTest": "选择出口后可测试连接",
+      "disabledUsesDirect": "代理已禁用，将测试直连出口",
       "connected": "出口连通 · {latencyMs} ms",
       "testIncomplete": "未取得测试结果，请重新测试"
     },
@@ -346,7 +378,6 @@
       "reauthorizeAccount": "重新授权账号",
       "settingsDescription": "设置将应用于本次导入的账号",
       "reauthorizeDescription": "完成授权后更新账号凭据",
-      "callbackLabel": "回调地址或授权码",
       "callbackAddress": "回调地址",
       "callbackPlaceholder": "回调地址、?code=...&state=... 或授权码",
       "callbackHelp": "打开授权链接，完成浏览器授权后粘贴回调地址或授权码",
@@ -511,20 +542,21 @@
         "unconfirmed": "上次自动重置结果待确认",
         "expiredUnconfirmed": "上次重置结果未能确认，卡片已到期",
         "queryFailed": "最近查询失败，将按计划重试",
+        "awaitingWeeklyRecovery": "已用卡，等待周额度恢复",
         "aboveThreshold": "剩余周额度高于上限，稍后检查",
         "quotaUnavailable": "暂时无法确认周额度，稍后检查",
         "resetNotNeeded": "当前额度窗口不需要重置，稍后检查",
         "resetIncomplete": "上游未完成最近一次自动重置",
         "scheduleHelp": "每天随机查询一次，各账号错开时间",
-        "verifyHelp": "临期使用前核对卡片，已在其他地方使用的会自动跳过",
+        "verifyHelp": "使用前重新核对卡片和适用的周额度条件",
         "label": "自动使用临期重置卡"
       },
       "automaticallyUseResetCard": "自动使用重置卡",
       "automaticUsageRules": "自动使用规则",
-      "setGlobalLeadTime": "设置全局提前时间",
+      "setTiming": "设置用卡时机",
+      "weeklyThreshold": "剩余周额度 ≤ {percent}%",
       "minutesInAdvance": "提前 {leadMinutes} 分钟",
-      "leadTime": "提前时间",
-      "nextUse": "下次使用 {nextConsumeAtDisplay}",
+      "nextUse": "临期用卡时间 {nextConsumeAtDisplay}",
       "limitReset": "额度重置",
       "confirmLastReset": "确认上次重置",
       "confirmResetAmount": "确认重置额度",
@@ -580,15 +612,9 @@
       "reauthorizeHelp": "重新授权后，账号会重新参与调度",
       "replaceCredentialsHelp": "请更新或重新导入凭据，再次测试连接",
       "upstreamRestrictionHelp": "请确认上游账号状态，解除限制后再启用",
-      "recoveryProbeHelp": "冷却结束后进行恢复探测，成功后恢复调度，也可手动恢复账号",
-      "recoveryHelp": "冷却结束后自动恢复调度，也可手动恢复账号",
       "nextAttempt": "，下次尝试：{nextRefreshDisplay}",
       "clickOrFocusToViewDetails": "{title}，{description}{retry}，点击或聚焦查看详情",
-      "resumeDetection": "恢复探测",
-      "expectedToRecover": "预计恢复",
-      "errorProtection": "错误保护",
-      "protectionFailuresHelp": "匹配规则的失败累计达到阈值，系统已暂停该账号的调度",
-      "matchedProtectionRules": "触发时命中的规则"
+      "expectedToRecover": "预计恢复"
     },
     "fields": {
       "platformType": "平台",

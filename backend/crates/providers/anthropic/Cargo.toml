@@ -1,0 +1,38 @@
+[package]
+name = "provider-anthropic"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish.workspace = true
+rust-version.workspace = true
+autotests = false
+
+[dependencies]
+gateway-veil = { path = "../../gateway-veil" }
+async-stream = "0.3.6"
+async-trait = "0.1.89"
+base64 = "0.23.0"
+bytes = "1.11.1"
+chrono = { version = "0.4.45", features = ["clock", "serde"] }
+futures = "0.3.32"
+gateway-admin = { path = "../../gateway-admin" }
+gateway-core = { path = "../../gateway-core" }
+gateway-egress = { path = "../../gateway-egress" }
+getrandom = "0.4.3"
+hex = "0.4.3"
+reqwest = { version = "=0.12.28", features = ["json", "stream", "rustls-tls-native-roots", "socks"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = { version = "1.0.150", features = ["arbitrary_precision", "preserve_order"] }
+sha2 = "0.11.0"
+subtle = "2.6.1"
+thiserror = "2.0.18"
+tokio = { version = "=1.53.3", default-features = false, features = ["macros", "sync", "time"] }
+url = "2.5.8"
+xxhash-rust = { version = "0.8.16", features = ["xxh64"] }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3.27.0"
+wiremock = "0.6.5"

@@ -85,6 +85,7 @@ interface ConnectionTestFailureEvent {
 interface ConnectionTestTimestamp { occurredAtDisplay: string, timeDisplay: string }
 
 type ConnectionTestEvent = ConnectionTestTimestamp & (
+  | { type: 'stages', stages: { stage: string, elapsedMs: number, durationMs: number, succeeded: boolean, guard: { mode: string, action: string, wouldAction: string } | null, clientProfile?: { mode: string, version: string, userAgent: string, entry: string, platform: string, arch: string, sdkVersion: string, runtimeVersion: string, templateRevision: string, versionSource: string, verifiedAt: string | null } | null }[] }
   | ConnectionTestStartEvent
   | ConnectionTestRequestEvent
   | ConnectionTestStatusEvent
@@ -94,6 +95,7 @@ type ConnectionTestEvent = ConnectionTestTimestamp & (
 )
 
 const CONNECTION_TEST_EVENT_TYPES = new Set<ConnectionTestEvent['type']>([
+  'stages',
   'test_start',
   'request',
   'status',
@@ -371,6 +373,47 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
   }
 
   function handleConnectionTestEvent(event: ConnectionTestEvent) {
+    if (event.type === 'stages') {
+      if (testingAccount.value?.provider !== 'anthropic')
+        return
+      for (const [index, stage] of event.stages.filter(stage => stage.stage === 'anthropic.identity').entries()) {
+        if (stage.clientProfile)
+          setConnectionTestLog(`claude-identity-${index}`, `${t('settings.clientProfile.clientIdentitySource')} · ${stage.clientProfile.userAgent}`, 'info', stage.clientProfile, event)
+      }
+      const phases = [
+        'privacy_ready',
+        'selection',
+        'prompt_guard',
+        'redaction',
+        'credential',
+        'upstream',
+        'restoration',
+      ]
+      for (const phase of phases) {
+        const stages = event.stages.filter(stage => stage.stage === `anthropic.${phase}`)
+        if (!stages.length)
+          setConnectionTestLog(`claude-${phase}`, `${t(`claude.stages.${phase}`)} · ${t('claude.stageNotExecuted')}`, 'normal', undefined, event)
+        for (const [index, stage] of stages.entries()) {
+          // 阶段完成不等于强制审查通过，关闭和观察模式必须保留其实际含义。
+          const decision = phase === 'prompt_guard'
+            ? stage.guard
+              ? `${t(`guard.mode.${stage.guard.mode}`)} · ${t(`guard.action.${stage.guard.action}`)}${stage.guard.mode === 'observe'
+                ? ` · ${t('guard.would', {
+                  action: t(`guard.action.${stage.guard.wouldAction}`),
+                })}`
+                : ''}`
+              : t('guard.action.missing')
+            : (stage.succeeded
+                ? t('claude.stagePassed')
+                : t('claude.stageFailed'))
+          const enforced = phase !== 'prompt_guard' || (stage.guard?.mode === 'enforce' && stage.guard.action === 'allow')
+          setConnectionTestLog(`claude-${phase}-${index}`, `${t(`claude.stages.${phase}`)} · ${decision} · ${stage.durationMs} ms`, !stage.succeeded
+            ? 'danger'
+            : enforced ? 'success' : 'info', { elapsedMs: stage.elapsedMs, durationMs: stage.durationMs }, event)
+        }
+      }
+      return
+    }
     if (event.type === 'test_start') {
       connectionTestStartedAt.value = event.occurredAtDisplay
       connectionTestModel.value = event.model || connectionTestModel.value
@@ -448,7 +491,7 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
           message: t('accounts.connectionTest.modelsRefreshed', { count: result.models.length }),
         })
       }
-      else if (!connectionTestSelectedModel.value) {
+      else if (!connectionTestModelOptions.value.length) {
         connectionTestError.value = t('accounts.connectionTest.noModelsAvailable')
       }
     }
@@ -476,7 +519,10 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
     connectionTestModelOptions.value = Array.from(labels, ([value, label]) => ({ value, label }))
     connectionTestSelectedModel.value = labels.has(previousSelection)
       ? previousSelection
-      : connectionTestModelOptions.value[0]?.value || ''
+      // Claude 目录顺序不代表推荐，未保留有效选择时必须由用户明确选择。
+      : testingAccount.value?.provider === 'anthropic'
+        ? ''
+        : connectionTestModelOptions.value[0]?.value || ''
   }
 
   async function handleRefreshConnectionTestModels(account = testingAccount.value) {

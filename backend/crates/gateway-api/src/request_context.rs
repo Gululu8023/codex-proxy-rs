@@ -4,7 +4,7 @@ use axum::{
     extract::ConnectInfo,
     http::{HeaderMap, Request, header::USER_AGENT},
 };
-use gateway_core::engine::{extensions::RequestContext, middleware::MiddlewareHeader};
+use gateway_core::engine::{middleware::RequestHeader, request_context::RequestContext};
 use std::{
     net::{IpAddr, SocketAddr},
     sync::Arc,
@@ -24,7 +24,7 @@ pub(crate) fn capture<B>(request: &Request<B>) -> Arc<RequestContext> {
             .headers()
             .iter()
             .map(|(name, value)| {
-                MiddlewareHeader::new(
+                RequestHeader::new(
                     name.as_str(),
                     bytes::Bytes::copy_from_slice(value.as_bytes()),
                 )
@@ -35,7 +35,7 @@ pub(crate) fn capture<B>(request: &Request<B>) -> Arc<RequestContext> {
     })
 }
 
-/// 保留宿主的来源地址解析顺序，插件仍可从入口快照自行解释转发头
+/// 按宿主的来源地址解析顺序读取入口快照中的转发头
 pub(crate) fn request_client_context(
     headers: &HeaderMap,
     peer_address: Option<SocketAddr>,

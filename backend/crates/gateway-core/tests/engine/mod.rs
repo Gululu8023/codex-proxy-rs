@@ -1,14 +1,10 @@
 //! 执行引擎各阶段与端口合同的测试入口
 
-pub(crate) mod account_protection;
-mod admission;
+pub(crate) mod admission;
 mod connection;
 mod continuation;
 mod coordinator;
 mod execution;
-mod extensions;
-mod middleware;
-mod policy;
 mod provider;
 mod response_control;
 

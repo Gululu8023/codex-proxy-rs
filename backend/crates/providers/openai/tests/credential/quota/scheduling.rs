@@ -25,6 +25,7 @@ async fn persist_snapshot(
     let account = store.account(id).expect("created account");
     store
         .compare_and_swap_quota(QuotaObservation {
+            quota_pause: None,
             expected_connection: None,
             plan_type: None,
             account_id: account.id().clone(),
@@ -82,6 +83,7 @@ async fn old_weekly_quota_should_outweigh_one_in_flight_title_request() {
         .map(|account| AccountCandidate {
             inherited_concurrency: None,
             signals: AccountRuntimeSignals {
+                quota_reset_windows: None,
                 in_flight: u32::from(account.id().as_str() == "acct_74"),
                 last_started_at: None,
                 quota_reset_at: None,

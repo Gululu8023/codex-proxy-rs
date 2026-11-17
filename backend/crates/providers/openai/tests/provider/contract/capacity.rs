@@ -191,6 +191,7 @@ async fn guardian_and_normal_requests_use_independent_capacity_and_observations(
         leases.clone(),
     );
     let signals = |in_flight| AccountRuntimeSignals {
+        quota_reset_windows: None,
         in_flight,
         last_started_at: None,
         quota_reset_at: None,
@@ -323,6 +324,7 @@ async fn a_full_capacity_pool_does_not_block_the_other_pools_queue() {
         blocked_signals.lock().unwrap().insert(
             account.clone(),
             AccountRuntimeSignals {
+                quota_reset_windows: None,
                 in_flight: if guardian_waits { 1 } else { 2 },
                 last_started_at: None,
                 quota_reset_at: None,

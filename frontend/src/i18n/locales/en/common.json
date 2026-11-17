@@ -59,7 +59,6 @@
       "delete": "Delete",
       "create": "Create",
       "enable": "Enable",
-      "next": "Next",
       "confirm": "Confirm",
       "refresh": "Refresh",
       "save": "Save"
@@ -93,7 +92,6 @@
       "unlimited": "Unlimited",
       "default": "Default",
       "on": "On",
-      "none": "None",
       "off": "Off"
     },
     "form": {

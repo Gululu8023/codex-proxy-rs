@@ -166,6 +166,7 @@ export interface DashboardAccountUsage {
 export interface DashboardPoolSummary {
   total: number
   normal: number
+  quotaPaused: number
   quotaExhausted: number
   rateLimited: number
   disabled: number
@@ -195,6 +196,7 @@ export interface DashboardSummaryResponse {
 }
 
 interface DashboardQuery {
+  provider?: string
   period: 'today'
   asOf: number
   kind: string

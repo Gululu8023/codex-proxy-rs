@@ -152,6 +152,7 @@ async fn blocked_relay(
         ..LiveCapture::default()
     });
     let router = gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         gateway_api::ApiConfig {
             asset_directory: std::env::temp_dir(),
             cors_allowed_origins: Vec::new(),

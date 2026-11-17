@@ -15,10 +15,6 @@ pub(super) fn authentication_gateway_error(error: ClientAuthenticationError) -> 
             GatewayErrorKind::Internal,
             "Gateway configuration is unavailable.",
         ),
-        ClientAuthenticationError::ProviderUnavailable => GatewayError::new(
-            GatewayErrorKind::Internal,
-            "Client authentication service is unavailable.",
-        ),
     }
 }
 

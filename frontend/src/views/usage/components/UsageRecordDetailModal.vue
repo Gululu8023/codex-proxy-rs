@@ -310,7 +310,62 @@ const attemptRows = computed<AttemptRow[]>(() =>
   })),
 )
 
+function metadataObject(value: unknown): Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value)
+    ? value as Record<string, unknown>
+    : {}
+}
+const claudeUsage = computed(() => props.record?.provider === 'anthropic'
+  ? metadataObject(props.record.metadata.rawUsage)
+  : {})
 const billingItems = computed(() => {
+  if (props.record?.provider === 'anthropic') {
+    const costs = metadataObject(props.record.metadata.costBreakdown)
+    const amount = (field: string) => typeof costs[field] === 'string'
+      ? `USD ${costs[field]}`
+      : '—'
+    return [
+      {
+        label: t('usage.billing.basis'),
+        value: t('usage.billing.apiEquivalent'),
+      },
+      {
+        label: t('usage.billing.totalCost'),
+        value: amount('total'),
+        mono: true,
+      },
+      {
+        label: t('usage.request.input'),
+        value: amount('input'),
+        mono: true,
+      },
+      {
+        label: t('usage.metrics.output'),
+        value: amount('output'),
+        mono: true,
+      },
+      {
+        label: t('usage.request.cacheRead'),
+        value: amount('cacheRead'),
+        mono: true,
+      },
+      {
+        label: t('usage.request.cacheWrites'),
+        value: amount('cacheWrite'),
+        mono: true,
+      },
+      {
+        label: t('usage.billing.cacheWrite5m'),
+        value: amount('cacheWrite5m'),
+        mono: true,
+      },
+      {
+        label: t('usage.billing.cacheWrite1h'),
+        value: amount('cacheWrite1h'),
+        mono: true,
+      },
+    ]
+  }
   const value = billing.value
   if (!value) {
     return [
@@ -491,6 +546,20 @@ const tokenChartItems = computed(() => {
 const tokenChartComplete = computed(() => tokenChartItems.value.every(item => item.value !== null))
 const tokenDetailItems = computed(() => [
   ...tokenChartItems.value,
+  ...(props.record?.provider === 'anthropic'
+    ? ['ephemeral_5m_input_tokens', 'ephemeral_1h_input_tokens'].map((field, index) => {
+        const count = metadataObject(claudeUsage.value.cache_creation)[field]
+        return {
+          label: t(index === 0
+            ? 'usage.billing.cacheWrite5m'
+            : 'usage.billing.cacheWrite1h'),
+          display: typeof count === 'number'
+            ? formatInteger(count)
+            : '—',
+          color: null,
+        }
+      })
+    : []),
   {
     label: t('usage.request.totalOutput'),
     display: tokenDetails.value?.outputTokensDisplay ?? '—',
@@ -723,6 +792,9 @@ const tokenDonutOption = computed<EChartsOption>(() => {
     </div>
 
     <template #footer>
+      <RouterLink v-if="record" class="text-z-primary" :to="{ path: '/prompt-guard/records', query: { requestId: record.requestId } }">
+        {{ t('guard.tabs.records') }}
+      </RouterLink>
       <DiagnosticsDownloadButton :request-id="record?.requestId" :active="open && !loading" />
       <ZButton type="primary" @click="open = false">
         {{ t('common.actions.close') }}

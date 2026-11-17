@@ -1,6 +1,5 @@
 //! 单行 `model_requests`、账号重试与下游提交屏障测试
 
-use gateway_core::engine::probe::AccountProbeTarget;
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use std::num::NonZeroU32;
 use std::sync::{
@@ -719,10 +718,6 @@ impl ExecutionStore for FakeStore {
 }
 
 enum Script {
-    ProtectedStream {
-        account_id: &'static str,
-        items: Vec<Result<GatewayEvent, ProviderError>>,
-    },
     Stream {
         account_id: &'static str,
         items: Vec<Result<GatewayEvent, ProviderError>>,
@@ -840,12 +835,10 @@ impl Provider for ScriptedProvider {
             .expect("scripts lock")
             .pop_front()
             .expect("one script per provider call");
-        let protected = matches!(script, Script::ProtectedStream { .. });
         match script {
             Script::Error(error) => Err(error),
             Script::Pending => futures::future::pending().await,
-            Script::Stream { account_id, items }
-            | Script::ProtectedStream { account_id, items } => {
+            Script::Stream { account_id, items } => {
                 let candidate = request.candidate();
                 let metadata = ProviderCallMetadata::new(
                     candidate.provider().clone(),
@@ -867,19 +860,7 @@ impl Provider for ScriptedProvider {
                     )),
                     TrackedLease(Arc::clone(&self.released_leases)),
                 );
-                if protected {
-                    context
-                        .execute_middleware(
-                            request.operation().clone(),
-                            candidate.provider().clone(),
-                            Some("gpt-5".into()),
-                            ProviderAccountId::new(account_id).unwrap(),
-                            Box::new(move |_, _| Box::pin(async move { Ok(stream) })),
-                        )
-                        .await
-                } else {
-                    Ok(stream)
-                }
+                Ok(stream)
             }
             Script::HangingStream { account_id, items } => {
                 let candidate = request.candidate();
@@ -1168,24 +1149,22 @@ fn plan_with_profiles(
     fast_mode: FastMode,
     profiles: BTreeMap<ProviderKind, gateway_core::account::OpaqueProviderData>,
 ) -> RoutingPlan {
-    plan_with_protection(
+    plan_with_retry_limit(
         operation,
         account_selection_policy,
         request_location,
         fast_mode,
         profiles,
-        Default::default(),
         240,
     )
 }
 
-fn plan_with_protection(
+fn plan_with_retry_limit(
     operation: &Operation,
     account_selection_policy: AccountSelectionPolicy,
     request_location: gateway_core::account::RequestLocation,
     fast_mode: FastMode,
     profiles: BTreeMap<ProviderKind, gateway_core::account::OpaqueProviderData>,
-    protection: gateway_core::account::AccountErrorProtection,
     max_retry_after_seconds: u32,
 ) -> RoutingPlan {
     let provider = ProviderKind::new("openai").expect("provider");
@@ -1240,7 +1219,6 @@ fn plan_with_protection(
             .unwrap(),
         )
         .with_request_location(request_location, true)
-        .with_account_error_protection(protection)
         .with_max_retry_after_seconds(max_retry_after_seconds),
         vec![provider.clone()],
         vec![ProviderModel::new(
@@ -2491,6 +2469,129 @@ fn native_continuation_uses_provider_defined_owner_then_cross_account_recovery()
 }
 
 #[test]
+fn native_capacity_above_wait_limit_rotates_before_requesting_client_replay() {
+    for (seconds, replacement, rotations, expected_attempts) in [
+        (309, true, 1, 2),
+        (309, false, 1, 2),
+        (240, true, 1, 1),
+        (309, true, 0, 1),
+    ] {
+        let Operation::Generate(generate) = generate_operation() else {
+            unreachable!()
+        };
+        let operation =
+            Operation::Generate(generate.with_provider_session_state(
+                ProviderSessionState::new("openai", Map::new()).unwrap(),
+            ));
+        let route_plan = plan_with_retry_limit(
+            &operation,
+            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::MIN)
+                .with_max_account_rotations(rotations),
+            Default::default(),
+            FastMode::Default,
+            BTreeMap::new(),
+            240,
+        );
+        let original_body = Bytes::from_static(br#"{"error":{"code":"server_is_overloaded","headers":{"retry-after":"309","retry-after-ms":"309000"}}}"#);
+        let original = transient_rejection()
+            .with_retry_after(Duration::from_secs(seconds))
+            .with_raw_upstream_error(gateway_core::error::RawUpstreamError::new(
+                String::from_utf8(original_body.to_vec()).unwrap(),
+            ))
+            .with_continuation_recovery_disposition(
+                ContinuationRecoveryDisposition::ClientReplayRequired,
+            );
+        let recovery = if replacement {
+            ProviderError::new(
+                ProviderErrorKind::ContinuationRecoveryRequired,
+                UpstreamSendState::NotSent,
+            )
+            .with_continuation_recovery_disposition(
+                ContinuationRecoveryDisposition::ClientReplayRequired,
+            )
+            .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+                "Resend full history.",
+                Some("previous_response_not_found".to_owned()),
+                Some("invalid_request_error".to_owned()),
+            ))
+        } else {
+            ProviderError::new(
+                ProviderErrorKind::NoEligibleAccount,
+                UpstreamSendState::NotSent,
+            )
+        };
+        let (coordinator, store, provider) = coordinator(vec![
+            Script::Stream {
+                account_id: "acct_one",
+                items: vec![Err(original)],
+            },
+            Script::Error(recovery),
+        ]);
+        let continuation = NativeContinuationPin::new(
+            PreviousResponseId::new("client-previous"),
+            PreviousResponseId::new("upstream-previous"),
+            ClientApiKeyId::new("key_client_1").unwrap(),
+            ProviderKind::new("openai").unwrap(),
+            ProviderAccountId::new("acct_one").unwrap(),
+        )
+        .with_scope(gateway_core::engine::continuation::NativeContinuationScope::ConnectionLocal);
+        let mut session = block_on(coordinator.start(
+            model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
+            operation,
+            route_plan,
+            None,
+            Some(ContinuationBinding::Pinned(continuation)),
+            CancellationToken::new(),
+        ))
+        .unwrap();
+        let mut collection = Box::pin(session.collect_uncommitted());
+        let std::task::Poll::Ready(Err(EngineError::Provider(error))) =
+            block_on(async { futures::poll!(&mut collection) })
+        else {
+            panic!("native capacity recovery must not wait on the old account");
+        };
+        drop(collection);
+        assert_eq!(error.kind(), ProviderErrorKind::UpstreamCapacityUnavailable);
+        assert_eq!(error.send_state(), UpstreamSendState::Sent);
+        assert_eq!(error.retry_after(), Some(Duration::from_secs(seconds)));
+        assert_eq!(
+            error.raw_upstream_error().unwrap().as_str().as_bytes(),
+            original_body.as_ref()
+        );
+        assert_eq!(
+            error
+                .client_visible_upstream_error()
+                .and_then(|detail| detail.code()),
+            (replacement && expected_attempts == 2).then_some("previous_response_not_found")
+        );
+        let contexts = provider.contexts.lock().unwrap();
+        assert_eq!(contexts.len(), expected_attempts);
+        if contexts.len() == 2 {
+            assert_eq!(
+                contexts[1].continuation_attempt(),
+                ContinuationAttempt::RotateForClientReplay
+            );
+            assert!(
+                contexts[1]
+                    .excluded_accounts()
+                    .contains(&ProviderAccountId::new("acct_one").unwrap())
+            );
+            assert!(contexts[1].required_account().is_none());
+        }
+        // 选号迁移不是生成：只有旧账号的一次上游尝试、一个终态，没有额外费用。
+        let recorded = store.state.lock().unwrap();
+        assert_eq!(recorded.finalizations.len(), 1);
+        assert_eq!(recorded.finalizations[0].attempt_count, 1);
+        assert_eq!(recorded.finalizations[0].cost_ticks, None);
+        drop(recorded);
+        drop(contexts);
+        // 旧上游流由响应会话持有至错误投递结束，销毁会话后租约必须归零。
+        drop(session);
+        assert_eq!(provider.released_leases.load(Ordering::SeqCst), 1);
+    }
+}
+
+#[test]
 fn native_continuation_client_replay_required_is_terminal() {
     for (kind, send_state) in [
         (
@@ -2750,38 +2851,6 @@ fn continuation_history_failure_without_replay_proof_is_delivered_without_hidden
     assert_eq!(
         contexts[0].continuation_attempt(),
         ContinuationAttempt::Native
-    );
-}
-
-#[test]
-fn recovery_probe_reaches_provider_with_read_only_account() {
-    let operation = generate_operation();
-    let route_plan = plan(&operation);
-    let (coordinator, _, provider) = coordinator(vec![Script::Stream {
-        account_id: "acct_required",
-        items: complete_stream(None),
-    }]);
-    let required = ProviderAccountId::new("acct_required").expect("account id");
-    let mut session = block_on(coordinator.start_diagnostic(
-        model_request(&operation, SystemTime::now() + Duration::from_secs(30)),
-        operation,
-        route_plan,
-        AccountProbeTarget::FreezeRecovery(required.clone()),
-        None,
-        CancellationToken::new(),
-    ))
-    .expect("start execution");
-    block_on(session.collect_uncommitted()).expect("required account succeeds");
-    block_on(session.commit_downstream(Some(200))).expect("commit response");
-
-    let contexts = provider.contexts.lock().expect("contexts lock");
-    assert_eq!(contexts.len(), 1);
-    assert_eq!(contexts[0].required_account(), Some(&required));
-    assert!(contexts[0].is_diagnostic_required_account());
-    assert!(
-        !contexts[0]
-            .account_eligibility()
-            .allows_account_state_mutation(true)
     );
 }
 
@@ -4226,13 +4295,12 @@ fn server_retry_advice_should_override_local_backoff_and_transport_fallback() {
 }
 
 fn retry_after_plan(operation: &Operation, limit: u32) -> RoutingPlan {
-    plan_with_protection(
+    plan_with_retry_limit(
         operation,
         AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::MIN),
         Default::default(),
         FastMode::Default,
         BTreeMap::new(),
-        Default::default(),
         limit,
     )
 }
@@ -7354,91 +7422,4 @@ fn lease_cancellation_is_preserved_in_the_single_request_terminal() {
             Some(reason.message())
         );
     });
-}
-
-#[test]
-fn error_protection_tracks_real_retry_attempts_and_skips_diagnostic_runs() {
-    use super::account_protection::{Feedback, policy};
-    for diagnostic in [false, true] {
-        let operation = generate_operation();
-        let route_plan = plan_with_protection(
-            &operation,
-            AccountSelectionPolicy::new(RotationStrategy::Smart, NonZeroU32::new(1).unwrap()),
-            Default::default(),
-            FastMode::Default,
-            BTreeMap::new(),
-            policy().as_ref().clone(),
-            240,
-        );
-        let feedback = Arc::new(Feedback::default());
-        let failure = ProviderError::new(ProviderErrorKind::Unavailable, UpstreamSendState::Sent)
-            .with_replay_safe()
-            .with_upstream_failure_fields(gateway_core::upstream::UpstreamFailureFields {
-                status: None,
-                code: Some("invalid_prompt".into()),
-                error_type: None,
-                message: None,
-            });
-        let provider = Arc::new(ScriptedProvider::new(vec![
-            Script::ProtectedStream {
-                account_id: "acct_first",
-                items: vec![Err(failure)],
-            },
-            Script::ProtectedStream {
-                account_id: "acct_second",
-                items: complete_stream(None),
-            },
-        ]));
-        let mut registry = ProviderRegistry::builder();
-        registry.register(provider.clone()).unwrap();
-        let coordinator = AttemptCoordinator::new(
-            GatewayEngine::new(Arc::new(FakeStore::default()), registry.build())
-                .with_account_error_protection(feedback.clone()),
-        );
-        let request = model_request(&operation, SystemTime::now() + Duration::from_secs(30));
-        let mut session = block_on(async {
-            if diagnostic {
-                coordinator
-                    .start_diagnostic(
-                        request,
-                        operation,
-                        route_plan,
-                        AccountProbeTarget::ConnectionTest(
-                            ProviderAccountId::new("acct_first").unwrap(),
-                        ),
-                        None,
-                        CancellationToken::new(),
-                    )
-                    .await
-            } else {
-                coordinator
-                    .start(
-                        request,
-                        operation,
-                        route_plan,
-                        None,
-                        None,
-                        CancellationToken::new(),
-                    )
-                    .await
-            }
-        })
-        .unwrap();
-        if diagnostic {
-            assert!(block_on(session.next_event()).is_err());
-            assert_eq!(feedback.begin.load(Ordering::SeqCst), 0);
-        } else {
-            block_on(session.collect_uncommitted()).unwrap();
-            assert_eq!(feedback.begin.load(Ordering::SeqCst), 2);
-            assert_eq!(feedback.failures.lock().unwrap().len(), 1);
-            assert_eq!(feedback.successes.load(Ordering::SeqCst), 1);
-            let observed = feedback.failures.lock().unwrap();
-            assert_eq!(observed[0].0.account_id.as_str(), "acct_first");
-        }
-        drop(session);
-        assert_eq!(
-            provider.released_leases.load(Ordering::SeqCst),
-            if diagnostic { 1 } else { 2 }
-        );
-    }
 }

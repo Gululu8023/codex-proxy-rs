@@ -1,12 +1,8 @@
 <script setup lang="ts">
 import type { SidebarItem } from '@codex-proxy/ui'
-import type { RouteLocationRaw } from 'vue-router'
-import type { PluginManagementView } from '@/api'
 import { ZIconButton, ZMotionIcon, ZSidebar } from '@codex-proxy/ui'
 import {
   ArrowUpCircle,
-  Blocks,
-  BringToFront,
   ChartNoAxesColumn,
   FolderTree,
   KeyRound,
@@ -17,22 +13,20 @@ import {
   Palette,
   PanelLeftClose,
   PanelLeftOpen,
-  Puzzle,
   Settings,
+  ShieldCheck,
   Sun,
   Users,
 } from '@lucide/vue'
 import { storeToRefs } from 'pinia'
-import { computed, onMounted, useTemplateRef } from 'vue'
+import { computed, useTemplateRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { isNavigationFailure, NavigationFailureType, useRoute, useRouter } from 'vue-router'
 import AppBrandMark from '@/components/AppBrandMark.vue'
 import AppLanguageMenu from '@/components/AppLanguageMenu.vue'
 import { useAuthStore } from '@/stores/modules/auth'
-import { usePluginViewsStore } from '@/stores/modules/plugin-views'
 import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { useThemeStore } from '@/stores/modules/theme'
-import { pluginPageLocation, shortPluginInstanceId } from '@/utils/plugin'
 
 const props = withDefaults(defineProps<{
   collapse?: boolean
@@ -53,20 +47,12 @@ const sidebar = useTemplateRef<InstanceType<typeof ZSidebar>>('sidebar')
 const route = useRoute()
 const router = useRouter()
 const authStore = useAuthStore()
-const pluginViewsStore = usePluginViewsStore()
 const systemUpdateStore = useSystemUpdateStore()
 const themeStore = useThemeStore()
-const { pageViews: pluginPageViews } = storeToRefs(pluginViewsStore)
 const { version, hasUpdate } = storeToRefs(systemUpdateStore)
 const { effectiveTheme } = storeToRefs(themeStore)
 const { toggleTheme } = themeStore
 const isCollapsed = computed(() => !props.mobile && props.collapse)
-
-const pluginViewNameCounts = computed(() => pluginPageViews.value.reduce((counts, view) => {
-  const title = view.pages[0]?.title ?? view.name
-  counts.set(title, (counts.get(title) ?? 0) + 1)
-  return counts
-}, new Map<string, number>()))
 
 const navItems = computed<SidebarItem[]>(() => [
   {
@@ -100,21 +86,9 @@ const navItems = computed<SidebarItem[]>(() => [
     icon: ChartNoAxesColumn,
   },
   {
-    index: 'plugins',
-    label: t('navigation.plugins'),
-    icon: Puzzle,
-    children: [
-      {
-        index: '/plugins',
-        label: t('navigation.pluginManagement'),
-        icon: BringToFront,
-      },
-      ...pluginPageViews.value.map(view => ({
-        index: `plugin:${view.target.instanceId}`,
-        label: pluginViewLabel(view),
-        icon: Blocks,
-      })),
-    ],
+    index: '/prompt-guard',
+    label: t('guard.title'),
+    icon: ShieldCheck,
   },
   {
     index: '/theme',
@@ -128,45 +102,13 @@ const navItems = computed<SidebarItem[]>(() => [
   },
 ])
 const activeIndex = computed(() => {
-  if (route.path.startsWith('/plugins')) {
-    if (route.name === 'plugins')
-      return '/plugins'
-    const view = pluginPageViews.value.find(isPluginViewActive)
-    return view
-      ? `plugin:${view.target.instanceId}`
-      : 'plugins'
-  }
   return navItems.value.find(item => item.index !== '/' && route.path.startsWith(item.index))?.index ?? '/'
 })
-
-function isPluginViewActive(view: PluginManagementView) {
-  return route.name === 'plugin-page' && route.params.instanceId === view.target.instanceId
-}
-
-function pluginViewLabel(view: PluginManagementView) {
-  const title = view.pages[0]?.title ?? view.name
-  if (pluginViewNameCounts.value.get(title) === 1)
-    return title
-  const duplicateName = pluginPageViews.value.some(item => item !== view && item.name === view.name && item.pages[0]?.title === title)
-  return `${title} · ${duplicateName
-    ? shortPluginInstanceId(view.target.instanceId)
-    : view.name}`
-}
 
 async function handleSelect(index: string) {
   // 路由守卫可能取消跳转，菜单保持当前页，直到实际路由改变
   sidebar.value?.updateActiveIndex(activeIndex.value)
-  let target: RouteLocationRaw = index === 'plugins'
-    ? '/plugins'
-    : index
-  if (index.startsWith('plugin:')) {
-    const view = pluginPageViews.value.find(item => `plugin:${item.target.instanceId}` === index)
-    const page = view?.pages[0]
-    if (!view || !page)
-      return
-    target = pluginPageLocation(view, page)
-  }
-  const failure = await router.push(target)
+  const failure = await router.push(index)
   if (!failure || isNavigationFailure(failure, NavigationFailureType.duplicated))
     emit('navigate')
 }
@@ -191,10 +133,6 @@ const versionLabel = computed(() => `v${versionText.value}`)
 const updateButtonLabel = computed(() => hasUpdate.value
   ? t('navigation.update.available')
   : t('navigation.update.open'))
-
-onMounted(() => {
-  void pluginViewsStore.ensureLoaded().catch(() => undefined)
-})
 </script>
 
 <template>

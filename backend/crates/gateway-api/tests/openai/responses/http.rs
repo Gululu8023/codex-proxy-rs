@@ -25,7 +25,6 @@ use gateway_core::engine::execution::{
     AuthenticatedClient, ClientAuthenticationError, ExecutionService, ExecutionSession,
     ResponseCommit, StartExecution, StartProviderExecution, StartedExecution,
 };
-use gateway_core::engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader};
 use gateway_core::engine::{CommitRequirement, CoordinatedEvent, EngineError, ModelRequestId};
 use gateway_core::error::{
     ClientVisibleUpstreamError, ClientVisibleUpstreamResponse, GatewayError, GatewayErrorKind,
@@ -44,17 +43,9 @@ use serde_json::{Value, json};
 use gateway_api::openai::responses::{collect_execution_response, stream_execution_response};
 use tower::ServiceExt;
 
-use crate::openai::middleware::{RequestMiddleware, ResponseFrameAction};
 use crate::openai::{
     api_router, authenticated_client_for_provider, authenticated_client_with_min_versions,
 };
-
-fn responses_middleware() -> RequestMiddleware {
-    RequestMiddleware {
-        expected_operation: Some(OperationKind::Generate),
-        ..RequestMiddleware::default()
-    }
-}
 
 #[derive(Default)]
 struct Trace {
@@ -559,7 +550,6 @@ async fn http_requests_should_honor_stream_preference() {
         let execution = Arc::new(SessionExecution {
             client: authenticated_client_for_provider("sk_stream_test", "openai"),
             session: Mutex::new(Some(Box::new(session))),
-            middleware: None,
         });
         let mut body = json!({"model": "model-a", "input": "hello"});
         if let Some(stream) = stream {
@@ -938,278 +928,6 @@ async fn streaming_encodes_first_frame_before_commit_and_http_delivery() {
     std::mem::forget(response);
 }
 
-#[tokio::test]
-async fn streaming_dropped_unknown_initial_batch_discards_without_committing() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let dropped_raw = Bytes::from_static(
-        b"event: response.future_metadata\ndata: {\"type\":\"response.future_metadata\",\"dropped\":true}\n\n",
-    );
-    let dropped = ProviderEvent::wire(
-        ProtocolWireEvent::raw_sse("openai", dropped_raw.clone()).expect("future SSE event"),
-    );
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::Event(delivery_provider(
-                dropped,
-                CommitRequirement::CommitBeforeDelivery,
-            )),
-            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
-            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
-            NextStep::FinalizeSuccess,
-        ],
-    );
-    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-        ResponseFrameAction::Drop,
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Continue,
-    ]));
-
-    let response =
-        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read filtered SSE response");
-
-    assert!(!body.as_ref().starts_with(dropped_raw.as_ref()));
-    assert!(!String::from_utf8_lossy(&body).contains("\"dropped\":true"));
-    assert!(String::from_utf8_lossy(&body).contains("response.created"));
-    assert!(String::from_utf8_lossy(&body).contains("response.completed"));
-    assert!(body.as_ref().ends_with(b"data: [DONE]\n\n"));
-    assert_eq!(trace.client_statuses(), vec![200]);
-    assert_eq!(
-        trace.snapshot(),
-        vec![
-            "next_event",
-            "discard",
-            "next_event",
-            "commit",
-            "next_event",
-            "next_end"
-        ]
-    );
-    assert_eq!(trace.detached_finalizations(), 0);
-}
-
-#[tokio::test]
-async fn streaming_modified_sse_rejects_out_of_order_tool_events_without_replay() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let added = super::openai_wire_event(
-        vec![],
-        "response.output_item.added",
-        json!({
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {
-                "id": "item_tool", "type": "function_call",
-                "call_id": "call_tool", "name": "lookup"
-            }
-        }),
-    );
-    let out_of_order = encode_sse_event(
-        "response.function_call_arguments.done",
-        &json!({
-            "type": "response.function_call_arguments.done",
-            "output_index": 0, "item_id": "item_tool",
-            "call_id": "call_tool", "arguments": "{}"
-        })
-        .to_string(),
-    );
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
-            NextStep::Event(delivery_provider(
-                added,
-                CommitRequirement::AlreadyCommitted,
-            )),
-            NextStep::FinalizeCancelled,
-        ],
-    );
-    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Replace(Bytes::from(out_of_order)),
-    ]));
-
-    let response =
-        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read rejected transformed SSE");
-    tokio::task::yield_now().await;
-    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
-
-    assert_eq!(body.matches("event: response.created").count(), 1);
-    assert!(!body.contains("response.function_call_arguments.done"));
-    assert!(body.contains("response.failed"));
-    assert!(body.ends_with("data: [DONE]\n\n"));
-    assert!(trace.is_cancelled());
-    assert_eq!(
-        trace.snapshot(),
-        vec!["next_event", "commit", "next_event", "cancel_finalize"]
-    );
-}
-
-#[tokio::test]
-async fn streaming_modified_sse_rejects_wrong_tool_association_without_replay() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let added = super::openai_wire_event(
-        vec![],
-        "response.output_item.added",
-        json!({
-            "type": "response.output_item.added",
-            "output_index": 0,
-            "item": {
-                "id": "item_tool", "type": "function_call",
-                "call_id": "call_tool", "name": "lookup"
-            }
-        }),
-    );
-    let arguments = super::openai_wire_event(
-        vec![],
-        "response.function_call_arguments.delta",
-        json!({
-            "type": "response.function_call_arguments.delta",
-            "output_index": 0, "item_id": "item_tool",
-            "call_id": "call_tool", "delta": "{}"
-        }),
-    );
-    let wrong_association = encode_sse_event(
-        "response.function_call_arguments.delta",
-        &json!({
-            "type": "response.function_call_arguments.delta",
-            "output_index": 0, "item_id": "item_tool",
-            "call_id": "call_other", "delta": "{}"
-        })
-        .to_string(),
-    );
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
-            NextStep::Event(delivery_provider(
-                added,
-                CommitRequirement::AlreadyCommitted,
-            )),
-            NextStep::Event(delivery_provider(
-                arguments,
-                CommitRequirement::AlreadyCommitted,
-            )),
-            NextStep::FinalizeCancelled,
-        ],
-    );
-    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Replace(Bytes::from(wrong_association)),
-    ]));
-
-    let response =
-        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read rejected transformed SSE");
-    tokio::task::yield_now().await;
-    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
-
-    assert!(!body.contains("call_other"));
-    assert!(body.contains("response.failed"));
-    assert_eq!(body.matches("event: response.created").count(), 1);
-    assert_eq!(
-        trace.snapshot(),
-        vec![
-            "next_event",
-            "commit",
-            "next_event",
-            "next_event",
-            "cancel_finalize"
-        ]
-    );
-}
-
-#[tokio::test]
-async fn streaming_modified_sse_cannot_change_terminal_classification() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let incomplete = encode_sse_event(
-        "response.incomplete",
-        &json!({
-            "type": "response.incomplete",
-            "response": {
-                "id": "resp_test", "model": "public-model",
-                "status": "incomplete", "output": []
-            }
-        })
-        .to_string(),
-    );
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
-            NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
-            NextStep::FinalizeSuccess,
-        ],
-    );
-    let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-        ResponseFrameAction::Continue,
-        ResponseFrameAction::Replace(Bytes::from(incomplete)),
-    ]));
-
-    let response =
-        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read terminal-class rejection");
-    tokio::task::yield_now().await;
-    let body = String::from_utf8(body.to_vec()).expect("gateway SSE is UTF-8");
-
-    assert!(body.contains("response.failed"));
-    assert!(!body.contains("response.incomplete"));
-    assert_eq!(body.matches("event: response.created").count(), 1);
-    assert_eq!(
-        trace.snapshot(),
-        vec!["next_event", "commit", "next_event", "next_end"]
-    );
-    assert!(!trace.is_cancelled());
-}
-
-#[tokio::test]
-async fn streaming_terminal_drop_fails_before_commit() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::Event(delivery(
-                completed(),
-                CommitRequirement::CommitBeforeDelivery,
-            )),
-            NextStep::FinalizeCancelled,
-        ],
-    );
-    let middleware =
-        Arc::new(responses_middleware().with_response_actions(vec![ResponseFrameAction::Drop]));
-
-    let response =
-        response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-
-    assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read middleware error response");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).expect("middleware error JSON")["error"]["code"],
-        "middleware_failed"
-    );
-    assert_eq!(trace.client_statuses(), vec![502]);
-    assert!(trace.is_cancelled());
-    assert!(!trace.snapshot().contains(&"commit"));
-}
-
 #[tokio::test(start_paused = true)]
 async fn streaming_should_keep_alive_during_silent_compaction_without_restarting_execution() {
     let trace = Arc::new(Trace::default());
@@ -1412,66 +1130,6 @@ async fn streaming_late_upstream_error_should_preserve_extended_error_fields() {
     let payload: Value = serde_json::from_str(&failed.data).unwrap();
     assert_eq!(payload["response"]["error"], error);
     assert!(bytes.ends_with(b"data: [DONE]\n\n"));
-}
-
-#[tokio::test]
-async fn responses_http_connection_should_survive_a_shorter_read_idle_timeout() {
-    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
-
-    let trace = Arc::new(Trace::default());
-    let session = FakeSession::streaming(
-        Arc::clone(&trace),
-        vec![
-            NextStep::DelayedEvent(
-                Duration::from_secs(35),
-                delivery(completed(), CommitRequirement::CommitBeforeDelivery),
-            ),
-            NextStep::FinalizeSuccess,
-        ],
-    );
-    let execution = Arc::new(SessionExecution {
-        client: authenticated_client_for_provider("sk_correlation_test", "openai"),
-        session: Mutex::new(Some(Box::new(session))),
-        middleware: Some(Arc::new(responses_middleware()).frozen()),
-    });
-    let app = api_router(execution).await;
-    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
-    let address = listener.local_addr().unwrap();
-    let server = tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
-    let mut client = tokio::net::TcpStream::connect(address).await.unwrap();
-    let body = json!({"model": "model-a", "input": "synthetic", "stream": true}).to_string();
-    client.write_all(format!(
-        "POST /v1/responses HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer sk_correlation_test\r\nUser-Agent: AnotherTerminal/1.0\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()
-    ).as_bytes()).await.unwrap();
-    let mut received = Vec::new();
-    let result = async {
-        loop {
-            let mut buffer = [0; 4096];
-            // 真实 TCP 每次读取都受空闲期限约束，首个业务事件晚于该期限
-            let read =
-                tokio::time::timeout(Duration::from_secs(20), client.read(&mut buffer)).await?;
-            let count = read.unwrap();
-            if count == 0 {
-                break;
-            }
-            received.extend_from_slice(&buffer[..count]);
-        }
-        Ok::<(), tokio::time::error::Elapsed>(())
-    }
-    .await;
-    server.abort();
-    result.expect("HTTP connection must receive keepalive before its read idle deadline");
-    let wire = String::from_utf8(received).unwrap();
-    assert!(wire.starts_with("HTTP/1.1 200 OK\r\n"));
-    assert!(wire.contains("x-accel-buffering: no\r\n"));
-    assert_eq!(wire.matches(": keep-alive\n\n").count(), 2);
-    assert!(wire.contains("response.completed"));
-    assert!(wire.contains("data: [DONE]\n\n"));
-    assert!(!trace.is_cancelled());
-    assert_eq!(
-        trace.snapshot(),
-        vec!["wait_event", "next_event", "commit", "next_end"]
-    );
 }
 
 #[tokio::test(start_paused = true)]
@@ -2255,6 +1913,18 @@ async fn streaming_upstream_error_event_should_be_translated_to_response_failed_
             .expect("translated response.failed event");
         let failed: Value = serde_json::from_str(&failed.data).expect("response.failed JSON");
 
+        let mut expected_error = json!({
+            "type": error_type, "code": client_code,
+            "message": "Our servers are currently overloaded. Please try again later.",
+            "param": null, "future_error_field": {"keep":true}
+        });
+        // 只清除容量恢复的旧等待建议，普通轮次限流仍须保留上游等待头。
+        let expected_headers = if kind == ProviderErrorKind::RateLimited {
+            expected_error["headers"] = json!({"retry-after":"24"});
+            json!({"Retry-After":"24"})
+        } else {
+            json!({})
+        };
         assert_eq!(
             (
                 failed,
@@ -2266,19 +1936,12 @@ async fn streaming_upstream_error_event_should_be_translated_to_response_failed_
                 json!({
                     "type": "response.failed",
                     "status": client_status,
-                    "headers": {"Retry-After": "24"},
+                    "headers": expected_headers,
                     "response": {
                         "id": "resp_test",
                         "model": "public-model",
                         "status": "failed",
-                        "error": {
-                            "type": error_type,
-                            "code": client_code,
-                            "message": "Our servers are currently overloaded. Please try again later.",
-                            "param": null,
-                            "future_error_field": {"keep": true},
-                            "headers": {"retry-after": "24"}
-                        },
+                        "error": expected_error,
                         "future_response_field": {"keep": true}
                     },
                     "sequence_number": 2,
@@ -2768,87 +2431,6 @@ async fn buffered_response_never_merges_items_from_a_different_wire_response() {
 }
 
 #[tokio::test]
-async fn buffered_response_middleware_replaces_body_and_preserves_explicit_headers() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    let trace = Arc::new(Trace::default());
-    let session = FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()]);
-    let middleware = Arc::new(
-        responses_middleware()
-            .with_response_actions(vec![ResponseFrameAction::Replace(
-            Bytes::from_static(
-                b"{\"id\":\"resp_test\",\"status\":\"completed\",\"output\":[],\"future_policy_field\":true}",
-            ),
-            )])
-            .with_response_headers(vec![
-                MiddlewareHeader::new("x-policy-result", Bytes::from_static(b"replaced")),
-                MiddlewareHeader::new("authorization", Bytes::from_static(b"plugin-value")),
-            ]),
-    );
-
-    let response =
-        response_with_middleware(&admin, "openai", session, false, Some(middleware)).await;
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(response.headers()["x-policy-result"], "replaced");
-    assert_eq!(response.headers()[AUTHORIZATION], "plugin-value");
-    let body = to_bytes(response.into_body(), usize::MAX)
-        .await
-        .expect("read policy JSON body");
-    assert_eq!(
-        serde_json::from_slice::<Value>(&body).expect("policy response JSON"),
-        json!({
-            "id": "resp_test", "status": "completed", "output": [],
-            "future_policy_field": true
-        })
-    );
-    assert_eq!(trace.client_statuses(), vec![200]);
-    assert_eq!(trace.snapshot(), vec!["collect", "commit"]);
-}
-
-#[tokio::test]
-async fn buffered_response_middleware_rejects_missing_terminal_fields_or_duplicate_tool_identity() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    for replacement in [
-        json!({"id": "resp_test", "output": []}),
-        json!({"id": "resp_test", "status": "incomplete", "output": []}),
-        json!({
-            "id": "resp_test", "status": "completed", "output": [
-                {
-                    "id": "item_a", "type": "function_call", "call_id": "call_same",
-                    "name": "first", "arguments": "{}"
-                },
-                {
-                    "id": "item_b", "type": "function_call", "call_id": "call_same",
-                    "name": "second", "arguments": "{}"
-                }
-            ]
-        }),
-    ] {
-        let trace = Arc::new(Trace::default());
-        let session = FakeSession::buffered(Arc::clone(&trace), vec![started(), completed()]);
-        let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-            ResponseFrameAction::Replace(Bytes::from(
-                serde_json::to_vec(&replacement).expect("replacement JSON"),
-            )),
-        ]));
-
-        let response =
-            response_with_middleware(&admin, "openai", session, false, Some(middleware)).await;
-        assert_eq!(response.status(), StatusCode::BAD_GATEWAY);
-        let body = to_bytes(response.into_body(), usize::MAX)
-            .await
-            .expect("read middleware error response");
-        assert_eq!(
-            serde_json::from_slice::<Value>(&body).expect("middleware error JSON")["error"]["code"],
-            "middleware_failed"
-        );
-        assert_eq!(trace.client_statuses(), vec![502]);
-        assert!(!trace.snapshot().contains(&"commit"));
-        assert!(trace.is_cancelled());
-        assert_eq!(trace.snapshot(), vec!["collect", "cancel_finalize"]);
-    }
-}
-
-#[tokio::test]
 async fn buffered_response_forwards_long_ordinary_provider_header_values() {
     let trace = Arc::new(Trace::default());
     let model = format!("gpt-{}", "x".repeat(512));
@@ -2945,7 +2527,6 @@ const MODEL_REQUEST_ID: &str = "req_model_correlation";
 struct SessionExecution {
     client: AuthenticatedClient,
     session: Mutex<Option<Box<dyn ExecutionSession>>>,
-    middleware: Option<FrozenMiddlewarePlan>,
 }
 
 #[tokio::test]
@@ -2977,7 +2558,6 @@ async fn official_core_clients_should_be_version_checked_before_starting_respons
                         NextStep::FinalizeSuccess,
                     ],
                 )))),
-                middleware: None,
             });
             let request = Request::post("/v1/responses")
                 .header(AUTHORIZATION, "Bearer sk_version_test")
@@ -3043,7 +2623,6 @@ async fn chatgpt_remote_responses_should_only_skip_missing_desktop_versions() {
                         NextStep::FinalizeSuccess,
                     ],
                 )))),
-                middleware: None,
             });
             let mut request = Request::post("/v1/responses")
                 .header(AUTHORIZATION, "Bearer sk_remote_test")
@@ -3134,13 +2713,6 @@ impl ExecutionService for SessionExecution {
         true
     }
 
-    fn middleware_plan(
-        &self,
-        _: &gateway_core::engine::execution::PreparedRootExecution,
-    ) -> Option<FrozenMiddlewarePlan> {
-        self.middleware.clone()
-    }
-
     fn start(
         &self,
         request: StartExecution,
@@ -3169,20 +2741,9 @@ async fn response(
     session: FakeSession,
     streaming: bool,
 ) -> axum::response::Response {
-    response_with_middleware(admin, provider, session, streaming, None).await
-}
-
-async fn response_with_middleware(
-    admin: &gateway_admin::AdminServices,
-    provider: &str,
-    session: FakeSession,
-    streaming: bool,
-    middleware: Option<Arc<RequestMiddleware>>,
-) -> axum::response::Response {
     let execution = Arc::new(SessionExecution {
         client: authenticated_client_for_provider("sk_correlation_test", provider),
         session: Mutex::new(Some(Box::new(session))),
-        middleware: middleware.map(|middleware| middleware.frozen()),
     });
     crate::openai::api_router_with_admin_and_execution(admin.clone(), execution)
         .oneshot(
@@ -3399,119 +2960,5 @@ async fn compressed_http_request_above_default_limit_should_reach_execution_afte
                 64 * 1024 * 1024
             );
         }
-    }
-}
-
-#[tokio::test]
-async fn streaming_middleware_preserves_heartbeats_before_and_after_rewriting() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    for opaque in [
-        b": ping\n\n".as_slice(),
-        b"id: next\nretry: 1000\n\n".as_slice(),
-        b"event: vendor.future\ndata: future non-JSON payload\n\n".as_slice(),
-    ] {
-        let trace = Arc::new(Trace::default());
-        let heartbeat = Bytes::copy_from_slice(opaque);
-        let future = Bytes::from_static(
-            b"event: response.future\ndata: {\"type\":\"response.future\",\"extension\":true}\n\n",
-        );
-        let session = FakeSession::streaming(
-            Arc::clone(&trace),
-            vec![
-                NextStep::Event(delivery(started(), CommitRequirement::CommitBeforeDelivery)),
-                NextStep::Event(delivery_provider(
-                    ProviderEvent::wire(
-                        ProtocolWireEvent::raw_sse("openai", heartbeat.clone()).unwrap(),
-                    ),
-                    CommitRequirement::AlreadyCommitted,
-                )),
-                NextStep::Event(delivery_provider(
-                    ProviderEvent::wire(
-                        ProtocolWireEvent::raw_sse("openai", future.clone()).unwrap(),
-                    ),
-                    CommitRequirement::AlreadyCommitted,
-                )),
-                NextStep::Event(delivery_provider(
-                    ProviderEvent::wire(
-                        ProtocolWireEvent::raw_sse("openai", heartbeat.clone()).unwrap(),
-                    ),
-                    CommitRequirement::AlreadyCommitted,
-                )),
-                NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
-                NextStep::FinalizeSuccess,
-            ],
-        );
-        let replacement = Bytes::from_static(b"event: response.future\ndata: {\"type\":\"response.future\",\"extension\":\"changed\"}\n\n");
-        let middleware = Arc::new(responses_middleware().with_response_actions(vec![
-            ResponseFrameAction::Continue,
-            ResponseFrameAction::Continue,
-            ResponseFrameAction::Replace(replacement.clone()),
-            ResponseFrameAction::Continue,
-            ResponseFrameAction::Continue,
-            ResponseFrameAction::Continue,
-        ]));
-        let response =
-            response_with_middleware(&admin, "openai", session, true, Some(middleware)).await;
-        let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = std::str::from_utf8(&body).unwrap();
-        assert_eq!(
-            text.matches(std::str::from_utf8(opaque).unwrap()).count(),
-            2
-        );
-        assert!(text.contains(std::str::from_utf8(&replacement).unwrap()));
-        assert!(text.contains("response.completed"));
-        assert!(!text.contains("middleware_failed"));
-        assert!(text.ends_with("data: [DONE]\n\n"));
-        assert!(!trace.is_cancelled());
-    }
-}
-
-#[tokio::test(start_paused = true)]
-async fn responses_route_should_keep_alive_while_request_middleware_waits_for_first_event() {
-    let admin = crate::admin::AdminTestFixture::new().await.services;
-    for invalid_output in [false, true] {
-        let trace = Arc::new(Trace::default());
-        let session = FakeSession::streaming(
-            Arc::clone(&trace),
-            vec![
-                NextStep::DelayedEvent(
-                    Duration::from_secs(150),
-                    delivery(started(), CommitRequirement::CommitBeforeDelivery),
-                ),
-                NextStep::Event(delivery(completed(), CommitRequirement::AlreadyCommitted)),
-                NextStep::FinalizeSuccess,
-            ],
-        );
-        let actions = if invalid_output {
-            vec![ResponseFrameAction::Replace(Bytes::from_static(
-                b"data: {invalid-json}\n\n",
-            ))]
-        } else {
-            Vec::new()
-        };
-        let middleware = Arc::new(responses_middleware().with_response_actions(actions));
-        let response = tokio::time::timeout(
-            Duration::from_secs(20),
-            response_with_middleware(&admin, "openai", session, true, Some(middleware)),
-        )
-        .await
-        .expect("request middleware must not block transport keepalive");
-        assert_eq!(response.status(), StatusCode::OK);
-        assert!(response.headers().contains_key("x-gateway-request-id"));
-        let bytes = to_bytes(response.into_body(), usize::MAX).await.unwrap();
-        let text = std::str::from_utf8(&bytes).unwrap();
-        assert!(text.starts_with(": keep-alive\n\n"));
-        assert!(text.ends_with("data: [DONE]\n\n"));
-        if invalid_output {
-            assert!(text.contains("response.failed"));
-            assert!(text.contains("middleware_failed"));
-            assert!(!text.contains("{invalid-json}"));
-            assert!(trace.is_cancelled());
-        } else {
-            assert!(text.contains("response.completed"));
-            assert!(!text.contains("response.failed"));
-            assert!(!trace.is_cancelled());
-        }
-        assert_eq!(trace.client_statuses(), vec![200]);
     }
 }

@@ -131,24 +131,8 @@ async fn update_events_should_preserve_complete_release_stage_sequence() {
     assert_eq!(
         steps,
         [
-            "release",
-            "prepare",
-            "asset",
-            "asset",
-            "verify",
-            "prepare",
-            "download",
-            "download",
-            "download",
-            "checksum",
-            "checksum",
-            "extract",
-            "extract",
-            "preflight",
-            "preflight",
-            "replace",
-            "replace",
-            "done",
+            "release", "prepare", "asset", "asset", "verify", "prepare", "download", "download",
+            "download", "checksum", "checksum", "extract", "extract", "replace", "replace", "done",
         ]
     );
 }

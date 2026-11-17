@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use gateway_admin::model::backup::BackupStatus;
+use gateway_admin::model::backup::{BackupArtifact, BackupStatus};
 use gateway_admin::ports::backup::BackupStorePorts;
 
 use crate::backup::support::{
@@ -50,7 +50,7 @@ async fn backup_service_creates_downloads_and_deletes_with_audit() {
     repository.force_status(&created.id, BackupStatus::Completed);
     let download = services
         .backups()
-        .download_url(&system_context(), &created.id)
+        .download_url(&system_context(), &created.id, BackupArtifact::Database)
         .await
         .expect("download url");
     assert!(download.url.starts_with("https://presigned.example.com/"));
@@ -103,7 +103,7 @@ async fn backup_service_rejects_download_of_non_completed_record() {
     // queued 记录不能创建下载地址
     let error = services
         .backups()
-        .download_url(&system_context(), &created.id)
+        .download_url(&system_context(), &created.id, BackupArtifact::Database)
         .await
         .expect_err("non-completed record must be rejected");
     assert_eq!(error.kind(), gateway_admin::model::AdminErrorKind::Conflict);

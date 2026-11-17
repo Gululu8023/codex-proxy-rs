@@ -4,8 +4,9 @@ use chrono::Utc;
 use secrecy::SecretString;
 
 use gateway_admin::model::backup::{
-    BackupRecordSeed, BackupSettings, BackupStatus, BackupStatusTransition, BackupTriggerKind,
-    UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
+    BackupObject, BackupRecordListQuery, BackupRecordSeed, BackupSettings, BackupStatus,
+    BackupStatusTransition, BackupTriggerKind, UpdateBackupScheduleCommand,
+    UpdateBackupStorageCommand,
 };
 use gateway_admin::model::{MutationActor, MutationContext};
 use gateway_admin::ports::backup::{BackupRepository, StatusTransitionUpdate};
@@ -298,6 +299,97 @@ async fn backup_lifecycle_transitions_through_deleting_and_hard_delete() {
             .await
             .expect("load after delete")
             .is_none()
+    );
+
+    db.close().await;
+}
+
+#[tokio::test]
+async fn privacy_store_object_is_written_once_and_read_back_from_every_query() {
+    let Some(db) = TestDatabase::create("backup_privacy_store").await else {
+        return;
+    };
+    let repository = PgBackupRepository::new(db.pool.clone());
+    let record = repository
+        .insert_backup_record(
+            seed(&"c".repeat(32), BackupTriggerKind::Manual, None),
+            &context(),
+        )
+        .await
+        .expect("insert queued");
+    assert!(record.privacy_store.is_none());
+    let started_at = record.created_at + chrono::Duration::seconds(1);
+    let claimed = repository
+        .claim_next_queued(started_at)
+        .await
+        .expect("claim")
+        .expect("claimed one task");
+    assert!(claimed.privacy_store.is_none());
+
+    let privacy = BackupObject {
+        object_key: "codex/x.veil.tar.gz".to_owned(),
+        size_bytes: 42,
+        sha256: "b".repeat(64),
+    };
+    let uploading = repository
+        .transition_status(
+            &record.id,
+            transition(BackupStatus::Dumping, BackupStatus::Uploading),
+            StatusTransitionUpdate {
+                size_bytes: Some(10),
+                sha256: Some("a".repeat(64)),
+                privacy_store: Some(privacy.clone()),
+                ..Default::default()
+            },
+            started_at + chrono::Duration::seconds(1),
+        )
+        .await
+        .expect("dump complete")
+        .expect("transition matched");
+    assert_eq!(uploading.privacy_store.as_ref(), Some(&privacy));
+
+    // 后续迁移不携带隐私对象时保留已写入的值
+    let completed = repository
+        .transition_status(
+            &record.id,
+            transition(BackupStatus::Uploading, BackupStatus::Completed),
+            StatusTransitionUpdate::default(),
+            started_at + chrono::Duration::seconds(2),
+        )
+        .await
+        .expect("upload verified")
+        .expect("transition matched");
+    assert_eq!(completed.privacy_store.as_ref(), Some(&privacy));
+    let loaded = repository
+        .load_backup_record(&record.id)
+        .await
+        .expect("load")
+        .expect("record exists");
+    assert_eq!(loaded.privacy_store.as_ref(), Some(&privacy));
+    let page = repository
+        .list_backup_records(BackupRecordListQuery {
+            page: 1,
+            page_size: gateway_admin::model::PageSize::new(10).unwrap(),
+            status: None,
+            trigger: None,
+        })
+        .await
+        .expect("list");
+    assert_eq!(page.items[0].privacy_store.as_ref(), Some(&privacy));
+    let deleting = repository
+        .transition_to_deleting(&record.id, started_at + chrono::Duration::seconds(3), None)
+        .await
+        .expect("to deleting")
+        .expect("transition matched");
+    assert_eq!(deleting.privacy_store.as_ref(), Some(&privacy));
+    assert_eq!(
+        repository
+            .list_pending_deletions(10)
+            .await
+            .expect("pending deletions")[0]
+            .privacy_store
+            .as_ref(),
+        Some(&privacy)
     );
 
     db.close().await;

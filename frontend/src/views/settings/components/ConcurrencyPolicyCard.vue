@@ -13,7 +13,7 @@ const maxWaitingPerAccount = defineModel<string>('maxWaitingPerAccount', { requi
 const keyQueueTimeoutSeconds = defineModel<string>('keyQueueTimeoutSeconds', { required: true })
 const accountQueueTimeoutSeconds = defineModel<string>('accountQueueTimeoutSeconds', { required: true })
 const switchAccountOnQueueFailure = defineModel<boolean>('switchAccountOnQueueFailure', { required: true })
-const openaiGuardianReservedConcurrency = defineModel<string>('openaiGuardianReservedConcurrency', { required: true })
+const maxAccountRotations = defineModel<string>('maxAccountRotations', { required: true })
 const maxRetryAfterSeconds = defineModel<string>('maxRetryAfterSeconds', { required: true })
 const queueFailureOptions = computed(() => [
   {
@@ -29,6 +29,9 @@ const queueFailureOptions = computed(() => [
 
 <template>
   <ZCard :title="t('settings.concurrency.title')">
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <div class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2 sm:items-end">
       <ZFormItem
         :show-message="Boolean(maxConcurrentPerAccount.trim())"
@@ -46,21 +49,8 @@ const queueFailureOptions = computed(() => [
         />
       </ZFormItem>
 
-      <ZFormItem :show-message="Boolean(openaiGuardianReservedConcurrency.trim())" prop="openaiGuardianReservedConcurrency" :label="t('settings.concurrency.autoReview.label')" :description="t('settings.concurrency.autoReview.description')">
-        <template #label-extra>
-          <ZPopover class="-my-1" trigger="hover-click" placement="top-start">
-            <template #reference="{ open }">
-              <ZIconButton variant="link" :aria-label="t('settings.concurrency.autoReview.helpTitle')" :aria-expanded="open" class="size-6!">
-                <CircleAlert class="size-3.5" aria-hidden="true" />
-              </ZIconButton>
-            </template>
-            <div class="max-w-72 space-y-2 px-3 py-2 text-z-sm leading-relaxed text-z-text-secondary">
-              <p>{{ t('settings.scheduling.autoReviewSlotsHelp') }}</p>
-              <p>{{ t('settings.scheduling.autoReviewQueueHelp') }}</p>
-            </div>
-          </ZPopover>
-        </template>
-        <ZInput v-model="openaiGuardianReservedConcurrency" :aria-label="t('settings.concurrency.autoReview.label')" type="number" min="0" max="4294967295" step="1" />
+      <ZFormItem :show-message="Boolean(maxAccountRotations.trim())" prop="maxAccountRotations" :label="t('settings.affinity.maxAccountSwitches')" :description="t('settings.affinity.switchLimitHelp')">
+        <ZInput v-model="maxAccountRotations" :aria-label="t('settings.affinity.maxAccountSwitches')" type="number" min="0" max="31" step="1" />
       </ZFormItem>
       <ZFormItem :show-message="Boolean(maxWaitingPerKey.trim())" prop="maxWaitingPerKey" :label="t('settings.concurrency.keyQueueCapacity')" :description="t('settings.concurrency.keyQueueHelp')">
         <ZInput v-model="maxWaitingPerKey" :aria-label="t('settings.concurrency.keyQueueCapacity')" type="number" min="0" max="1000" step="1" />
@@ -122,5 +112,6 @@ const queueFailureOptions = computed(() => [
         />
       </ZFormItem>
     </div>
+    <slot name="footer" />
   </ZCard>
 </template>

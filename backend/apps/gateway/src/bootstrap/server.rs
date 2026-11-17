@@ -1,191 +1,93 @@
-//! 服务模式完成全部组装后交给 Host 监听，并在停止监听与 Worker 收尾后关闭插件
+//! 服务模式完成原生 Provider、Core、Admin 和 API 组装后交给 Host 监听
 
 use gateway_host::ConfigError;
 
 use super::{
     BootstrapError, GatewayConfig,
-    plugins::{ManagementPorts, or_shutdown, prepare_plugins, service_middleware},
-    startup::{Environment, Mode, Providers},
+    startup::{Environment, Providers},
 };
 
-/// 按冻结顺序初始化全部 Bundle，并把进程阻塞权交给 Host
+/// 首次快照和准入恢复成功后才开放监听。
 pub async fn run() -> Result<(), BootstrapError> {
     let config = gateway_host::load_config::<GatewayConfig>()?;
-    let environment = Environment::initialize(config.host, config.store, Mode::Server).await?;
-    let mut providers = Providers::initialize(config.openai, &environment).await?;
+    let backup_staging = config.store.backup_staging_dir().to_path_buf();
+    let environment = Environment::initialize(config.host, config.store).await?;
+    let mut providers = Providers::initialize(config.openai, config.veil, &environment).await?;
     let Environment {
         host,
         mut store,
         timezone,
-        plugin_cache,
-        version,
-        plugin_http,
     } = environment;
-    let plugin_runtime = prepare_plugins(&store, plugin_cache, &version, plugin_http.clone())?;
-    let core = gateway_core::prepare(
-        store.core_ports(),
-        providers.core,
-        Some(plugin_runtime.clone()),
-        Some(plugin_runtime.observer_registry()),
-        Some(plugin_runtime.policy_registry()),
-        Some(plugin_runtime.execution_registry()),
-        Some(plugin_runtime.frontend_authentication_registry()),
-    );
-    or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.bind_snapshots(&core.snapshots())
-    );
-    let management = ManagementPorts::new(
-        &store,
-        providers.admin.clone(),
-        core.snapshot_control(),
-        providers.peer.service(),
-    );
-    or_shutdown!(plugin_runtime, management.bind(&plugin_runtime));
-    let mut core = or_shutdown!(plugin_runtime, core.activate().await);
-    or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.bind_client_identity_port(&core.client_identity_port())
-    );
-    let nested_models = core.nested_model_execution_port();
-    let affinity_lookup = core.affinity_lookup_port();
-    or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.bind_model_ports(&nested_models, &affinity_lookup)
-    );
-    host.report_startup_ready("Core");
-    let host_version = or_shutdown!(
-        plugin_runtime,
-        version
-            .trim_start_matches('v')
-            .parse()
-            .map_err(|_| ConfigError::InvalidField("host.version"))
-    );
-    let plugin_inspector = std::sync::Arc::new(gateway_plugin_runtime::PackageInspector::new(
-        gateway_plugin_runtime::PackageLimits::default(),
-        host_version,
-    ));
-    let plugin_distribution = std::sync::Arc::new(or_shutdown!(
-        plugin_runtime,
-        gateway_host::plugin_distribution::HttpPluginDistribution::new(plugin_http)
-    ));
-    let analytics_worker = or_shutdown!(
-        plugin_runtime,
-        store.request_analytics_worker(std::sync::Arc::new(
-            gateway_admin::ProviderUsageBillingProjector::new(providers.admin.clone()),
-        ))
-    );
-    let mut admin = or_shutdown!(
-        plugin_runtime,
-        gateway_admin::initialize_with_plugin_accounts(
-            config.admin,
-            config.client,
-            store.admin_ports(),
-            gateway_admin::AdminRuntimePorts {
-                upstream_info: Some(providers.peer.service()),
-                timezone,
-                service_middleware: service_middleware(core.snapshots(), &plugin_runtime),
-                providers: providers.admin,
-                plugin_preparation: plugin_runtime.clone(),
-                plugin_management: plugin_runtime.clone(),
-                published_snapshot: core.snapshots(),
-                plugin_inspector,
-                plugin_distribution,
-                pricing_source: std::sync::Arc::new(gateway_host::pricing::ModelsDevPricing),
-                snapshot: core.snapshot_control(),
-                account_probe: core.account_probe(),
-                proxy_probe: host.proxy_probe(provider_openai::build_reqwest_client_with_custom_ca),
-                client_distribution: host.client_distribution_resolver(),
-                system: host.system_operations(),
-                client_key_verifier: core.client_key_verifier(),
-            },
-            management.accounts.clone(),
+    let prompt_guard = std::sync::Arc::new(
+        gateway_host::prompt_guard::HostPromptGuard::new(
+            store.admin_ports().settings(),
+            providers.veil.clone(),
         )
-        .await
+        .map(|guard| guard.with_store(store.prompt_guard()))
+        .map_err(ConfigError::InvalidField)?,
     );
-    let official_files = host.official_plugin_release_files();
-    let official_identity = host.official_plugin_release_identity();
-    let official_import = or_shutdown!(
-        plugin_runtime,
-        admin
-            .services()
-            .plugins()
-            .import_official_release(
-                official_files.as_ref(),
-                &official_identity,
-                &gateway_admin::model::MutationContext {
-                    actor: gateway_admin::model::MutationActor::System,
-                    request_id: "startup-official-plugin-import".to_owned(),
-                },
-            )
-            .await
-    );
-    if official_import.artifacts > 0 {
-        host.report_startup_ready("Official plugins");
-    }
+    let mut core = gateway_core::prepare(store.core_ports(), providers.core)
+        .with_prompt_guard(prompt_guard.clone())
+        .activate()
+        .await?;
+    host.report_startup_ready("Core");
+    let analytics_worker = store.request_analytics_worker(std::sync::Arc::new(
+        gateway_admin::ProviderUsageBillingProjector::new(providers.admin.clone()),
+    ))?;
+    let mut admin = gateway_admin::initialize(
+        config.admin,
+        config.client,
+        // veil 映射卷与数据库归档在同一备份记录中导出。
+        store
+            .admin_ports()
+            .with_backup_privacy_store(std::sync::Arc::new(
+                gateway_host::privacy_backup::VeilBackupSnapshot::new(
+                    providers.veil.clone(),
+                    backup_staging,
+                ),
+            )),
+        gateway_admin::AdminRuntimePorts {
+            upstream_info: Some(providers.peer.service()),
+            timezone,
+            providers: providers.admin,
+            pricing_source: std::sync::Arc::new(gateway_host::pricing::ModelsDevPricing),
+            snapshot: core.snapshot_control(),
+            account_probe: core.account_probe(),
+            proxy_probe: host.proxy_probe(provider_openai::build_reqwest_client_with_custom_ca),
+            client_distribution: host.client_distribution_resolver(),
+            system: host.system_operations(),
+            client_key_verifier: core.client_key_verifier(),
+        },
+    )
+    .await?;
     host.report_startup_ready("Admin");
 
     let mut probes = store.health_probes();
     probes.extend(core.health_probes());
     probes.push(host.logging_health_probe());
-    let api = or_shutdown!(
-        plugin_runtime,
-        gateway_api::initialize(
-            config.api,
-            core.execution_service(),
-            admin.services(),
-            probes,
-            host.worker_health(),
-            host.connection_lifecycle(),
-            store.diagnostics(),
-        )
-    )
-    .with_middleware({
-        let snapshots = core.snapshots();
-        let middleware = plugin_runtime.execution_registry();
-        move |snapshot| {
-            if let Some(snapshot) = snapshot {
-                return middleware.middleware(snapshot.extensions()?);
-            }
-            // 数据面未就绪时，管理与诊断路由仍可使用发布候选中的插件
-            let diagnostic = snapshots.snapshot_for_diagnostics()?;
-            middleware.middleware(diagnostic.extensions()?)
-        }
-    });
-    let http_dispatcher = api.dispatcher();
-    or_shutdown!(plugin_runtime, plugin_runtime.bind_http(&http_dispatcher));
+    let api = gateway_api::initialize(
+        store.peer_routing_id().await?,
+        config.api,
+        core.execution_service(),
+        admin.services(),
+        probes,
+        host.worker_health(),
+        host.connection_lifecycle(),
+        store.diagnostics(),
+    )?
+    .with_claude_privacy(providers.veil.clone())
+    .with_prompt_guard_control(prompt_guard);
     host.report_startup_ready("API");
-
-    or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.bind_services(&admin.services().public_services())
-    );
-    or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.bind_usage_queries(&admin.services().usage_data())
-    );
 
     let mut plan = store.take_worker_contributions();
     plan.push(analytics_worker);
-    plan.push(or_shutdown!(
-        plugin_runtime,
-        gateway_host::retention::worker(store.retention())
-    ));
+    plan.push(gateway_host::retention::worker(store.retention())?);
     plan.extend(core.take_worker_contributions());
     plan.extend(providers.openai.take_worker_contributions());
-    plan.extend(providers.xai.take_worker_contributions());
+    plan.extend(providers.anthropic.take_worker_contributions());
     plan.extend(admin.take_worker_contributions());
     plan.extend(providers.peer.take_worker_contributions());
-    plan.push(or_shutdown!(
-        plugin_runtime,
-        plugin_runtime.maintenance_worker(core.snapshots())
-    ));
-    or_shutdown!(
-        plugin_runtime,
-        host.start_workers(plan, store.worker_leader_lease(), store.diagnostics())
-    );
+    host.start_workers(plan, store.worker_leader_lease(), store.diagnostics())?;
     host.report_startup_ready("Workers");
-    let served = host.serve(api.router()).await;
-    plugin_runtime.shutdown().await;
-    Ok(served?)
+    Ok(host.serve(api.router()).await?)
 }

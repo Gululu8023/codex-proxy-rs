@@ -9,11 +9,11 @@ import PolicyPreview from './PolicyPreview.vue'
 import { createPreset, newRule, presets } from './presets'
 import RuleEditor from './RuleEditor.vue'
 import RulesTable from './RulesTable.vue'
+import VeilStatus from './VeilStatus.vue'
 
-defineProps<{ disabled: boolean }>()
+defineProps<{ disabled: boolean, provider: 'openai' | 'anthropic' }>()
 
 const { t } = useI18n({ useScope: 'global' })
-
 const model = defineModel<CodexPrivacyPolicy>({ required: true })
 const editorOpen = shallowRef(false)
 const selected = shallowRef<PrivacyRule | null>(null)
@@ -73,11 +73,20 @@ function remove(rule: PrivacyRule) {
 </script>
 
 <template>
-  <ZCard id="privacy-policy" :title="t('settings.privacy.privacyPolicy')" :description="t('settings.privacy.description')">
+  <ZCard v-if="provider === 'anthropic'" id="privacy-policy" :title="t('settings.privacy.privacyPolicy')" :description="t('settings.privacy.claudeDescription')">
     <template #actions>
+      <slot name="actions" />
+    </template>
+    <slot name="scope" />
+    <VeilStatus />
+  </ZCard>
+  <ZCard v-else id="privacy-policy" :title="t('settings.privacy.privacyPolicy')" :description="t('settings.privacy.description')">
+    <template #actions>
+      <slot name="actions" />
       <ZSwitch v-model="model.enabled" :aria-label="t('settings.privacy.enableRequestRules')" :active-text="t('common.values.on')" :inactive-text="t('common.values.off')" inline-prompt :width="56" :disabled="disabled" />
     </template>
     <template #body>
+      <slot name="scope" />
       <div class="grid gap-3">
         <div class="flex flex-wrap items-center justify-between gap-2">
           <div class="flex flex-wrap items-center gap-2">
@@ -128,6 +137,7 @@ function remove(rule: PrivacyRule) {
           </div>
         </div>
       </div>
+      <slot name="footer" />
     </template>
   </ZCard>
   <RuleEditor v-model="editorOpen" :rule="selected" :max-steps="availableSteps" :is-new="isNew" :disabled="disabled" @apply="apply" />

@@ -2001,7 +2001,7 @@ async fn admin_observability_adapter_preserves_utc_queries_metrics_costs_and_det
             filter: admin_observability::UsageFilter {
                 model_contains: None,
                 client_api_key_name: None,
-                provider_account_name: None,
+                provider_account_search: None,
                 client_api_key_ref: Some("key_observe".to_owned()),
                 request_id: Some("req_observe_success".to_owned()),
                 provider_account_ref: Some("acct_observe".to_owned()),
@@ -3350,4 +3350,87 @@ async fn diagnostic_export_reads_exact_targets_and_prioritizes_final_error() {
     assert_eq!(errors[0].event_id, "ops_observe_retry");
     assert!(errors[0].request_id.is_none());
     database.close().await;
+}
+
+#[tokio::test]
+async fn usage_account_filter_matches_only_historical_names_and_emails() {
+    use admin_observability::UsageRecordStatus::{All, Error, Success};
+
+    for provider in ["openai", "anthropic"] {
+        let Some(database) = TestDatabase::create("usage_account_filter").await else {
+            return;
+        };
+        let now = Utc::now();
+        seed_observability_facts(&database.pool, now)
+            .await
+            .expect("seed observability facts");
+        seed_calculated_billing_facts(&database.pool, now)
+            .await
+            .expect("seed unrelated request");
+        sqlx::query(
+            "update model_requests set request_observation_json = jsonb_set(
+           request_observation_json, '{account}', case when id = 'req_observe_success'
+             then jsonb_build_object('email', $1::text)
+             else jsonb_build_object('name', $2::text) end)
+         where id in ('req_observe_success', 'req_observe_failed')",
+        )
+        .bind(r"alice_%\ops@example.invalid")
+        .bind("alice team")
+        .execute(&database.pool)
+        .await
+        .expect("set email-only and name-only snapshots");
+        sqlx::query("update model_requests set provider_kind = $1")
+            .bind(provider)
+            .execute(&database.pool)
+            .await
+            .unwrap();
+        sqlx::query("update provider_accounts set name = 'renamed-now', email = 'current@example.invalid' where id = 'acct_observe'").execute(&database.pool).await.unwrap();
+        super::drain_analytics(&database.pool).await;
+
+        let range = ObservabilityRange::new(now - TimeDelta::hours(1), now).expect("range");
+        let repo = observability_repository(&database.pool);
+        // 改名和删除当前账号都不能改变历史快照搜索；缺少邮箱的快照仍按名称匹配。
+        for deleted in [false, true] {
+            if deleted {
+                sqlx::query("delete from provider_accounts where id = 'acct_observe'")
+                    .execute(&database.pool)
+                    .await
+                    .unwrap();
+            }
+            for (status, search, page, total, expected_id) in [
+                (Success, r"_%\", 1, 1, Some("req_observe_success")),
+                (Error, "team", 1, 1, Some("req_observe_failed")),
+                (All, "alice", 1, 2, Some("req_observe_failed")),
+                (All, "alice", 2, 2, Some("req_observe_success")),
+                (Error, "@example", 1, 0, None),
+                (All, "ALICE", 1, 0, None),
+                (All, "alice%ops", 1, 0, None),
+                (All, "public-model", 1, 0, None),
+                (All, "renamed-now", 1, 0, None),
+                (All, "current@example.invalid", 1, 0, None),
+            ] {
+                let result = repo
+                    .list_usage_records(UsageRecordQuery {
+                        status,
+                        range,
+                        filter: UsageRecordFilter {
+                            provider_account_search: Some(search.to_owned()),
+                            provider_kind: Some(provider.to_owned()),
+                            ..Default::default()
+                        },
+                        current_page: page,
+                        page_size: ObservabilityPageSize::new(1).expect("page size"),
+                    })
+                    .await
+                    .expect("filter usage by account snapshot");
+                assert_eq!(result.total, total, "{status:?} {search} page {page}");
+                assert_eq!(
+                    result.items.first().map(|item| item.id.as_str()),
+                    expected_id,
+                    "{status:?} {search} page {page}"
+                );
+            }
+        }
+        database.close().await;
+    }
 }

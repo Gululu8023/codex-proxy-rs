@@ -7,9 +7,14 @@ import { isErrorUsageRecord } from '../utils/detail'
 export function useUsageRecordDetail() {
   const showDetailModal = shallowRef(false)
   const selectedUsageRecord = shallowRef<UsageRecordDetail | null>(null)
-  const selectedRecord = shallowRef<Pick<UsageListRecord, 'id' | 'logicalOutcome'> | null>(null)
+  const selectedRecord = shallowRef<Pick<UsageListRecord, 'id'> & Partial<Pick<UsageListRecord, 'logicalOutcome'>> | null>(null)
   const request = useRequestState()
-  const detailIsError = computed(() => isErrorUsageRecord(selectedUsageRecord.value ?? selectedRecord.value))
+  const detailIsError = computed(() => {
+    const record = selectedUsageRecord.value ?? selectedRecord.value
+    return isErrorUsageRecord(record?.logicalOutcome === undefined
+      ? null
+      : { logicalOutcome: record.logicalOutcome })
+  })
 
   async function loadDetail() {
     if (!selectedRecord.value || !showDetailModal.value)
@@ -35,6 +40,14 @@ export function useUsageRecordDetail() {
     void loadDetail()
   }
 
+  function openRequest(id: string) {
+    // 审查记录深链只有请求 ID，错误类型等详情返回后再确定
+    selectedRecord.value = { id }
+    selectedUsageRecord.value = null
+    showDetailModal.value = true
+    void loadDetail()
+  }
+
   watch(showDetailModal, (open) => {
     if (!open)
       request.invalidate({ resetLoading: false })
@@ -48,5 +61,6 @@ export function useUsageRecordDetail() {
     detailError: request.error,
     handleViewDetail,
     reloadDetail: loadDetail,
+    openRequest,
   }
 }

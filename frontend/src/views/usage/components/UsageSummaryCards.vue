@@ -15,10 +15,10 @@ const props = defineProps<{
 const { t } = useI18n({ useScope: 'global' })
 
 const averageLatency = computed(() => {
-  const raw = props.summary?.averageLatencyMsValue
-  const value = raw == null || !Number.isFinite(raw) || raw < 0
-    ? 0
-    : raw
+  const value = props.summary?.averageLatencyMsValue
+  // 没有延迟样本不等于零耗时，切换统计范围时也保留未知状态。
+  if (value == null || !Number.isFinite(value) || value < 0)
+    return { value: '—', unit: '' }
   if (value < 1_000) {
     return {
       value: String(Math.round(value)),

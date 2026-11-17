@@ -1,9 +1,6 @@
 //! Admin query service 使用的账号运行态组合 adapter
 
-use std::collections::BTreeMap;
-
 use async_trait::async_trait;
-use chrono::{DateTime, Utc};
 use gateway_admin::{
     model::accounts::AccountRuntimeSnapshot,
     ports::store::{AccountRuntimeStore, AdminStoreResult},
@@ -77,27 +74,6 @@ impl AccountRuntimeStore for RedisAdminAccountRuntimeStore {
     ) -> AdminStoreResult<AccountRuntimeSnapshot> {
         self.cooldowns
             .account_cooldowns(account_ids)
-            .await
-            .map_err(|error| crate::admin_store_error("account runtime", error))
-    }
-
-    async fn active_freezes(
-        &self,
-    ) -> AdminStoreResult<BTreeMap<String, gateway_admin::model::accounts::AccountFreeze>> {
-        self.cooldowns
-            .active_freezes()
-            .await
-            .map_err(|error| crate::admin_store_error("account runtime", error))
-    }
-
-    async fn finish_freeze(
-        &self,
-        account_id: &str,
-        expected: &gateway_admin::model::accounts::AccountFreeze,
-        postpone_until: Option<DateTime<Utc>>,
-    ) -> AdminStoreResult<bool> {
-        self.cooldowns
-            .finish_freeze(account_id, expected, postpone_until)
             .await
             .map_err(|error| crate::admin_store_error("account runtime", error))
     }

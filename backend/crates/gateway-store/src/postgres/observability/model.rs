@@ -40,7 +40,7 @@ pub(crate) fn observability_page_offset(
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct UsageRecordFilter {
     pub client_api_key_name: Option<String>,
-    pub provider_account_name: Option<String>,
+    pub provider_account_search: Option<String>,
     pub client_api_key_ref: Option<String>,
     pub request_id: Option<String>,
     pub provider_account_ref: Option<String>,
@@ -58,6 +58,12 @@ pub struct UsageRecordFilter {
 }
 
 impl UsageRecordFilter {
+    pub(super) fn needs_observation_text(&self) -> bool {
+        self.search.is_some()
+            || self.client_api_key_name.is_some()
+            || self.provider_account_search.is_some()
+    }
+
     pub fn validate(&self) -> StoreResult<()> {
         for (value, field) in [
             (
@@ -65,8 +71,8 @@ impl UsageRecordFilter {
                 "client API key name filter",
             ),
             (
-                self.provider_account_name.as_deref(),
-                "provider account name filter",
+                self.provider_account_search.as_deref(),
+                "provider account search filter",
             ),
             (self.client_api_key_ref.as_deref(), "client API key filter"),
             (self.request_id.as_deref(), "request ID filter"),
@@ -270,6 +276,7 @@ pub struct ProviderAccountModelUsageObservation {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderAccountUsageQuery {
+    pub provider_kind: Option<String>,
     pub range: ObservabilityRange,
     pub account_ids: Option<Vec<String>>,
     pub limit: u16,
@@ -285,6 +292,7 @@ impl ProviderAccountUsageQuery {
         }
         validate_account_ids(&account_ids)?;
         Ok(Self {
+            provider_kind: None,
             range,
             limit: u16::try_from(account_ids.len())
                 .map_err(|_| invalid("account usage query is too large"))?,
@@ -298,6 +306,7 @@ impl ProviderAccountUsageQuery {
             return Err(invalid("account usage limit must be between 1 and 200"));
         }
         Ok(Self {
+            provider_kind: None,
             range,
             account_ids: None,
             limit,

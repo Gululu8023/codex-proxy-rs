@@ -7,6 +7,7 @@ import { RefreshCw } from '@lucide/vue'
 
 import { useI18n } from 'vue-i18n'
 
+import ProviderFilter from '@/components/ProviderFilter.vue'
 import RequestHealthTimelineCard from '@/components/usage/RequestHealthTimelineCard.vue'
 import AccountOverviewCard from './AccountOverviewCard.vue'
 import DashboardHeartbeat from './DashboardHeartbeat.vue'
@@ -55,6 +56,7 @@ const { t } = useI18n({ useScope: 'global' })
 type DashboardSnapshotView = ReturnType<typeof dashboardSnapshotView>
 type DashboardTrendView = ReturnType<typeof dashboardTrendView>
 
+const provider = defineModel<string>('provider', { default: '' })
 const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true })
 </script>
 
@@ -82,6 +84,14 @@ const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true 
       </template>
     </ZPageHeader>
 
+    <div class="mt-4 flex min-w-0 flex-wrap items-center gap-3">
+      <span class="text-z-sm text-z-text-secondary">{{ t('common.providers.filter') }}</span>
+      <ProviderFilter v-model="provider" />
+    </div>
+
+    <p v-if="analyticsError" role="alert" class="mt-5 text-z-error">
+      {{ analyticsError }}
+    </p>
     <template v-if="!analyticsError || analytics">
       <section
         class="mt-6 grid grid-cols-1 gap-4 md:grid-cols-2 2xl:grid-cols-4 2xl:gap-6"
@@ -101,7 +111,7 @@ const trendKind = defineModel<DashboardTrendKind>('trendKind', { required: true 
           :error="trendError"
           @trend-change="emit('trendChange', $event)"
         />
-        <WireProfileCard :profiles="wireProfiles" />
+        <WireProfileCard :profiles="wireProfiles" :provider="provider" />
       </section>
 
       <AccountOverviewCard

@@ -1,0 +1,8 @@
+# 放入 DMIT Nginx 的 stream {} 内，替换为 OVH 公网地址
+# 两个客户端域名都解析到 DMIT，TLS/SNI 原样送达 OVH
+server {
+    listen 443;
+    proxy_pass OVH_PUBLIC_IP:443;
+    proxy_connect_timeout 10s;
+    proxy_timeout 3600s;
+}

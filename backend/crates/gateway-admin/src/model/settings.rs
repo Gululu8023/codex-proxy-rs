@@ -8,17 +8,18 @@ use gateway_core::routing::{ProviderKind, PublicModelId, UpstreamModelId};
 
 use super::Revision;
 
-/// 客户端模型到上游模型的全局精确映射
+/// Codex 客户端模型到上游模型的精确映射；Claude 使用独立命名空间。
 pub type ModelMappings = BTreeMap<PublicModelId, UpstreamModelId>;
 
-/// 全局模型映射的数量与文本约束；调用方保留各自的键值表示
+/// 每个供应商的映射约束；拒绝运行时无法解析的循环或超长链。
 pub fn validate_model_mappings<'a>(
     mappings: impl ExactSizeIterator<Item = (&'a str, &'a str)>,
 ) -> Result<(), &'static str> {
     if mappings.len() > 512 {
         return Err("model_mappings");
     }
-    for (requested, upstream) in mappings {
+    let mappings: BTreeMap<_, _> = mappings.collect();
+    for (requested, upstream) in &mappings {
         for value in [requested, upstream] {
             if value.is_empty()
                 || value.len() > 256
@@ -26,6 +27,24 @@ pub fn validate_model_mappings<'a>(
             {
                 return Err("model_mappings");
             }
+        }
+    }
+    for requested in mappings.keys() {
+        let mut current = *requested;
+        let mut visited = std::collections::BTreeSet::new();
+        let mut resolved = false;
+        for _ in 0..20 {
+            if !visited.insert(current) {
+                return Err("model_mappings_cycle");
+            }
+            let Some(next) = mappings.get(current) else {
+                resolved = true;
+                break;
+            };
+            current = next;
+        }
+        if !resolved {
+            return Err("model_mappings_chain_too_long");
         }
     }
     Ok(())
@@ -45,9 +64,16 @@ pub use gateway_core::account::RotationStrategy;
 /// 运行设置的共同值；版本、Provider 画像更新和数据库秘密由外层类型拥有
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct RuntimeSettingsValues {
+    #[serde(default)]
+    pub prompt_guard: super::prompt_guard::PromptGuardConfig,
+    #[serde(default)]
+    pub claude_public_url: String,
     pub codex_privacy_policy: gateway_core::settings::privacy::CodexPrivacyPolicy,
+    /// Codex 与 Claude 共用的位置覆盖；账号或出站代理的位置优先。
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
+    #[serde(default)]
+    pub anthropic_model_mappings: BTreeMap<String, String>,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u32,
     pub max_concurrent_per_account: u32,
@@ -59,19 +85,26 @@ pub struct RuntimeSettingsValues {
     pub max_retry_after_seconds: u32,
     pub openai_guardian_reserved_concurrency: u32,
     pub openai_account_affinity: gateway_core::account::AccountAffinity,
+    #[serde(default)]
+    pub anthropic_account_affinity: gateway_core::account::AccountAffinity,
     pub max_account_rotations: u32,
     pub openai_session_affinity_ttl_hours: u32,
+    #[serde(default = "gateway_core::account::default_anthropic_session_affinity_ttl_hours")]
+    pub anthropic_session_affinity_ttl_hours: u32,
     pub responses_max_decompressed_body_bytes: u64,
     pub smart_scheduling: gateway_core::account::SmartSchedulingConfig,
+    pub quota_reset_window_weights: gateway_core::account::ResetWindowWeights,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
+    pub min_claude_code_version: Option<String>,
     pub usage_retention_days: u32,
     pub ops_event_retention_days: u32,
     pub audit_retention_days: u32,
-    pub account_error_protection: gateway_core::account::AccountErrorProtection,
     pub account_warmup_enabled: bool,
     pub account_warmup_cron: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_on_low_weekly_quota: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
 }
@@ -101,6 +134,12 @@ pub struct ReplaceRuntimeSettings {
     pub request_profile_updates: ProviderRequestProfileUpdates,
     pub model_mappings: ModelMappings,
     pub rotation_strategy: RotationStrategy,
+}
+
+/// 专项页面只提交其拥有的字段，仍使用同一个运行设置版本和持久化事务。
+pub enum DomainSettingsUpdate {
+    ClaudePublicUrl(String),
+    PromptGuard(Box<super::prompt_guard::PromptGuardConfig>),
 }
 
 /// 明文管理员 API Key；按产品约束明文落库，但禁止 Debug 泄漏
@@ -188,6 +227,20 @@ impl From<RuntimeSettings> for ReplaceRuntimeSettings {
 impl RuntimeSettingsValues {
     /// 校验共同事实，返回字段名供边界转换错误；SQL 类型转换仍由 Store 处理
     pub fn validate(&self) -> Result<(), &'static str> {
+        self.prompt_guard.validate()?;
+        if !self.claude_public_url.is_empty() {
+            let url = url::Url::parse(&self.claude_public_url).map_err(|_| "claudePublicUrl")?;
+            if url.scheme() != "https"
+                || url.host_str().is_none()
+                || url.path() != "/"
+                || !url.username().is_empty()
+                || url.password().is_some()
+                || url.query().is_some()
+                || url.fragment().is_some()
+            {
+                return Err("claudePublicUrl");
+            }
+        }
         if !(1..=1440).contains(&self.reset_credit_lead_minutes) {
             return Err("reset_credit_lead_minutes");
         }
@@ -200,6 +253,11 @@ impl RuntimeSettingsValues {
         self.request_location
             .validate()
             .map_err(|_| "request_location")?;
+        validate_model_mappings(
+            self.anthropic_model_mappings
+                .iter()
+                .map(|(from, to)| (from.as_str(), to.as_str())),
+        )?;
         gateway_core::settings::validate_request_limits(
             self.max_waiting_per_key,
             self.max_waiting_per_account,
@@ -209,10 +267,16 @@ impl RuntimeSettingsValues {
             self.openai_session_affinity_ttl_hours,
         )?;
         gateway_core::settings::response_body_limit(self.responses_max_decompressed_body_bytes)?;
+        if !(1..=gateway_core::account::MAX_SESSION_AFFINITY_TTL_HOURS)
+            .contains(&self.anthropic_session_affinity_ttl_hours)
+        {
+            return Err("anthropic_session_affinity_ttl_hours");
+        }
         gateway_core::settings::client_min_versions(
             self.min_codex_desktop_version.as_deref(),
             self.min_codex_cli_version.as_deref(),
         )?;
+        gateway_core::settings::claude_code_min_version(self.min_claude_code_version.as_deref())?;
         for (valid, field) in [
             (
                 self.refresh_margin_seconds > 0
@@ -230,7 +294,6 @@ impl RuntimeSettingsValues {
             self.ops_event_retention_days,
             self.audit_retention_days,
         )?;
-        self.account_error_protection.validate()?;
         gateway_core::provider_ports::ProviderWarmupPolicy::validate_values(
             self.account_warmup_enabled,
             &self.account_warmup_cron,

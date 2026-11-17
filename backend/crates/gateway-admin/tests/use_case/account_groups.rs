@@ -7,7 +7,7 @@ use std::{
 };
 
 use async_trait::async_trait;
-use chrono::{DateTime, Duration, Utc};
+use chrono::{Duration, Utc};
 use gateway_admin::{
     model::{
         AdminErrorKind, MutationContext, PageSize, Revision,
@@ -315,28 +315,12 @@ impl AccountRuntimeStore for FakeRuntimeStore {
     ) -> AdminStoreResult<AccountRuntimeSnapshot> {
         *self.requested_accounts.lock().expect("requested accounts") = account_ids.to_vec();
         Ok(AccountRuntimeSnapshot {
-            protection_rules: std::collections::BTreeMap::new(),
             cooldown: BTreeMap::from([(
                 "acct_limited".to_owned(),
                 std::time::SystemTime::from(Utc::now() + Duration::minutes(5)).into(),
             )]),
             in_flight: Some(BTreeMap::from([("acct_available".to_owned(), 2)])),
         })
-    }
-
-    async fn active_freezes(
-        &self,
-    ) -> AdminStoreResult<BTreeMap<String, gateway_admin::model::accounts::AccountFreeze>> {
-        Ok(BTreeMap::new())
-    }
-
-    async fn finish_freeze(
-        &self,
-        _account_id: &str,
-        _expected: &gateway_admin::model::accounts::AccountFreeze,
-        _postpone_until: Option<DateTime<Utc>>,
-    ) -> AdminStoreResult<bool> {
-        Ok(false)
     }
 }
 
@@ -377,6 +361,7 @@ fn member(account_id: &str, total_slots: u64) -> AccountGroupMemberFact {
         group_id: group_id(),
         account_id: account_id.to_owned(),
         status: AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: CredentialState::Ready,
             access_token_expires_at: None,

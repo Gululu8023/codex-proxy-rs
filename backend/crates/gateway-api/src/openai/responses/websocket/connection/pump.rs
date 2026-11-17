@@ -2,15 +2,12 @@
 
 use super::{
     frame::*,
-    middleware,
     state::{ConnectionCommand, ConnectionStats, PumpContext},
+    writer,
 };
 use axum::extract::ws::Message;
 use futures::{Sink, Stream, StreamExt};
-use gateway_core::{
-    engine::middleware::{FrozenMiddlewarePlan, MiddlewareHeader, websocket as contract},
-    lifecycle::CancellationToken,
-};
+use gateway_core::lifecycle::CancellationToken;
 use std::{
     fmt,
     sync::{
@@ -37,34 +34,27 @@ pub(super) async fn run_pump<S, E>(
     expired: Arc<AtomicBool>,
     stats: Arc<ConnectionStats>,
     config: ConnectionConfig,
-    middleware: Option<FrozenMiddlewarePlan>,
-    headers: Arc<[MiddlewareHeader]>,
-    extensions: gateway_core::engine::extensions::ExtensionCallScope,
 ) where
     S: Stream<Item = Result<Message, E>> + Sink<Message, Error = E> + Unpin + Send + 'static,
     E: fmt::Display + Send + 'static,
 {
-    let _connection_lifetime = middleware::CancelOnDrop(Some(cancellation.clone()));
+    let _connection_lifetime = writer::CancelOnDrop(Some(cancellation.clone()));
     let context = Arc::new(PumpContext {
-        extensions,
         connection_id,
         cancellation: cancellation.child_token(),
         opened_at,
         expired,
         stats,
         config,
-        middleware,
-        headers,
     });
-    let _lifetime = middleware::CancelOnDrop(Some(context.cancellation.clone()));
+    let _lifetime = writer::CancelOnDrop(Some(context.cancellation.clone()));
     let (writer, mut reader) = socket.split();
-    let writer = Arc::new(middleware::Writer::new(writer, context.clone()));
-    let sender: Arc<dyn contract::Sender> = writer.clone();
+    let writer = Arc::new(writer::Writer::new(writer, context.clone()));
     let received_activity = activity.subscribe();
     // 心跳独立于业务写入等待，但共享唯一 writer，避免长写入或排队阻止失联检测
     let reason = tokio::select! {
         biased;
-        reason = read_connection(&mut reader, &incoming, &input_gate, sender.clone(), &activity, &context) => reason,
+        reason = read_connection(&mut reader, &incoming, &input_gate, &activity, &context) => reason,
         reason = write_connection(writer.clone(), commands, &context) => reason,
         reason = heartbeat_connection(writer.clone(), received_activity, &context) => reason,
     };
@@ -83,7 +73,6 @@ async fn read_connection<S, E>(
     socket: &mut S,
     incoming: &mpsc::Sender<PendingConnectionEvent>,
     input_gate: &tokio::sync::Mutex<()>,
-    sender: Arc<dyn contract::Sender>,
     activity: &watch::Sender<Instant>,
     context: &PumpContext,
 ) -> PumpExitReason
@@ -111,17 +100,9 @@ where
             message = socket.next() => {
                 let _guard = input_gate.lock().await;
                 if matches!(&message, Some(Ok(_))) {
-                    // 链路活动以真实入站为准，插件丢弃消息不应抹掉对端已经响应的事实
+                    // 链路活动以真实入站为准，写入不能掩盖对端失联。
                     activity.send_replace(Instant::now());
                 }
-                let message = match message {
-                    Some(Ok(message)) => match middleware::transform(message, contract::Direction::Incoming, sender.clone(), context).await {
-                        Ok(Some(message)) => Some(Ok(message)),
-                        Ok(None) => continue,
-                        Err(_) => return PumpExitReason::MiddlewareFailed,
-                    },
-                    other => other,
-                };
                 let event = match message {
                     Some(Ok(Message::Text(payload))) => Some(ConnectionEvent::Text(payload.to_string())),
                     Some(Ok(Message::Binary(_))) => Some(ConnectionEvent::Binary),
@@ -148,7 +129,7 @@ where
 }
 
 async fn write_connection<S, E>(
-    writer: Arc<middleware::Writer<S>>,
+    writer: Arc<writer::Writer<S>>,
     mut commands: mpsc::Receiver<ConnectionCommand>,
     context: &PumpContext,
 ) -> PumpExitReason
@@ -171,20 +152,7 @@ where
             acknowledged,
         } = command;
         let closing = matches!(message, Message::Close(_));
-        let result = match middleware::transform(
-            message,
-            contract::Direction::Outgoing,
-            writer.clone(),
-            context,
-        )
-        .await
-        {
-            Ok(Some(message)) => writer.write(message).await.map(|()| WriteOutcome::Written),
-            Ok(None) => Ok(WriteOutcome::Suppressed),
-            Err(error) => Err(ConnectionWriteError::Transport {
-                message: error.to_string(),
-            }),
-        };
+        let result = writer.write(message).await.map(|()| WriteOutcome::Written);
         let reason = result
             .as_ref()
             .err()
@@ -203,7 +171,7 @@ where
 }
 
 async fn heartbeat_connection<S, E>(
-    writer: Arc<middleware::Writer<S>>,
+    writer: Arc<writer::Writer<S>>,
     mut activity: watch::Receiver<Instant>,
     context: &PumpContext,
 ) -> PumpExitReason
@@ -271,7 +239,7 @@ where
 }
 
 async fn write_heartbeat<S, E>(
-    writer: &Arc<middleware::Writer<S>>,
+    writer: &Arc<writer::Writer<S>>,
     sequence: u64,
     context: &PumpContext,
 ) -> Result<bool, PumpExitReason>
@@ -279,23 +247,12 @@ where
     S: Sink<Message, Error = E> + Unpin + Send + 'static,
     E: fmt::Display + Send + 'static,
 {
-    let message = middleware::transform(
-        Message::Ping(sequence.to_be_bytes().to_vec().into()),
-        contract::Direction::Outgoing,
-        writer.clone(),
-        context,
-    )
-    .await
-    .map_err(|_| PumpExitReason::MiddlewareFailed)?;
-    let Some(message) = message else {
-        return Ok(false);
-    };
-    let is_ping = matches!(message, Message::Ping(_));
+    let message = Message::Ping(sequence.to_be_bytes().to_vec().into());
     writer.write(message).await.map_err(|error| {
         tracing::info!(websocket_connection_id = %context.connection_id, error = %error, "Responses WebSocket control write failed");
         write_exit_reason(&error, context)
     })?;
-    Ok(is_ping)
+    Ok(true)
 }
 
 fn write_exit_reason(error: &ConnectionWriteError, context: &PumpContext) -> PumpExitReason {

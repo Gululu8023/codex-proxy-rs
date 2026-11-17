@@ -1,6 +1,6 @@
-import type { ProtectionDraft } from '../components/error-protection/form'
 import type { rotationOptions } from '../constants'
-import type { AccountAffinity, CodexPrivacyPolicy, SmartSchedulingConfig } from '@/api'
+import type { SettingsProvider } from '../utils/scope'
+import type { AccountAffinity, CodexPrivacyPolicy, ResetWindowWeights, SmartSchedulingConfig } from '@/api'
 import type { ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/settings/profiles'
 import { cloneDeep, isEqual } from 'es-toolkit'
 import { computed, reactive, ref, shallowRef } from 'vue'
@@ -12,7 +12,6 @@ import { t } from '@/i18n'
 import { normalizeRequestLocation } from '@/utils/location'
 import { notification as ZNotification } from '@/utils/notification'
 import { errorMessage } from '@/utils/operation'
-import { trimProtectionText } from '../components/error-protection/form'
 
 type RotationStrategy = (typeof rotationOptions.value)[number]['value']
 
@@ -26,10 +25,13 @@ export function useSettingsForm() {
   const detectingLocation = locationAction.loading
   const error = shallowRef('')
   const mappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
+  const anthropicMappings = ref<Array<{ requestedModel: string, upstreamModel: string }>>([])
   const smartSchedulingDefaults = shallowRef<SmartSchedulingConfig>()
+  const quotaResetWindowWeightsDefaults = shallowRef<ResetWindowWeights>()
   const form = reactive({
     configRevision: 0,
     smartScheduling: undefined as SmartSchedulingConfig | undefined,
+    quotaResetWindowWeights: undefined as ResetWindowWeights | undefined,
     providerRequestProfiles: {} as ProviderRequestProfiles,
     codexPrivacyPolicy: { enabled: false, onError: 'skip_rule', rules: [] } as CodexPrivacyPolicy,
     requestLocationEnabled: false,
@@ -44,8 +46,10 @@ export function useSettingsForm() {
     maxConcurrentPerAccount: null as number | null,
     openaiGuardianReservedConcurrency: null as number | null,
     openaiAccountAffinity: '' as AccountAffinity | '',
+    anthropicAccountAffinity: '' as AccountAffinity | '',
     maxAccountRotations: null as number | null,
     openaiSessionAffinityTtlHours: null as number | null,
+    anthropicSessionAffinityTtlHours: null as number | null,
     maxWaitingPerKey: null as number | null,
     maxWaitingPerAccount: null as number | null,
     keyQueueTimeoutSeconds: null as number | null,
@@ -57,33 +61,26 @@ export function useSettingsForm() {
     rotationStrategy: '' as RotationStrategy | '',
     minCodexDesktopVersion: '',
     minCodexCliVersion: '',
+    minClaudeCodeVersion: '',
     usageRetentionDays: 31 as number | null,
     opsEventRetentionDays: 30,
     auditRetentionDays: 90,
 
-    accountErrorProtection: {
-      enabled: false,
-      rules: [],
-      threshold: 12,
-      windowSeconds: 600,
-      durationSeconds: 7200,
-      probeEnabled: true,
-      probeModel: '',
-    } as ProtectionDraft,
     accountWarmupEnabled: false,
-    accountWarmupCron: '',
+    accountWarmupCron: [] as string[],
     accountWarmupModel: '',
+    resetCreditOnLowWeeklyQuota: false,
     resetCreditLeadMinutes: 10 as number | null,
     resetCreditMaxWeeklyRemainingPercent: null as number | null,
   })
 
   function snapshot() {
-    return cloneDeep({ form, mappings: mappings.value })
+    return cloneDeep({ form, mappings: mappings.value, anthropicMappings: anthropicMappings.value })
   }
 
   const saved = shallowRef<ReturnType<typeof snapshot>>()
   const hasChanges = computed(() => saved.value !== undefined
-    && !isEqual({ form, mappings: mappings.value }, saved.value))
+    && !isEqual({ form, mappings: mappings.value, anthropicMappings: anthropicMappings.value }, saved.value))
 
   function resetSettings() {
     if (!saved.value || saving.value || detectingLocation.value)
@@ -91,9 +88,10 @@ export function useSettingsForm() {
     const initial = cloneDeep(saved.value)
     Object.assign(form, initial.form)
     mappings.value = initial.mappings
+    anthropicMappings.value = initial.anthropicMappings
   }
 
-  function numericModel(key: 'resetCreditMaxWeeklyRemainingPercent' | 'resetCreditLeadMinutes' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'openaiGuardianReservedConcurrency' | 'maxAccountRotations' | 'openaiSessionAffinityTtlHours' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'keyQueueTimeoutSeconds' | 'accountQueueTimeoutSeconds' | 'maxRetryAfterSeconds' | 'responsesMaxDecompressedBodyMiB' | 'usageRetentionDays') {
+  function numericModel(key: 'resetCreditMaxWeeklyRemainingPercent' | 'resetCreditLeadMinutes' | 'refreshMarginSeconds' | 'refreshConcurrency' | 'maxConcurrentPerAccount' | 'openaiGuardianReservedConcurrency' | 'maxAccountRotations' | 'openaiSessionAffinityTtlHours' | 'anthropicSessionAffinityTtlHours' | 'maxWaitingPerKey' | 'maxWaitingPerAccount' | 'keyQueueTimeoutSeconds' | 'accountQueueTimeoutSeconds' | 'maxRetryAfterSeconds' | 'responsesMaxDecompressedBodyMiB' | 'usageRetentionDays') {
     return computed({
       get: () => (form[key] === null
         ? ''
@@ -117,6 +115,7 @@ export function useSettingsForm() {
   const openaiGuardianReservedConcurrencyValue = numericModel('openaiGuardianReservedConcurrency')
   const maxAccountRotationsValue = numericModel('maxAccountRotations')
   const openaiSessionAffinityTtlHoursValue = numericModel('openaiSessionAffinityTtlHours')
+  const anthropicSessionAffinityTtlHoursValue = numericModel('anthropicSessionAffinityTtlHours')
   const maxWaitingPerKeyValue = numericModel('maxWaitingPerKey')
   const maxWaitingPerAccountValue = numericModel('maxWaitingPerAccount')
   const responsesMaxDecompressedBodyMiBValue = numericModel('responsesMaxDecompressedBodyMiB')
@@ -137,8 +136,10 @@ export function useSettingsForm() {
     form.maxConcurrentPerAccount = data.maxConcurrentPerAccount
     form.openaiGuardianReservedConcurrency = data.openaiGuardianReservedConcurrency
     form.openaiAccountAffinity = data.openaiAccountAffinity
+    form.anthropicAccountAffinity = data.anthropicAccountAffinity
     form.maxAccountRotations = data.maxAccountRotations
     form.openaiSessionAffinityTtlHours = data.openaiSessionAffinityTtlHours
+    form.anthropicSessionAffinityTtlHours = data.anthropicSessionAffinityTtlHours
     form.maxWaitingPerKey = data.maxWaitingPerKey
     form.maxWaitingPerAccount = data.maxWaitingPerAccount
     form.keyQueueTimeoutSeconds = data.keyQueueTimeoutSeconds
@@ -148,27 +149,30 @@ export function useSettingsForm() {
     form.responsesMaxDecompressedBodyMiB = data.responsesMaxDecompressedBodyBytes / MIB
 
     form.smartScheduling = { ...data.smartScheduling }
+    form.quotaResetWindowWeights = { ...data.quotaResetWindowWeights }
+    quotaResetWindowWeightsDefaults.value = { ...data.quotaResetWindowWeightsDefaults }
     smartSchedulingDefaults.value = { ...data.smartSchedulingDefaults }
     form.rotationStrategy = data.rotationStrategy
     form.minCodexDesktopVersion = data.minCodexDesktopVersion ?? ''
     form.providerRequestProfiles = cloneDeep(data.providerRequestProfiles)
     form.minCodexCliVersion = data.minCodexCliVersion ?? ''
+    form.minClaudeCodeVersion = data.minClaudeCodeVersion ?? ''
     form.usageRetentionDays = data.usageRetentionDays
     form.opsEventRetentionDays = data.opsEventRetentionDays
     form.auditRetentionDays = data.auditRetentionDays
-    form.accountErrorProtection = {
-      ...cloneDeep(data.accountErrorProtection),
-      probeModel: data.accountErrorProtection.probeModel ?? '',
-    }
     form.accountWarmupEnabled = data.accountWarmupEnabled
-    form.accountWarmupCron = data.accountWarmupCron ?? ''
+    form.accountWarmupCron = data.accountWarmupCron
+      ? data.accountWarmupCron.split(';')
+      : []
     form.accountWarmupModel = data.accountWarmupModel ?? ''
+    form.resetCreditOnLowWeeklyQuota = data.resetCreditOnLowWeeklyQuota
     form.resetCreditLeadMinutes = data.resetCreditLeadMinutes
     form.resetCreditMaxWeeklyRemainingPercent = data.resetCreditMaxWeeklyRemainingPercent
     mappings.value = Object.entries(data.modelMappings).map(([requestedModel, upstreamModel]) => ({
       requestedModel,
       upstreamModel,
     }))
+    anthropicMappings.value = Object.entries(data.anthropicModelMappings).map(([requestedModel, upstreamModel]) => ({ requestedModel, upstreamModel }))
     saved.value = snapshot()
   }
 
@@ -215,33 +219,46 @@ export function useSettingsForm() {
     })
   }
 
-  function addMapping() {
-    mappings.value = [
-      ...mappings.value,
+  function mappingRows(provider: SettingsProvider) {
+    return provider === 'anthropic'
+      ? anthropicMappings
+      : mappings
+  }
+
+  function addMapping(provider: SettingsProvider) {
+    const rows = mappingRows(provider)
+    rows.value = [
+      ...rows.value,
       { requestedModel: '', upstreamModel: '' },
     ]
   }
 
-  function updateMapping(index: number, key: 'requestedModel' | 'upstreamModel', value: string) {
-    const rows = [...mappings.value]
+  function updateMapping(provider: SettingsProvider, index: number, key: 'requestedModel' | 'upstreamModel', value: string) {
+    const target = mappingRows(provider)
+    const rows = [...target.value]
     if (!rows[index])
       return
     rows[index] = { ...rows[index], [key]: value }
-    mappings.value = rows
+    target.value = rows
   }
 
-  function removeMapping(index: number) {
-    const rows = [...mappings.value]
+  function removeMapping(provider: SettingsProvider, index: number) {
+    const target = mappingRows(provider)
+    const rows = [...target.value]
     rows.splice(index, 1)
-    mappings.value = rows
+    target.value = rows
   }
 
   async function saveSettings() {
-    const smartScheduling = form.smartScheduling
-    if (!smartScheduling)
-      return
     const savedSettings = saved.value
     if (saving.value || loading.value || detectingLocation.value || !savedSettings)
+      return
+    // 顶部统一保存全部基础设置，两种供应商仍使用各自的配置字段。
+    const submitted = snapshot()
+    const { form, mappings, anthropicMappings } = submitted
+    const smartScheduling = form.smartScheduling
+    const quotaResetWindowWeights = form.quotaResetWindowWeights
+    if (!smartScheduling || !quotaResetWindowWeights)
       return
     const { refreshMarginSeconds, refreshConcurrency, maxConcurrentPerAccount, openaiGuardianReservedConcurrency, openaiAccountAffinity, maxAccountRotations, openaiSessionAffinityTtlHours, rotationStrategy, maxWaitingPerKey, maxWaitingPerAccount, keyQueueTimeoutSeconds, accountQueueTimeoutSeconds, maxRetryAfterSeconds, responsesMaxDecompressedBodyMiB } = form
     const { resetCreditMaxWeeklyRemainingPercent, resetCreditLeadMinutes, usageRetentionDays } = form
@@ -259,7 +276,11 @@ export function useSettingsForm() {
         codexPrivacyPolicy: cloneDeep(form.codexPrivacyPolicy),
         requestLocationEnabled: form.requestLocationEnabled,
         requestLocation,
-        modelMappings: Object.fromEntries(mappings.value.map(row => [
+        anthropicModelMappings: Object.fromEntries(anthropicMappings.map(row => [
+          row.requestedModel.trim(),
+          row.upstreamModel.trim(),
+        ])),
+        modelMappings: Object.fromEntries(mappings.map(row => [
           row.requestedModel.trim(),
           row.upstreamModel.trim(),
         ])),
@@ -268,8 +289,10 @@ export function useSettingsForm() {
         maxConcurrentPerAccount: maxConcurrentPerAccount!,
         openaiGuardianReservedConcurrency: openaiGuardianReservedConcurrency!,
         openaiAccountAffinity: openaiAccountAffinity as AccountAffinity,
+        anthropicAccountAffinity: form.anthropicAccountAffinity as AccountAffinity,
         maxAccountRotations: maxAccountRotations!,
         openaiSessionAffinityTtlHours: openaiSessionAffinityTtlHours!,
+        anthropicSessionAffinityTtlHours: form.anthropicSessionAffinityTtlHours!,
         maxWaitingPerKey: maxWaitingPerKey!,
         maxWaitingPerAccount: maxWaitingPerAccount!,
         keyQueueTimeoutSeconds: keyQueueTimeoutSeconds!,
@@ -279,22 +302,18 @@ export function useSettingsForm() {
         responsesMaxDecompressedBodyBytes: responsesMaxDecompressedBodyMiB! * MIB,
         rotationStrategy: rotationStrategy as RotationStrategy,
         smartScheduling: { ...smartScheduling },
+        quotaResetWindowWeights: { ...quotaResetWindowWeights },
         minCodexDesktopVersion: form.minCodexDesktopVersion.trim() || null,
         minCodexCliVersion: form.minCodexCliVersion.trim() || null,
+        minClaudeCodeVersion: form.minClaudeCodeVersion.trim() || null,
         usageRetentionDays: usageRetentionDays!,
         opsEventRetentionDays: form.opsEventRetentionDays,
         auditRetentionDays: form.auditRetentionDays,
-        accountErrorProtection: {
-          ...cloneDeep(form.accountErrorProtection),
-          threshold: form.accountErrorProtection.threshold!,
-          windowSeconds: form.accountErrorProtection.windowSeconds!,
-          durationSeconds: form.accountErrorProtection.durationSeconds!,
-          probeModel: trimProtectionText(form.accountErrorProtection.probeModel) || null,
-        },
         accountWarmupEnabled: form.accountWarmupEnabled,
-        accountWarmupCron: form.accountWarmupCron.trim(),
+        accountWarmupCron: form.accountWarmupCron.map(expression => expression.trim()).join(';'),
         accountWarmupModel: form.accountWarmupModel.trim() || null,
-        resetCreditLeadMinutes: resetCreditLeadMinutes!,
+        resetCreditOnLowWeeklyQuota: form.resetCreditOnLowWeeklyQuota,
+        resetCreditLeadMinutes: (form.resetCreditOnLowWeeklyQuota ? savedSettings.form.resetCreditLeadMinutes : resetCreditLeadMinutes)!,
         resetCreditMaxWeeklyRemainingPercent,
       })
       applySettings(result)
@@ -303,7 +322,7 @@ export function useSettingsForm() {
       })
     }, {
       onError: (cause) => {
-        // 明确拒绝的请求保留草稿，执行结果未知时仍回读设置以同步已提交的版本
+        // 明确拒绝的请求保留草稿，执行结果未知时仍回读设置以同步已提交的版本。
         if (cause instanceof ApiError && cause.status !== 409
           && (cause.kind !== 'api' || cause.status < 400 || cause.status >= 500)) {
           void loadSettings(true)
@@ -322,7 +341,9 @@ export function useSettingsForm() {
     error,
     form,
     smartSchedulingDefaults,
+    quotaResetWindowWeightsDefaults,
     mappings,
+    anthropicMappings,
     addMapping,
     updateMapping,
     removeMapping,
@@ -332,6 +353,7 @@ export function useSettingsForm() {
     openaiGuardianReservedConcurrencyValue,
     maxAccountRotationsValue,
     openaiSessionAffinityTtlHoursValue,
+    anthropicSessionAffinityTtlHoursValue,
     maxWaitingPerKeyValue,
     maxWaitingPerAccountValue,
     keyQueueTimeoutSecondsValue,

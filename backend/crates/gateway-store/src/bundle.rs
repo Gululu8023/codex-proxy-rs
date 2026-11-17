@@ -7,6 +7,8 @@ use super::*;
 
 /// 已完成连接、迁移与 hydration 的 Store 能力集合
 pub struct StoreBundle {
+    prompt_guard: Arc<dyn gateway_admin::ports::prompt_guard::PromptGuardStore>,
+    pool: sqlx::PgPool,
     diagnostics: Arc<dyn gateway_core::diagnostics::OperationalDiagnostics>,
     admin_ports: AdminStorePorts,
     core_ports: CoreStorePorts,
@@ -15,12 +17,21 @@ pub struct StoreBundle {
     worker_leader_lease: Arc<dyn WorkerLeaderLeasePort>,
     health_probes: Vec<Arc<dyn HealthProbe>>,
     worker_contributions: Vec<WorkerContribution>,
-    command_writers: Option<CommandStoreWriters>,
-    command_drain: Option<CommandStoreDrain>,
     analytics: postgres::PgRequestAnalyticsRepository,
 }
 
 impl StoreBundle {
+    pub fn prompt_guard(&self) -> Arc<dyn gateway_admin::ports::prompt_guard::PromptGuardStore> {
+        self.prompt_guard.clone()
+    }
+    /// 只在启动 HTTP 服务时读取部署标记，命令行只读模式不依赖新迁移
+    pub async fn peer_routing_id(&self) -> StoreResult<uuid::Uuid> {
+        sqlx::query_scalar("select peer_routing_id from runtime_settings where id = 1")
+            .fetch_one(&self.pool)
+            .await
+            .map_err(|source| postgres_unavailable("load peer routing identity", source))
+    }
+
     #[must_use]
     pub fn diagnostics(&self) -> Arc<dyn gateway_core::diagnostics::OperationalDiagnostics> {
         self.diagnostics.clone()
@@ -67,53 +78,19 @@ impl StoreBundle {
     pub fn take_worker_contributions(&mut self) -> Vec<WorkerContribution> {
         std::mem::take(&mut self.worker_contributions)
     }
-
-    /// 在插件命令真正执行前启动四个必要写泵；不注册任何后台业务 Worker
-    pub fn start_command_line_writes(&mut self) -> Result<(), CommandStoreDrainError> {
-        if self.command_drain.is_some() {
-            return Err(CommandStoreDrainError);
-        }
-        let writers = self.command_writers.take().ok_or(CommandStoreDrainError)?;
-        self.command_drain = Some(writers.start());
-        Ok(())
-    }
-
-    /// 命令成功、失败或取消后有界排空账本、Key 使用与准入释放
-    pub async fn shutdown_command_line_writes(&mut self) -> Result<(), CommandStoreDrainError> {
-        match self.command_drain.take() {
-            Some(drain) => drain.shutdown().await,
-            None if self.command_writers.is_some() => Ok(()),
-            None => Err(CommandStoreDrainError),
-        }
-    }
-}
-
-#[derive(Clone, Copy)]
-enum StoreMode {
-    Runtime,
-    CommandLine,
 }
 
 /// 在返回 Bundle 前完成全部 Store 启动屏障
 pub async fn initialize(config: StoreConfig) -> StoreResult<StoreBundle> {
-    connect(config, false, StoreMode::Runtime).await
-}
-
-/// CLI 命令使用同一有界写队列，但不贡献恢复、保留、leader 或维护 Worker
-pub async fn initialize_command_line(config: StoreConfig) -> StoreResult<StoreBundle> {
-    connect(config, false, StoreMode::CommandLine).await
+    connect(config, false).await
 }
 
 /// 读取现有安装描述，不迁移数据库；该 Bundle 的 PostgreSQL 连接默认只读
 pub async fn initialize_read_only(config: StoreConfig) -> StoreResult<StoreBundle> {
-    connect(config, true, StoreMode::Runtime).await
+    connect(config, true).await
 }
 
-async fn connect(
-    mut config: StoreConfig,
-    read_only: bool,
-    mode: StoreMode,
-) -> StoreResult<StoreBundle> {
+async fn connect(mut config: StoreConfig, read_only: bool) -> StoreResult<StoreBundle> {
     const REDIS_NAMESPACE: &str = "codex-proxy-rs";
 
     config.validate_resolved()?;
@@ -139,10 +116,7 @@ async fn connect(
         redis_connection.clone(),
         REDIS_NAMESPACE,
     )?);
-    let provider_accounts = Arc::new(
-        postgres::PgProviderAccountRepository::new(pool.clone())
-            .with_account_error_protection(cooldowns.clone()),
-    );
+    let provider_accounts = Arc::new(postgres::PgProviderAccountRepository::new(pool.clone()));
     let account_store: Arc<dyn ProviderAccountStore> = provider_accounts;
 
     let credential_leases =
@@ -174,10 +148,6 @@ async fn connect(
         REDIS_NAMESPACE,
     )?);
 
-    let plugins = Arc::new(postgres::PgPluginStore::new(pool.clone()));
-    if !read_only {
-        plugins.recover_abandoned_state_transitions().await?;
-    }
     let usage_data = Arc::new(postgres::PgUsageDataStore::new(
         pool.clone(),
         observability_query_budget.clone(),
@@ -219,9 +189,6 @@ async fn connect(
             control_plane: postgres::PgControlPlaneRepository::new(pool.clone()),
         }),
         backup_ports(pool.clone(), &config)?,
-        plugins.clone(),
-        plugins.clone(),
-        plugins,
         usage_data,
     );
 
@@ -267,9 +234,7 @@ async fn connect(
         Arc::new(client_key_usage),
         diagnostics.clone(),
     )
-    .with_account_error_protection(cooldowns.clone())
     .with_budget(Arc::new(budgets))
-    .with_session_affinity(Arc::clone(&provider_session_affinity))
     .with_client_retry_store(Arc::new(redis::RedisClientRetryRepository::new(
         redis_connection.clone(),
         REDIS_NAMESPACE,
@@ -304,30 +269,23 @@ async fn connect(
             connection: redis_connection,
         }),
     ];
-    let (worker_contributions, command_writers) = match mode {
-        StoreMode::Runtime => (
-            store_worker_contributions(
-                execution_repository,
-                execution_writer,
-                client_key_usage_writer,
-                admission_release_writer,
-                budget_writer,
-                lease_cleanup,
-            )?,
-            None,
-        ),
-        StoreMode::CommandLine => (
-            Vec::new(),
-            Some(CommandStoreWriters {
-                execution: execution_writer,
-                client_key_usage: client_key_usage_writer,
-                admission_release: admission_release_writer,
-                budget: budget_writer,
-            }),
-        ),
-    };
-    let analytics = postgres::PgRequestAnalyticsRepository::new(pool, observability_query_budget);
+    let worker_contributions = store_worker_contributions(
+        execution_repository,
+        execution_writer,
+        client_key_usage_writer,
+        admission_release_writer,
+        budget_writer,
+        lease_cleanup,
+    )?;
+    let prompt_guard = Arc::new(postgres::prompt_guard::PgPromptGuardStore::new(
+        pool.clone(),
+    ));
+    let analytics =
+        postgres::PgRequestAnalyticsRepository::new(pool.clone(), observability_query_budget)
+            .with_projection_work_mem_mb(config.pool.analytics_projection_work_mem_mb);
     Ok(StoreBundle {
+        pool,
+        prompt_guard,
         analytics,
         diagnostics,
         admin_ports,
@@ -337,8 +295,6 @@ async fn connect(
         worker_leader_lease,
         health_probes,
         worker_contributions,
-        command_writers,
-        command_drain: None,
     })
 }
 

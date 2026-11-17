@@ -28,7 +28,7 @@ pub(super) fn is_managed_identity_header(name: &str) -> bool {
             | "chatgpt-project-id"
             | "openai-organization"
             | "openai-project"
-            // 安装头与 client_metadata 共用本次请求的安装身份
+            // 安装身份由所选账号生成，不继承下游安装头
             | "x-codex-installation-id"
             // 画像和设备证明须属于选定账号，不能由下游覆盖
             | "originator"
@@ -126,11 +126,6 @@ impl CodexBackendClient {
         };
         let mut headers = build_codex_model_headers(profile, context.authorization, account_id)?;
         insert_optional_header(&mut headers, "cookie", cookie_header)?;
-        insert_optional_header(
-            &mut headers,
-            "x-codex-installation-id",
-            context.installation_id,
-        )?;
         Ok(headers)
     }
 
@@ -226,24 +221,7 @@ impl CodexBackendClient {
         };
         insert_optional_protocol_header(&mut headers, "x-codex-routing-hint", Some(&routing_hint));
         append_passthrough_headers(&mut headers, &request.passthrough_headers);
-        self.append_middleware_headers(&mut headers)?;
         Ok(headers)
-    }
-
-    pub(super) fn append_middleware_headers(
-        &self,
-        headers: &mut HeaderMap,
-    ) -> CodexClientResult<()> {
-        let mut replaced = std::collections::HashSet::new();
-        for header in &self.middleware_headers {
-            let name = HeaderName::from_bytes(header.name().as_bytes())?;
-            // 宿主画像和账号鉴权先形成基线；插件首次写入同名头时替换，随后保留多值
-            if replaced.insert(name.clone()) {
-                headers.remove(&name);
-            }
-            headers.append(name, HeaderValue::from_bytes(header.value())?);
-        }
-        Ok(())
     }
 }
 

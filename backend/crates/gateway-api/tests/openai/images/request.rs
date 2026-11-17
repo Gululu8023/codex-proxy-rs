@@ -1,4 +1,4 @@
-//! 图片上传与原生 JSON 的等价性、拒绝边界及请求中间件顺序测试
+//! 图片上传与原生 JSON 的等价性和拒绝边界测试
 
 use axum::{
     body::{Body, to_bytes},
@@ -6,7 +6,6 @@ use axum::{
 };
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 use serde_json::{Value, json};
-use std::sync::Arc;
 use tower::ServiceExt;
 
 use super::{IMAGE_RESPONSE, ImageExecution, api_router};
@@ -319,29 +318,4 @@ async fn multipart_edit_should_not_inherit_the_default_extractor_size_limit() {
         .split_once(',')
         .unwrap();
     assert_eq!(STANDARD.decode(encoded).unwrap(), image);
-}
-
-#[tokio::test]
-async fn request_middleware_should_run_before_multipart_decoding() {
-    let mut execution = ImageExecution::new();
-    let middleware = Arc::new(crate::openai::middleware::RequestMiddleware {
-        expected_operation: Some(gateway_core::operation::OperationKind::GenerateImage),
-        short_circuit_json: Some(bytes::Bytes::from_static(IMAGE_RESPONSE)),
-        ..Default::default()
-    });
-    Arc::get_mut(&mut execution).unwrap().middleware = Some(middleware.clone());
-    let response = api_router(execution.clone())
-        .await
-        .oneshot(
-            Request::post("/v1/images/edits")
-                .header(AUTHORIZATION, "Bearer sk_images_test")
-                .header("content-type", CONTENT_TYPE)
-                .body(Body::from("invalid multipart handled by middleware"))
-                .unwrap(),
-        )
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::OK);
-    assert_eq!(*middleware.endpoints.lock().unwrap(), ["/v1/images/edits"]);
-    assert!(execution.captured().is_empty());
 }

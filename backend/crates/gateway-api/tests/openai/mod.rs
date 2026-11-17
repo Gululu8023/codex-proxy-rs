@@ -1,5 +1,6 @@
 //! OpenAI 协议 HTTP 与 WebSocket 接口的测试入口
 
+mod anthropic;
 mod auth;
 mod chat_completions;
 mod endpoint;
@@ -7,7 +8,6 @@ mod error;
 mod image_policy;
 mod images;
 mod live;
-mod middleware;
 mod models;
 mod peer_link;
 mod responses;
@@ -133,6 +133,7 @@ pub(crate) fn api_bundle_with_diagnostics(
         Arc::new(crate::support::RecordingDiagnostics::default()),
     ));
     gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         config,
         execution,
         admin,
@@ -150,6 +151,7 @@ fn api_router_with_config_and_execution(
     execution: Arc<dyn ExecutionService>,
 ) -> axum::Router {
     gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         config,
         execution,
         admin,
@@ -188,6 +190,7 @@ async fn api_router_with_origins_and_worker_health(
 ) -> axum::Router {
     let admin = crate::admin::AdminTestFixture::new().await;
     gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         gateway_api::ApiConfig {
             asset_directory: std::env::temp_dir(),
             cors_allowed_origins,

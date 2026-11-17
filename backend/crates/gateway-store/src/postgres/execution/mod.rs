@@ -397,9 +397,12 @@ impl PgExecutionStore {
     }
 }
 
-#[async_trait]
-impl ModelRequestRepository for PgExecutionStore {
-    async fn insert_model_request(&self, request: NewModelRequest) -> StoreResult<()> {
+impl PgExecutionStore {
+    async fn insert_request_for_provider(
+        &self,
+        request: NewModelRequest,
+        provider: Option<gateway_core::routing::ProviderKind>,
+    ) -> StoreResult<()> {
         request.validate()?;
         let observation = RequestObservation::initial(&request)?;
         sqlx::query(
@@ -407,8 +410,8 @@ impl ModelRequestRepository for PgExecutionStore {
                insert into model_requests (
                  id, client_api_key_ref, operation, client_transport,
                  requested_model_id, image_generation_requested, started_at,
-                 continuation_affinity_hash, continuation_requested, request_kind, request_observation_json
-               ) values ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12)
+                 continuation_affinity_hash, continuation_requested, request_kind, request_observation_json, provider_kind
+               ) values ($1, $2, $3, $4, $5, $6, $7, $9, $10, $11, $12, $13)
                returning id
              ) insert into model_request_leases (request_id, lease_expires_at)
                select id, $8 from inserted",
@@ -425,10 +428,18 @@ impl ModelRequestRepository for PgExecutionStore {
         .bind(request.continuation.requested)
         .bind(request.request_kind)
         .bind(observation)
+        .bind(provider.as_ref().map(|provider| provider.as_str()))
         .execute(&self.pool)
         .await
         .map_err(|source| postgres_unavailable("insert model request", source))?;
         Ok(())
+    }
+}
+
+#[async_trait]
+impl ModelRequestRepository for PgExecutionStore {
+    async fn insert_model_request(&self, request: NewModelRequest) -> StoreResult<()> {
+        self.insert_request_for_provider(request, None).await
     }
 
     async fn insert_model_request_with_first_attempt(
@@ -820,6 +831,22 @@ impl ModelRequestRepository for PgExecutionStore {
 
 #[async_trait]
 impl ExecutionStore for PgExecutionStore {
+    async fn finalize_model_request_with_prompt_guard(
+        &self,
+        finalization: CoreModelRequestFinalization,
+        assessment: Option<gateway_core::engine::prompt_guard::PromptGuardAssessment>,
+    ) -> Result<(), CoreStoreError> {
+        let request_id = finalization.request_id.clone();
+        ExecutionStore::finalize_model_request(self, finalization).await?;
+        if let Some(assessment) = assessment {
+            // 生命周期先收敛；摘要写失败不重做结算，重放也不能覆盖已经采用的根请求结论。
+            sqlx::query("update model_requests set request_observation_json = request_observation_json || jsonb_build_object('prompt_guard', $2::jsonb) where id = $1 and outcome <> 'running' and not (request_observation_json ? 'prompt_guard')")
+                .bind(request_id.as_str()).bind(sqlx::types::Json(assessment)).execute(&self.pool).await
+                .map_err(|source| core_store_error(postgres_unavailable("persist prompt guard assessment", source)))?;
+        }
+        Ok(())
+    }
+
     fn maintain_request(
         &self,
         request_id: &ModelRequestId,
@@ -867,6 +894,16 @@ impl ExecutionStore for PgExecutionStore {
         request: CoreNewModelRequest,
     ) -> Result<(), CoreStoreError> {
         self.insert_model_request(new_model_request_row(request))
+            .await
+            .map_err(core_store_error)
+    }
+
+    async fn create_model_request_for_provider(
+        &self,
+        request: CoreNewModelRequest,
+        provider: Option<gateway_core::routing::ProviderKind>,
+    ) -> Result<(), CoreStoreError> {
+        self.insert_request_for_provider(new_model_request_row(request), provider)
             .await
             .map_err(core_store_error)
     }

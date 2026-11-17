@@ -81,6 +81,7 @@ async fn fixture(sharing: ClientPeerSharing, plaintext: &str) -> (AdminTestFixtu
     *fixture.client_key.lock().unwrap() = Some(key);
     let provider = ProviderKind::new("openai").unwrap();
     let facts = AccountStatusFacts {
+        quota_paused: false,
         enabled: true,
         credential_state: CredentialState::Ready,
         access_token_expires_at: None,
@@ -90,13 +91,14 @@ async fn fixture(sharing: ClientPeerSharing, plaintext: &str) -> (AdminTestFixtu
         last_error_message: None,
     };
     *fixture.account.lock().unwrap() = Some(AccountPageItem {
-        protection_rules: Vec::new(),
         capacity: AccountCapacity {
             used_slots: None,
             total_slots: None,
         },
         projection: resolve_account_status(&facts, now.into()),
         account: AccountRecord {
+            quota_limits: Default::default(),
+            quota_paused: false,
             auto_use_quota_credits: false,
             id: "acct_private_sentinel".into(),
             provider_kind: provider,
@@ -129,6 +131,7 @@ async fn fixture(sharing: ClientPeerSharing, plaintext: &str) -> (AdminTestFixtu
         },
     });
     *fixture.provider_quota.lock().unwrap() = Some(ProviderQuota {
+        paused_windows: Vec::new(),
         upstream: None,
         plan_type: Some("pro".into()),
         observed_at: Some(now),

@@ -128,6 +128,21 @@ redis.call('DEL', KEYS[1])
 return 1
 "#;
 
+const CHECKPOINT_CLAIM_SCRIPT: &str = r#"
+if redis.call('HGET', KEYS[1], 'owner_fingerprint') ~= ARGV[1]
+  or redis.call('HGET', KEYS[1], 'claim_fingerprint') ~= ARGV[2] then
+  return 0
+end
+local clock = redis.call('TIME')
+local now_ms = (tonumber(clock[1]) * 1000) + math.floor(tonumber(clock[2]) / 1000)
+local expires = redis.call('HGET', KEYS[1], 'claim_expires_at_epoch_millis')
+if expires == false or tonumber(expires) <= now_ms or redis.call('PTTL', KEYS[1]) <= 0 then
+  return 0
+end
+redis.call('HSET', KEYS[1], 'provider_payload', ARGV[3])
+return 1
+"#;
+
 /// OAuth pending flow 的 Redis 原子持久化能力
 #[derive(Clone)]
 pub struct RedisOAuthPendingFlowRepository {
@@ -154,6 +169,33 @@ impl RedisOAuthPendingFlowRepository {
 }
 
 impl OAuthPendingFlowPort for RedisOAuthPendingFlowRepository {
+    fn checkpoint_claim<'a>(
+        &'a self,
+        provider_kind: &'a ProviderKind,
+        flow: &'a OAuthPendingBinding,
+        owner: &'a OAuthPendingBinding,
+        claim: &'a OAuthPendingBinding,
+        payload: &'a gateway_core::account::OpaqueProviderData,
+    ) -> futures::future::BoxFuture<'a, Result<bool, ProviderStoreError>> {
+        Box::pin(async move {
+            let payload = serde_json::to_vec(payload.expose_to_provider())
+                .map_err(|_| provider_invalid("encode OAuth checkpoint"))?;
+            if payload.len() > MAX_PAYLOAD_BYTES {
+                return Err(provider_invalid("validate OAuth checkpoint"));
+            }
+            let mut connection = self.connection.clone();
+            let result = Script::new(CHECKPOINT_CLAIM_SCRIPT)
+                .key(self.key(provider_kind, flow))
+                .arg(provider_scoped_fingerprint(provider_kind, owner))
+                .arg(provider_scoped_fingerprint(provider_kind, claim))
+                .arg(payload)
+                .invoke_async::<i64>(&mut connection)
+                .await
+                .map_err(|source| crate::provider_unavailable("checkpoint OAuth claim", source))?;
+            Ok(result == 1)
+        })
+    }
+
     fn put_if_absent(
         &self,
         flow: NewOAuthPendingFlow,

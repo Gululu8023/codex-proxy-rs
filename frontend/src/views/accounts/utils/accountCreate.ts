@@ -92,7 +92,7 @@ export function accountImportModes(provider: string | undefined) {
       },
     ]
   }
-  if (provider === 'xai') {
+  if (provider === 'anthropic') {
     return [
       { label: 'OAuth', value: 'oauth' as const },
       {

@@ -74,8 +74,11 @@ fn account_directory() -> Arc<RuntimeAccountDirectory> {
             ),
         ),
         (
-            ProviderAccountId::new("acct_xai").expect("account"),
-            RuntimeAccount::new(ProviderKind::new("xai").expect("provider"), BTreeSet::new()),
+            ProviderAccountId::new("acct_anthropic").expect("account"),
+            RuntimeAccount::new(
+                ProviderKind::new("anthropic").expect("provider"),
+                BTreeSet::new(),
+            ),
         ),
     ])))
 }
@@ -103,11 +106,11 @@ fn snapshot() -> RuntimeSnapshot {
         settings(),
         vec![
             ProviderKind::new("openai").expect("provider"),
-            ProviderKind::new("xai").expect("provider"),
+            ProviderKind::new("anthropic").expect("provider"),
         ],
         vec![
             model("openai", "gpt-5.5", capabilities()),
-            model("xai", "grok-4.5", capabilities()),
+            model("anthropic", "claude-4.5", capabilities()),
         ],
         Vec::new(),
     )
@@ -118,8 +121,12 @@ fn snapshot() -> RuntimeSnapshot {
         .clone()
         .with_model_mappings(BTreeMap::from([
             ("gpt-5.4".to_owned(), "gpt-5.5".to_owned()),
-            ("grok-latest".to_owned(), "grok-4.5".to_owned()),
-        ]));
+            ("claude-latest".to_owned(), "claude-4.5".to_owned()),
+        ]))
+        .with_anthropic_model_mappings(BTreeMap::from([(
+            "claude-latest".to_owned(),
+            "claude-4.5".to_owned(),
+        )]));
     snapshot.with_settings(&settings).unwrap()
 }
 
@@ -306,7 +313,10 @@ fn model_mapping_should_follow_a_bounded_alias_chain() {
         ]));
     let snapshot = snapshot.with_settings(&settings).unwrap();
 
-    assert_eq!(snapshot.mapped_model("public-model"), "gpt-5.5");
+    assert_eq!(
+        snapshot.mapped_model(&ProviderKind::new("openai").unwrap(), "public-model"),
+        "gpt-5.5"
+    );
 }
 
 #[test]
@@ -321,11 +331,14 @@ fn cyclic_model_mapping_should_fall_back_to_the_original_name() {
         ]));
     let snapshot = snapshot.with_settings(&settings).unwrap();
 
-    assert_eq!(snapshot.mapped_model("first"), "first");
+    assert_eq!(
+        snapshot.mapped_model(&ProviderKind::new("openai").unwrap(), "first"),
+        "first"
+    );
 }
 
 #[test]
-fn known_provider_catalog_missing_mapped_model_should_be_filtered() {
+fn codex_alias_is_not_applied_to_claude_catalog() {
     let snapshot = snapshot();
     let error = snapshot
         .plan(
@@ -333,17 +346,17 @@ fn known_provider_catalog_missing_mapped_model_should_be_filtered() {
             &operation(),
             snapshot.all_account_scope(),
             &RoutingContext {
-                required_provider: Some(ProviderKind::new("xai").expect("provider")),
+                required_provider: Some(ProviderKind::new("anthropic").expect("provider")),
                 ..RoutingContext::default()
             },
         )
-        .expect_err("known xAI catalog does not contain the mapped OpenAI model");
+        .expect_err("known Claude catalog does not contain the mapped OpenAI model");
 
     assert_eq!(
         error,
         gateway_core::error::RoutingError::ModelNotFound {
             model: "gpt-5.4".to_owned(),
-            mapped_model: "gpt-5.5".to_owned(),
+            mapped_model: "gpt-5.4".to_owned(),
         }
     );
 }
@@ -374,14 +387,14 @@ fn missing_model_in_one_provider_should_still_route_to_another() {
     let snapshot = snapshot();
     let plan = snapshot
         .plan(
-            &PublicModelId::new("grok-4.5").expect("model"),
+            &PublicModelId::new("claude-4.5").expect("model"),
             &operation(),
             snapshot.all_account_scope(),
             &RoutingContext::default(),
         )
-        .expect("xAI publishes the model missing from OpenAI");
+        .expect("Claude publishes the model missing from OpenAI");
 
-    assert_eq!(plan.candidates()[0].provider().as_str(), "xai");
+    assert_eq!(plan.candidates()[0].provider().as_str(), "anthropic");
 }
 
 #[test]
@@ -397,7 +410,7 @@ fn blocked_model_provider_should_not_be_misreported_as_model_not_found() {
                 ..RoutingContext::default()
             },
         )
-        .expect_err("OpenAI is blocked and xAI does not publish this model");
+        .expect_err("OpenAI is blocked and Claude does not publish this model");
 
     assert!(matches!(
         error,
@@ -412,9 +425,9 @@ fn blocked_unknown_catalog_should_not_prove_model_absence() {
         settings(),
         vec![
             ProviderKind::new("openai").expect("provider"),
-            ProviderKind::new("xai").expect("provider"),
+            ProviderKind::new("anthropic").expect("provider"),
         ],
-        vec![model("xai", "grok-4.5", capabilities())],
+        vec![model("anthropic", "claude-4.5", capabilities())],
         Vec::new(),
     )
     .expect("snapshot")
@@ -707,8 +720,14 @@ fn model_mapping_should_use_exact_client_keys() {
         )]));
     let snapshot = snapshot.with_settings(&settings).unwrap();
 
-    assert_eq!(snapshot.mapped_model("  exact-alias  "), "gpt-5.5");
-    assert_eq!(snapshot.mapped_model("exact-alias"), "exact-alias");
+    assert_eq!(
+        snapshot.mapped_model(&ProviderKind::new("openai").unwrap(), "  exact-alias  "),
+        "gpt-5.5"
+    );
+    assert_eq!(
+        snapshot.mapped_model(&ProviderKind::new("openai").unwrap(), "exact-alias"),
+        "exact-alias"
+    );
 }
 
 #[test]
@@ -800,7 +819,10 @@ fn public_catalog_should_include_discovered_models_and_aliases() {
         .map(PublicModelId::as_str)
         .collect::<BTreeSet<_>>();
 
-    assert_eq!(names, BTreeSet::from(["gpt-5.4", "gpt-5.5", "grok-latest"]));
+    assert_eq!(
+        names,
+        BTreeSet::from(["gpt-5.4", "gpt-5.5", "claude-latest"])
+    );
 }
 
 #[test]
@@ -814,18 +836,16 @@ fn unknown_model_should_be_hidden_when_provider_catalog_is_available() {
 #[test]
 fn alias_should_only_be_available_from_a_provider_with_its_mapped_model() {
     let snapshot = snapshot();
-    let alias = PublicModelId::new("grok-latest").expect("model");
+    let alias = PublicModelId::new("claude-latest").expect("model");
 
     assert!(!snapshot.contains_public_model_for_provider(
         &alias,
         &ProviderKind::new("openai").expect("provider"),
     ));
-    assert!(
-        snapshot.contains_public_model_for_provider(
-            &alias,
-            &ProviderKind::new("xai").expect("provider"),
-        )
-    );
+    assert!(snapshot.contains_public_model_for_provider(
+        &alias,
+        &ProviderKind::new("anthropic").expect("provider"),
+    ));
 }
 
 #[test]
@@ -854,7 +874,7 @@ fn account_model_access_filters_catalog_and_aliases_using_the_whole_frozen_pool(
             .iter()
             .map(PublicModelId::as_str)
             .collect::<Vec<_>>(),
-        vec!["grok-latest"]
+        vec!["claude-latest"]
     );
     assert!(!snapshot.contains_public_model_for_scope(
         &PublicModelId::new("gpt-5.4").expect("alias"),
@@ -889,7 +909,7 @@ fn account_model_access_filters_catalog_and_aliases_using_the_whole_frozen_pool(
             .iter()
             .map(PublicModelId::as_str)
             .collect::<Vec<_>>(),
-        vec!["gpt-5.4", "gpt-5.5", "grok-latest"]
+        vec!["claude-latest", "gpt-5.4", "gpt-5.5"]
     );
     assert!(
         !snapshot.contains_public_model_for_scope(

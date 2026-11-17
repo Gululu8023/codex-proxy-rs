@@ -140,6 +140,7 @@ pub(crate) async fn declare_usage_statistics(
     }
     // 分组和全局总计在同一查询中生成；每条输入只贡献一次全局计数
     // 汇总在数据库完成，应用只接收当前批次，金额按原币种保留
+    // 中间聚合必须保留 origin，后续才能分开原生请求与外部贡献，防止计数及费用混合。
     query.push(r#"), groups as (
         select name, count(*) filter(where origin='contribution')::bigint as contribution_count
         from inputs group by name

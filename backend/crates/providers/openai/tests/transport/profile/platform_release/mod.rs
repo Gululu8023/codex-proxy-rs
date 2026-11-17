@@ -70,7 +70,7 @@ impl DesktopArtifactTransport for Transport {
             if round == 1 && target == TARGETS[0] {
                 return Err(io::Error::other("fixture outage"));
             }
-            let build = if round == 2 { 1 } else { 20000 + round };
+            let build = if round == 2 { 1 } else { 90_000_000 + round };
             Ok(serde_json::from_value(json!({"identity":{"etag":format!("\"{build}\""),"size":1000}, "release":{"codexVersion":format!("0.200.{round}"), "desktopVersion":format!("30.1.{round}"), "desktopBuild":build.to_string(), "verifiedAt":null}})).unwrap())
         })
     }

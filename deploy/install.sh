@@ -3,10 +3,11 @@ set -Eeuo pipefail
 umask 0077
 
 # codex-proxy-rs 一键安装脚本。
-# 新安装使用同一个 Release 的 compose.yaml 与 config.example.yaml；
-# 已存在 deploy/config.yaml 时保留整套部署文件，不执行版本升级。
+# 默认使用 main 分支的 compose.yaml 与 config.example.yaml，搭配 main 构建的 latest 镜像；
+# 设置 CPR_RELEASE_TAG 时改用该 Release 的部署文件；
+# 已存在 deploy/config.yaml 时保留部署文件、容器和本地镜像，只补拉缺失镜像。
 
-REPO="zyycn/codex-proxy-rs"
+REPO="Gululu8023/codex-proxy-rs"
 CPR_RELEASE_TAG="${CPR_RELEASE_TAG:-}"
 INSTALL_DIR="${INSTALL_DIR:-$PWD/codex-proxy-rs}"
 DEPLOY_DIR="${INSTALL_DIR}/deploy"
@@ -78,15 +79,6 @@ prepare_install_dir() {
 }
 
 resolve_release_tag() {
-  local release_url
-
-  if [[ -z "$CPR_RELEASE_TAG" ]]; then
-    release_url="$(curl -fsSL -o /dev/null -w '%{url_effective}' \
-      "https://github.com/${REPO}/releases/latest")"
-    CPR_RELEASE_TAG="${release_url%/}"
-    CPR_RELEASE_TAG="${CPR_RELEASE_TAG##*/}"
-  fi
-
   [[ "$CPR_RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+(-[0-9A-Za-z.-]+)?(\+[0-9A-Za-z.-]+)?$ ]] \
     || die "无法确定有效的发布版本：${CPR_RELEASE_TAG:-<空>}"
 }
@@ -102,6 +94,7 @@ download() {
     --show-error \
     --retry 3 \
     --connect-timeout 15 \
+    --max-time 120 \
     "$url" \
     --output "$output"
 }
@@ -109,12 +102,20 @@ download() {
 download_release_files() {
   local base_url
 
-  resolve_release_tag
-  base_url="https://github.com/${REPO}/releases/download/${CPR_RELEASE_TAG}"
+  local source
 
-  log "下载 ${CPR_RELEASE_TAG} compose.yaml"
+  if [[ -n "$CPR_RELEASE_TAG" ]]; then
+    resolve_release_tag
+    base_url="https://github.com/${REPO}/releases/download/${CPR_RELEASE_TAG}"
+    source="$CPR_RELEASE_TAG"
+  else
+    base_url="https://raw.githubusercontent.com/${REPO}/main/deploy"
+    source="main"
+  fi
+
+  log "下载 ${source} compose.yaml"
   download "${base_url}/compose.yaml" "$COMPOSE_FILE"
-  log "下载 ${CPR_RELEASE_TAG} config.example.yaml"
+  log "下载 ${source} config.example.yaml"
   download "${base_url}/config.example.yaml" "$CONFIG_EXAMPLE"
 
   grep -q '^name: codex-proxy-rs$' "$COMPOSE_FILE" \
@@ -131,8 +132,11 @@ validate_admin_password() {
   local password="$1"
   local normalized
 
-  if (( ${#password} < 12 )); then
-    die "ADMIN_PASSWORD 至少需要 12 个字符。"
+  # 与后端一致，校验时不把首尾空白计入强度；写入配置的密码仍保留原值。
+  normalized="${password#"${password%%[![:space:]]*}"}"
+  normalized="${normalized%"${normalized##*[![:space:]]}"}"
+  if (( ${#normalized} < 12 )); then
+    die "ADMIN_PASSWORD 去除首尾空白后至少需要 12 个字符。"
   fi
   if [[ "$password" == *'$'* ]]; then
     die 'ADMIN_PASSWORD 不能包含 $ 字符。'
@@ -140,7 +144,7 @@ validate_admin_password() {
   if [[ "$password" =~ [[:cntrl:]] ]]; then
     die "ADMIN_PASSWORD 不能包含换行或其他控制字符。"
   fi
-  normalized="$(printf '%s' "$password" | tr '[:upper:]' '[:lower:]')"
+  normalized="${normalized,,}"
   if [[ "$normalized" == "codex-proxy-rs" ]]; then
     die "ADMIN_PASSWORD 不能使用常见弱口令。"
   fi
@@ -184,6 +188,33 @@ patch_config() {
   printf '%s' "$rendered" > "$CONFIG_FILE"
 }
 
+prepare_images() {
+  local existing_config="$1"
+  local images image
+
+  if [[ "$existing_config" -eq 0 ]]; then
+    log "拉取容器镜像"
+    (
+      cd "$INSTALL_DIR"
+      docker compose -f deploy/compose.yaml pull
+    )
+    return
+  fi
+
+  log "复用本地容器镜像，只补拉缺失镜像"
+  images="$(
+    cd "$INSTALL_DIR"
+    docker compose -f deploy/compose.yaml config --images
+  )"
+  # Compose 的 missing 策略仍会拉取 latest；显式检查缓存，避免重复安装变成升级。
+  while IFS= read -r image; do
+    if ! docker image inspect "$image" >/dev/null 2>&1; then
+      info "本地缺少镜像，按当前部署文件拉取：${image}"
+      docker pull "$image"
+    fi
+  done <<< "$images"
+}
+
 service_user_ids() {
   local service="$1"
   local user="$2"
@@ -192,11 +223,11 @@ service_user_ids() {
 
   uid="$(
     cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml run --rm --no-deps --entrypoint id "$service" -u "$user"
+    docker compose -f deploy/compose.yaml run --rm --no-deps -T --pull never --entrypoint id "$service" -u "$user"
   )"
   gid="$(
     cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml run --rm --no-deps --entrypoint id "$service" -g "$user"
+    docker compose -f deploy/compose.yaml run --rm --no-deps -T --pull never --entrypoint id "$service" -g "$user"
   )"
 
   [[ "$uid" =~ ^[0-9]+$ ]] || die "无法读取 ${service} 容器用户 ${user} 的 UID。"
@@ -233,15 +264,33 @@ fix_runtime_permissions() {
   run_root chmod 0640 -- "$CONFIG_FILE"
 }
 
+resolve_access_url() {
+  local address
+
+  address="$(
+    cd "$INSTALL_DIR"
+    docker compose -f deploy/compose.yaml port --index 1 codex-proxy-rs 8080
+  )"
+  # 按实际发布端口检查；多地址取首个，通配监听地址改成本机可访问的回环地址。
+  address="${address%%$'\n'*}"
+  case "$address" in
+    0.0.0.0:*) address="127.0.0.1:${address##*:}" ;;
+    \[::\]:*) address="[::1]:${address##*:}" ;;
+  esac
+  printf 'http://%s\n' "$address"
+}
+
 check_health() {
+  local access_url="$1"
   local status
 
   status="$(curl \
     --silent \
+    --noproxy '*' \
     --output /dev/null \
     --write-out '%{http_code}' \
     --max-time 10 \
-    http://127.0.0.1:8080/healthz || true)"
+    "${access_url}/healthz" || true)"
   [[ "$status" == "204" ]]
 }
 
@@ -249,11 +298,13 @@ main() {
   local existing_config=0
   local postgres_password
   local redis_password
+  local access_url
+  local -a up_options=(--pull never --wait-timeout 600)
 
   printf '\n'
   printf '%s\n' '============================================='
   printf '%s\n' ' codex-proxy-rs 一键部署'
-  printf '%s\n' ' 新安装使用同一 Release 的官方部署文件'
+  printf '%s\n' ' 新安装默认使用 main 分支的部署文件与 latest 镜像'
   printf '%s\n' '============================================='
   printf '\n'
 
@@ -267,6 +318,8 @@ main() {
     || die "Docker daemon 不可用；请先安装、启动 Docker，并确认当前用户可以访问。"
   docker compose version >/dev/null 2>&1 \
     || die "未检测到 Docker Compose v2；请确保 'docker compose' 可用。"
+  docker compose up --help | grep -- '--wait-timeout' >/dev/null \
+    || die "Docker Compose 版本过旧，请升级到支持 --wait-timeout 的版本。"
 
   prepare_install_dir
   if [[ -e "$CONFIG_FILE" ]]; then
@@ -274,7 +327,12 @@ main() {
     [[ -f "$COMPOSE_FILE" && -f "$CONFIG_EXAMPLE" ]] \
       || die "已有 config.yaml，但 compose.yaml 或 config.example.yaml 缺失。"
     warn "发现已有配置：${CONFIG_FILE}"
-    info "将保留现有 config.yaml、compose.yaml 和 config.example.yaml，不执行版本升级。"
+    info "将保留现有部署文件、容器和本地镜像；缺失镜像按当前部署文件补拉。"
+    # 即使本地 latest 被其他命令更新，也不在重复安装时替换现有容器。
+    up_options+=(--no-recreate)
+    if [[ -n "$CPR_RELEASE_TAG" ]]; then
+      warn "已有 config.yaml，因此忽略本次传入的 CPR_RELEASE_TAG。"
+    fi
     if [[ -n "$ADMIN_PASSWORD" ]]; then
       warn "已有 config.yaml，因此忽略本次传入的 ADMIN_PASSWORD。"
     fi
@@ -303,18 +361,14 @@ main() {
     docker compose -f deploy/compose.yaml config --quiet
   )
 
-  log "拉取容器镜像"
-  (
-    cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml pull
-  )
+  prepare_images "$existing_config"
 
   fix_runtime_permissions
 
   log "启动服务"
   (
     cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml up -d --no-build --wait
+    docker compose -f deploy/compose.yaml up -d --no-build --wait "${up_options[@]}"
   )
 
   log "检查容器状态"
@@ -323,9 +377,10 @@ main() {
     docker compose -f deploy/compose.yaml ps
   )
 
-  info "验证健康检查接口"
-  if ! check_health; then
-    warn "Compose 已启动，但 http://127.0.0.1:8080/healthz 未返回 204。"
+  access_url="$(resolve_access_url)"
+  info "验证健康检查接口：${access_url}/healthz"
+  if ! check_health "$access_url"; then
+    warn "Compose 已启动，但 ${access_url}/healthz 未返回 204。"
     warn "最近日志："
     (
       cd "$INSTALL_DIR"
@@ -339,7 +394,7 @@ main() {
   printf '%b%s%b\n' "$GREEN" ' 部署完成' "$NC"
   printf '%b%s%b\n' "$GREEN" '=============================================' "$NC"
   printf '\n'
-  printf '访问地址：      http://127.0.0.1:8080\n'
+  printf '访问地址：      %s\n' "$access_url"
   printf '管理员用户名：  admin@cpr.local\n'
   if [[ "$existing_config" -eq 0 ]]; then
     printf '管理员密码：    %s\n' "$ADMIN_PASSWORD"

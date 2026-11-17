@@ -136,7 +136,7 @@ watch(
       @page-size-change="changePageSize($event)"
       @create="create()"
       @refresh="refresh()"
-      @download="downloadBackup($event)"
+      @download="(record, artifact) => downloadBackup(record, artifact)"
       @request-delete="requestDelete($event)"
       @confirm-delete="confirmDelete()"
     />

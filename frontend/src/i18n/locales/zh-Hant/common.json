@@ -59,7 +59,6 @@
       "delete": "確認刪除",
       "create": "創建",
       "enable": "啓用",
-      "next": "下一步",
       "confirm": "確定",
       "refresh": "刷新",
       "save": "保存"
@@ -93,7 +92,6 @@
       "unlimited": "不限",
       "default": "默認",
       "on": "開啓",
-      "none": "無",
       "off": "關閉"
     },
     "form": {

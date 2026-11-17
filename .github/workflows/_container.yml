@@ -103,13 +103,7 @@ jobs:
           MATRIX_OS: linux
           MATRIX_ARCH: amd64
           MATRIX_BINARY: codex-proxy-rs
-        run: |
-          ruby -r './.github/scripts/release-metadata' -e '
-            ReleaseMetadata.seal_manifest(
-              "version" => ReleaseMetadata.version(YAML.load_file("release/version.yaml").fetch("version")),
-              "git_sha" => ReleaseMetadata.git("rev-parse", "HEAD")
-            )'
-          ruby .github/scripts/package-release.rb image
+        run: ruby .github/scripts/package-release.rb image
 
       - name: Build runtime image
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0

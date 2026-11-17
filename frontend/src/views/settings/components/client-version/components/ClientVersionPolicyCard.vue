@@ -9,6 +9,7 @@ defineOptions({ name: 'ClientVersionPolicyCard' })
 
 withDefaults(
   defineProps<{
+    provider: 'openai' | 'anthropic'
     loading?: boolean
   }>(),
   {
@@ -24,14 +25,19 @@ const { t } = useI18n({ useScope: 'global' })
 
 const minCodexDesktopVersion = defineModel<string>('minCodexDesktopVersion', { required: true })
 const minCodexCliVersion = defineModel<string>('minCodexCliVersion', { required: true })
+const minClaudeCodeVersion = defineModel<string>('minClaudeCodeVersion', { required: true })
 </script>
 
 <template>
-  <ZCard>
+  <ZCard :description="t('settings.clientVersion.description')">
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <template #title>
       <span class="inline-flex items-center gap-1.5">
         <span>{{ t('settings.clientVersion.clientVersionRestrictions') }}</span>
         <ZIconButton
+          v-if="provider === 'openai'"
           variant="link"
           :aria-label="t('settings.clientVersion.openGuide')"
           class="size-6!"
@@ -42,7 +48,8 @@ const minCodexCliVersion = defineModel<string>('minCodexCliVersion', { required:
       </span>
     </template>
 
-    <div class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2">
+    <slot name="scope" />
+    <div v-show="provider === 'openai'" class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2">
       <ZFormItem
         prop="minCodexDesktopVersion"
         :label="t('settings.clientVersion.codexDesktopMinimumVersion')"
@@ -81,5 +88,26 @@ const minCodexCliVersion = defineModel<string>('minCodexCliVersion', { required:
         </ZInput>
       </ZFormItem>
     </div>
+    <div v-show="provider === 'anthropic'" class="grid min-w-0 gap-4.5 max-w-6xl sm:grid-cols-2">
+      <ZFormItem
+        prop="minClaudeCodeVersion"
+        :label="t('settings.clientVersion.claudeCodeMinimumVersion')"
+        :description="t('settings.clientVersion.claudeCodeMinimumVersionHelp')"
+      >
+        <ZInput
+          v-model="minClaudeCodeVersion"
+          :aria-label="t('settings.clientVersion.claudeCodeMinimumVersion')"
+          autocomplete="off"
+          spellcheck="false"
+          :placeholder="t('common.values.unlimited')"
+          :disabled="loading"
+        >
+          <template #prefix>
+            <TerminalSquare class="size-4" />
+          </template>
+        </ZInput>
+      </ZFormItem>
+    </div>
+    <slot name="footer" />
   </ZCard>
 </template>

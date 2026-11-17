@@ -8,11 +8,8 @@ use axum::{
     http::HeaderMap,
     response::Response,
 };
-use gateway_core::engine::execution::ClientTransport;
 use gateway_core::error::{GatewayError, GatewayErrorKind};
-use gateway_core::operation::{
-    ImageRequest, ImageRequestKind, Operation, OperationKind, RawJsonPayload,
-};
+use gateway_core::operation::{ImageRequest, ImageRequestKind, Operation, RawJsonPayload};
 use serde_json::Value;
 
 use crate::ApiState;
@@ -87,9 +84,7 @@ async fn handle_image_request(
         RequestInput {
             endpoint: endpoint.to_owned(),
             protocol: OPENAI_PROTOCOL.to_owned(),
-            operation: Some(OperationKind::GenerateImage),
-            transport: ClientTransport::HttpJson,
-            model_hint: None,
+
             headers: encode_headers(&headers),
             body,
         },

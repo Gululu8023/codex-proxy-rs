@@ -20,10 +20,8 @@ fn app_tree_matches_frozen_terminal_manifest() {
     assert_eq!(
         rust_files(&root.join("src")),
         BTreeSet::from([
-            PathBuf::from("bootstrap/command.rs"),
             PathBuf::from("bootstrap/config.rs"),
             PathBuf::from("bootstrap/mod.rs"),
-            PathBuf::from("bootstrap/plugins.rs"),
             PathBuf::from("bootstrap/server.rs"),
             PathBuf::from("bootstrap/startup.rs"),
             PathBuf::from("lib.rs"),
@@ -34,7 +32,6 @@ fn app_tree_matches_frozen_terminal_manifest() {
         rust_files(&root.join("tests")),
         BTreeSet::from([
             PathBuf::from("architecture.rs"),
-            PathBuf::from("bootstrap/command.rs"),
             PathBuf::from("bootstrap/config.rs"),
             PathBuf::from("bootstrap/mod.rs"),
             PathBuf::from("bootstrap/server.rs"),
@@ -62,13 +59,12 @@ fn workspace_production_files_have_no_hidden_modules_or_test_hooks() {
         let sources = rust_files(&root);
         assert!(!sources.is_empty(), "{member} has no production sources");
         for relative in sources {
+            // 私有函数的单元测试独立存放，仅由下方验证过的 cfg(test) 模块引用。
+            if relative.file_name().is_some_and(|name| name == "tests.rs") {
+                continue;
+            }
             let path = root.join(relative);
             let source = fs::read_to_string(&path).expect("read production source");
-            assert!(
-                !source.contains("#[cfg(test)]"),
-                "{} hosts tests in production src",
-                path.display()
-            );
             assert!(
                 !source.contains("include!("),
                 "{} uses include!",
@@ -82,6 +78,19 @@ fn workspace_production_files_have_no_hidden_modules_or_test_hooks() {
                         "{} has an inline module",
                         path.display()
                     );
+                }
+                if let Item::Mod(module) = item
+                    && module.ident == "tests"
+                {
+                    // 允许标准私有单元测试入口，不允许生产代码因测试而切换实现。
+                    assert!(matches!(module.vis, syn::Visibility::Inherited));
+                    assert_eq!(module.attrs.len(), 1);
+                    assert!(module.attrs[0].path().is_ident("cfg"));
+                    let Meta::List(cfg) = &module.attrs[0].meta else {
+                        panic!("tests module requires cfg(test)");
+                    };
+                    assert_eq!(cfg.tokens.to_string(), "test");
+                    continue;
                 }
                 for attribute in item_attrs(item) {
                     assert!(

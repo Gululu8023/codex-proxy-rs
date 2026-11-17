@@ -1,0 +1,14 @@
+Veil compatibility patch
+
+Upstream: https://github.com/Mouseww/veil
+Version: 0.3.14
+Commit: 82f9290022144c82609aaad149d81693c4a563ec
+License: Apache-2.0 (see veil-LICENSE)
+
+Local patch: scripts/patches/veil-library.patch
+
+The patch modifies the upstream privacy engine, encrypted SQLite mapping store
+and library SSE restorer for in-process CPRS native Anthropic integration.
+CPRS does not run the upstream HTTP proxy or administrative server.
+Upstream attribution and license remain in force. The patch is local and has
+not been submitted to upstream or published as a separate Git revision.

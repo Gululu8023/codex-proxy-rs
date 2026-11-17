@@ -244,6 +244,8 @@ impl CodexBackendClientTestExt for CodexBackendClient {
     }
 }
 
+// 直接返回生产错误类型，以验证调用方可见的完整传输故障合同。
+#[allow(clippy::result_large_err)]
 async fn collect_backend_response(
     response: CodexBackendStreamingResponse,
     started_at: Instant,
@@ -308,6 +310,8 @@ async fn collect_backend_response(
     })
 }
 
+// 直接返回生产错误类型，以验证调用方可见的完整传输故障合同。
+#[allow(clippy::result_large_err)]
 async fn execute_response_create_request(
     request: &CodexWebSocketRequest,
 ) -> CodexClientResult<CollectedBackendResponse> {

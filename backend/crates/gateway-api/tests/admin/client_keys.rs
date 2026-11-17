@@ -591,28 +591,8 @@ fn profile_override_distinguishes_omission_from_explicit_inheritance() {
 }
 
 #[test]
-fn xai_profile_override_distinguishes_omission_from_explicit_inheritance() {
-    let mut payload = json!({"id":"key_profile", "name":"profile", "groupIds":[], "maxConcurrency":0, "requestsPerMinute":0});
-    let decode = |body| {
-        let mut command = serde_json::from_value::<UpdateClientKeyRequest>(body)
-            .unwrap()
-            .into_command()
-            .unwrap();
-        command
-            .request_profile_override_updates
-            .remove(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
-    };
-    assert_eq!(decode(payload.clone()), None);
-    payload["xaiClientProfileOverride"] = json!(null);
-    assert_eq!(decode(payload.clone()), Some(None));
-    payload["xaiClientProfileOverride"] = json!({"versionMode":"latest"});
-    assert!(decode(payload).unwrap().is_some());
-}
-
-#[test]
 fn generic_profile_overrides_accept_native_providers_and_reject_legacy_conflicts() {
     let profile = json!({"preset":"desktop"});
-    let xai = json!({"preset":"managed"});
     let request: CreateClientKeyRequest = serde_json::from_value(json!({
         "name":"profile",
         "groupIds":[],
@@ -620,17 +600,16 @@ fn generic_profile_overrides_accept_native_providers_and_reject_legacy_conflicts
         "requestsPerMinute":0,
         "providerRequestProfileOverrides": {
             "openai": profile,
-            "xai": xai,
         },
         "openaiClientProfileOverride": {"preset":"desktop"},
     }))
     .unwrap();
     let command = request.into_command().unwrap();
-    assert_eq!(command.request_profile_overrides.len(), 2);
+    assert_eq!(command.request_profile_overrides.len(), 1);
     assert!(
-        command
-            .request_profile_overrides
-            .contains_key(&gateway_core::routing::ProviderKind::new("xai").expect("Provider kind"))
+        command.request_profile_overrides.contains_key(
+            &gateway_core::routing::ProviderKind::new("openai").expect("Provider kind")
+        )
     );
 
     let conflict: CreateClientKeyRequest = serde_json::from_value(json!({
@@ -647,32 +626,7 @@ fn generic_profile_overrides_accept_native_providers_and_reject_legacy_conflicts
         "providerRequestProfileOverrides"
     );
 
-    let unknown: CreateClientKeyRequest = serde_json::from_value(json!({
-        "name":"profile",
-        "groupIds":[],
-        "maxConcurrency":0,
-        "requestsPerMinute":0,
-        "providerRequestProfileOverrides": {"provider.example":{"preset":"managed"}},
-    }))
-    .unwrap();
-    assert_eq!(
-        unknown.into_command().unwrap_err().field(),
-        "providerRequestProfileOverrides"
-    );
-
-    let unknown_clear: UpdateClientKeyRequest = serde_json::from_value(json!({
-        "id":"key_profile",
-        "name":"profile",
-        "groupIds":[],
-        "maxConcurrency":0,
-        "requestsPerMinute":0,
-        "providerRequestProfileOverrides": {"provider.example":null},
-    }))
-    .unwrap();
-    assert_eq!(
-        unknown_clear.into_command().unwrap_err().field(),
-        "providerRequestProfileOverrides"
-    );
+    // Provider 是否支持画像由已注册能力在用例层判断，wire 只负责形状和冲突
 }
 
 #[test]
@@ -683,8 +637,8 @@ fn generic_profile_override_clear_rejects_conflicting_legacy_update() {
         "groupIds":[],
         "maxConcurrency":0,
         "requestsPerMinute":0,
-        "providerRequestProfileOverrides": {"xai":null},
-        "xaiClientProfileOverride": {"preset":"desktop"},
+        "providerRequestProfileOverrides": {"openai":null},
+        "openaiClientProfileOverride": {"preset":"desktop"},
     }))
     .unwrap();
     assert_eq!(

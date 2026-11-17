@@ -6,48 +6,28 @@ use super::{InvalidSettings, SettingsValues};
 use crate::{
     account::{AccountConcurrency, AccountSelectionPolicy, RotationStrategy},
     concurrency::ConcurrencyQueuePolicy,
-    policy::CodexClientMinVersions,
+    policy::{ClaudeCodeVersion, CodexClientMinVersions},
 };
 
 // 持久快照和请求覆盖共用同一编译结果，避免参数校验与派生规则分叉
 #[derive(Debug, Clone)]
 pub(crate) struct CompiledSettings {
     pub(crate) values: SettingsValues,
-    pub(crate) account_error_protection:
-        std::sync::Arc<crate::account::CompiledAccountErrorProtection>,
     pub(crate) privacy: Option<std::sync::Arc<dyn super::privacy::CompiledPrivacyPolicy>>,
     pub(crate) account_selection_policy: AccountSelectionPolicy,
     pub(crate) client_queue_policy: ConcurrencyQueuePolicy,
     pub(crate) responses_max_decompressed_body_bytes: std::num::NonZeroUsize,
     pub(crate) min_codex_client_versions: CodexClientMinVersions,
+    pub(crate) min_claude_code_version: Option<ClaudeCodeVersion>,
     pub(crate) request_location: Option<crate::account::RequestLocation>,
 }
 
 impl CompiledSettings {
     pub(crate) fn new(
-        mut settings: SettingsValues,
+        settings: SettingsValues,
         compiler: Option<&dyn super::privacy::PrivacyPolicyCompiler>,
         previous: Option<&Self>,
     ) -> Result<Self, InvalidSettings> {
-        if let Some(previous) = previous {
-            settings.account_error_protection_revision =
-                previous.values.account_error_protection_revision;
-        }
-        if settings.account_error_protection_revision == 0 {
-            return Err(InvalidSettings);
-        }
-        settings
-            .account_error_protection
-            .validate()
-            .map_err(|_| InvalidSettings)?;
-        let account_error_protection = previous
-            .filter(|previous| {
-                previous.values.account_error_protection == settings.account_error_protection
-            })
-            .map_or_else(
-                || std::sync::Arc::new(settings.account_error_protection.compile()),
-                |previous| previous.account_error_protection.clone(),
-            );
         let privacy = if let Some(previous) = previous.filter(|previous| {
             previous.values.codex_privacy_policy == settings.codex_privacy_policy
         }) {
@@ -80,6 +60,11 @@ impl CompiledSettings {
             settings.openai_session_affinity_ttl_hours,
         )
         .map_err(|_| InvalidSettings)?;
+        if !(1..=crate::account::MAX_SESSION_AFFINITY_TTL_HOURS)
+            .contains(&settings.anthropic_session_affinity_ttl_hours)
+        {
+            return Err(InvalidSettings);
+        }
         let responses_max_decompressed_body_bytes =
             super::response_body_limit(settings.responses_max_decompressed_body_bytes)
                 .map_err(|_| InvalidSettings)?;
@@ -88,6 +73,9 @@ impl CompiledSettings {
             settings.min_codex_cli_version.as_deref(),
         )
         .map_err(|_| InvalidSettings)?;
+        let min_claude_code_version =
+            super::claude_code_min_version(settings.min_claude_code_version.as_deref())
+                .map_err(|_| InvalidSettings)?;
         let strategy =
             RotationStrategy::parse(&settings.rotation_strategy).ok_or(InvalidSettings)?;
         let account_selection_policy = AccountSelectionPolicy::new(
@@ -96,11 +84,16 @@ impl CompiledSettings {
         )
         .with_openai_guardian_reserved_concurrency(settings.openai_guardian_reserved_concurrency)
         .with_openai_account_affinity(settings.openai_account_affinity)
+        .with_anthropic_account_affinity(settings.anthropic_account_affinity)
         .with_max_account_rotations(settings.max_account_rotations)
         .with_openai_session_affinity_ttl(Duration::from_secs(
             u64::from(settings.openai_session_affinity_ttl_hours) * 3600,
         ))
+        .with_anthropic_session_affinity_ttl(Duration::from_secs(
+            u64::from(settings.anthropic_session_affinity_ttl_hours) * 3600,
+        ))
         .with_smart_scheduling(settings.smart_scheduling)
+        .with_quota_reset_window_weights(settings.quota_reset_window_weights)
         .with_queue(ConcurrencyQueuePolicy {
             max_waiting: settings.max_waiting_per_account,
             timeout: Duration::from_secs(u64::from(settings.account_queue_timeout_seconds)),
@@ -121,11 +114,11 @@ impl CompiledSettings {
             }
         }
         Ok(Self {
-            account_error_protection,
             account_selection_policy,
             client_queue_policy,
             responses_max_decompressed_body_bytes,
             min_codex_client_versions,
+            min_claude_code_version,
             request_location,
             values: settings,
             privacy,

@@ -563,6 +563,7 @@ mod provider {
     fn account(provider: &str) -> AccountPageItem {
         let now = Utc::now();
         let facts = AccountStatusFacts {
+            quota_paused: false,
             enabled: true,
             credential_state: CredentialState::Ready,
             access_token_expires_at: None,
@@ -572,12 +573,13 @@ mod provider {
             last_error_message: None,
         };
         AccountPageItem {
-            protection_rules: Vec::new(),
             capacity: gateway_admin::model::accounts::AccountCapacity {
                 used_slots: None,
                 total_slots: None,
             },
             account: AccountRecord {
+                quota_limits: Default::default(),
+                quota_paused: false,
                 auto_use_quota_credits: false,
                 outbound_proxy_id: None,
                 outbound_proxy_enabled: true,

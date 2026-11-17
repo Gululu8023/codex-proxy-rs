@@ -20,11 +20,10 @@ use gateway_core::{
     diagnostics::{TraceContext, diagnostic_json},
     engine::{
         execution::{AuthenticatedClient, ClientTransport},
-        middleware::{FrozenMiddlewarePlan, MiddlewareError},
+        middleware::MiddlewareError,
         response_control::ResponseControl,
     },
     lifecycle::{ConnectionGuard, ConnectionLifecycle},
-    operation::OperationKind,
 };
 
 use crate::middleware::headers::encode_headers;
@@ -38,9 +37,7 @@ use crate::{
     },
 };
 
-use super::{
-    request::OpenAiRequestHeaders, request_client_context, validation::ResponseValidationFacts,
-};
+use super::{request::OpenAiRequestHeaders, request_client_context};
 use connection::{
     ConnectionEvent, FramePhase, ResponsesWebSocketConnection, Socket, Upgrade, WriteContext,
 };
@@ -59,7 +56,6 @@ const CONNECTION_LIMIT_CLOSE_REASON: &str = "Responses websocket connection limi
 pub(crate) async fn responses_websocket(
     State(state): State<ApiState>,
     connect_info: Option<Extension<ConnectInfo<SocketAddr>>>,
-    middleware: Option<Extension<FrozenMiddlewarePlan>>,
     lifetime: Option<Extension<Arc<crate::middleware::CallLifetime>>>,
     headers: HeaderMap,
     websocket: Upgrade,
@@ -81,7 +77,6 @@ pub(crate) async fn responses_websocket(
         user_agent,
         request_headers,
         headers,
-        middleware.map(|Extension(plan)| plan),
         lifetime.map(|Extension(lifetime)| lifetime),
     )
 }
@@ -108,7 +103,6 @@ impl ResponsesWebSocketAdapter {
         user_agent: Option<String>,
         request_headers: OpenAiRequestHeaders,
         raw_headers: HeaderMap,
-        middleware: Option<FrozenMiddlewarePlan>,
         lifetime: Option<Arc<crate::middleware::CallLifetime>>,
     ) -> Response {
         let connection_guard = match self.service.try_register_connection() {
@@ -133,7 +127,6 @@ impl ResponsesWebSocketAdapter {
             raw_headers,
             lifecycle: self.service.lifecycle(),
             connection_guard,
-            middleware,
         };
         let origin = crate::middleware::current();
         websocket.on_upgrade(move |socket| async move {
@@ -153,7 +146,6 @@ struct ResponsesWebSocketSession {
     raw_headers: HeaderMap,
     lifecycle: Arc<dyn ConnectionLifecycle>,
     connection_guard: Box<dyn ConnectionGuard>,
-    middleware: Option<FrozenMiddlewarePlan>,
 }
 
 async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSession) {
@@ -167,7 +159,6 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         raw_headers,
         lifecycle,
         connection_guard,
-        middleware,
     } = session;
     tracing::info!(
         websocket_connection_id = %connection_id,
@@ -175,21 +166,12 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
     );
     let _connection_guard = connection_guard;
     let cancellation = lifecycle.cancellation().child_token();
-    let _connection_cancellation =
-        crate::middleware::websocket::CancelOnDrop(Some(cancellation.clone()));
+    let _connection_cancellation = connection::CancelOnDrop(Some(cancellation.clone()));
     let request_headers =
         request_headers.with_downstream_websocket_connection_id(connection_id.clone());
-    // 帧中间件可能改写终态，此时不能据原始响应关闭下游连接
-    let reconnect_for_replay = !middleware
-        .as_ref()
-        .is_some_and(FrozenMiddlewarePlan::has_websocket);
-    let mut connection = ResponsesWebSocketConnection::new(
-        socket,
-        connection_id,
-        cancellation.clone(),
-        middleware,
-        encode_headers(&raw_headers).into(),
-    );
+    let reconnect_for_replay = true;
+    let mut connection =
+        ResponsesWebSocketConnection::new(socket, connection_id, cancellation.clone());
     let mut request_count = 0_u64;
     let mut replay = ConnectionReplaySnapshot::default();
     let mut response_control = ResponseControl::default();
@@ -240,9 +222,9 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
             continue;
         }
         request_count = request_count.saturating_add(1);
-        // 初步解码只保留路由事实，避免整份正文跨越准入等待和响应交付
-        let model_hint = match decode_response_create_with_context(&payload, &request_headers) {
-            Ok(decoded) => Some(decoded.metadata().requested_model().to_owned()),
+        // 准入前校验协议，避免无效正文占用执行容量。
+        match decode_response_create_with_context(&payload, &request_headers) {
+            Ok(_) => (),
             Err(error) => {
                 trace_rejected_request(
                     &correlation_id,
@@ -280,22 +262,16 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         response_control.clear();
         let execution = service.execution();
         let preparation = async {
-            // 握手的显式改写可继承，Key 策略与宿主设置仍在每轮执行前刷新
+            // 每轮重新冻结当前配置并重新鉴权，握手快照不延续到后续请求。
             let mut client = client.clone();
-            if let Some(settings) = client.request_settings() {
+            if client.request_settings().is_some() {
                 let current = execution.request_settings().ok_or_else(|| {
                     gateway_core::error::GatewayError::new(
                         gateway_core::error::GatewayErrorKind::Internal,
                         "Gateway configuration is unavailable.",
                     )
                 })?;
-                let rebased = settings.rebase(current.snapshot()).map_err(|_| {
-                    gateway_core::error::GatewayError::new(
-                        gateway_core::error::GatewayErrorKind::InvalidRequest,
-                        "Request settings are invalid.",
-                    )
-                })?;
-                client = client.with_request_settings(rebased);
+                client = client.with_request_settings(current);
             }
             execution.prepare_execution(client).await
         };
@@ -325,13 +301,10 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         let request_id = Arc::<str>::from(prepared.request_id().to_string());
         response_control = prepared.response_control();
         let capture = new_replay_capture();
-        let validation = ResponseValidationFacts::default();
         let input = RequestInput {
             endpoint: crate::openai::router::RESPONSES_PATH.to_owned(),
             protocol: "openai".to_owned(),
-            operation: Some(OperationKind::Generate),
-            transport: ClientTransport::WebSocket,
-            model_hint,
+
             headers: encode_headers(&raw_headers),
             body: Bytes::from(payload),
         };
@@ -341,9 +314,7 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         let user_agent_for_terminal = user_agent.clone();
         let request_id_for_terminal = Arc::clone(&request_id);
         let capture_for_terminal = Arc::clone(&capture);
-        let validation_for_terminal = validation.clone();
         let invoke = invoke_request(
-            execution,
             prepared,
             input,
             Box::new(move |prepared, request| {
@@ -361,9 +332,7 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
                     let decoded = decode_response_create_with_context(payload, &request_headers)
                         .map_err(|_| MiddlewareError::Rejected)?
                         .with_client_context(client_ip, user_agent_for_terminal);
-                    let decoded = replay_for_terminal
-                        .prepare(decoded)
-                        .with_middleware_capabilities(&request)?;
+                    let decoded = replay_for_terminal.prepare(decoded);
                     let started = service_for_terminal
                         .start_prepared_response(
                             prepared,
@@ -386,7 +355,7 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
                         .session
                         .trace()
                         .capture("client.request.body", &body);
-                    execution_response(started, capture_for_terminal, validation_for_terminal).await
+                    execution_response(started, capture_for_terminal).await
                 })
             }),
         );
@@ -412,7 +381,6 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
             request_id,
             &mut replay,
             capture,
-            validation,
             &response_control,
         )
         .await;

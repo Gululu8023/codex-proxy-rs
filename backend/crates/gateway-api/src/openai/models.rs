@@ -47,7 +47,7 @@ pub(crate) async fn models(
     middleware::query_response(
         service.execution(),
         client,
-        RequestInput::query(super::router::MODELS_PATH.to_owned(), None, &headers),
+        RequestInput::query(super::router::MODELS_PATH.to_owned(), &headers),
         move |client| models_response(state, client, query),
     )
     .await
@@ -157,7 +157,6 @@ pub(crate) async fn model_detail(
         client,
         RequestInput::query(
             format!("{}/{model_id}", super::router::MODELS_PATH),
-            Some(model_id.clone()),
             &headers,
         ),
         move |client| async move { model_detail_response(&state, &client, model_id) },

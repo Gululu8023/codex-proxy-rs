@@ -5,7 +5,7 @@
       "totalSlots": "總槽位",
       "freeSlots": "空閒槽位",
       "smart": "智能調度",
-      "quotaReset": "額度重置優先",
+      "quotaReset": "額度調度",
       "sticky": "粘滯",
       "title": "賬號調度",
       "description": "容量、併發與分配策略",
@@ -14,12 +14,12 @@
     },
     "accountPool": {
       "empty": "暫無賬號池觀測",
-      "quotaExhausted": "配額耗盡",
+      "quotaLimited": "額度受限",
       "rateLimited": "限流中",
       "pending": "待處理",
       "issueCountsEmpty": "停用 — · 錯誤 —",
       "availableDescription": "賬號當前可用",
-      "exhaustedDescription": "賬號額度已耗盡",
+      "limitedQuotaDescription": "額度耗盡或達到調度上限",
       "limitedDescription": "賬號請求暫時受限",
       "issueCounts": "停用 {disabled} · 錯誤 {error}",
       "title": "賬號狀態",
@@ -59,7 +59,7 @@
       "totalRequests": "總請求",
       "requestCount": "請求次數",
       "totalTokens": "總 Token",
-      "totalCharges": "總計費",
+      "totalCharges": "已知估算費用",
       "totalCacheHits": "總緩存命中",
       "totalCache": "總緩存"
     },
@@ -78,6 +78,8 @@
       "empty": "暫無成功記錄"
     },
     "clientIdentity": {
+      "followClient": "跟隨用戶端",
+      "followClientDescription": "身分由每次請求提供，沒有固定的全域用戶端版本。",
       "clientMode": "運行模式",
       "versionPolicy": "版本策略",
       "notChecked": "尚未檢查",

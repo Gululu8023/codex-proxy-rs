@@ -223,6 +223,10 @@ fn http_decode_should_apply_configured_limits_to_every_encoding_and_frame() {
         ));
     }
     for request_headers in [HeaderMap::new(), headers("identity")] {
-        assert!(decode_request_with_headers(REQUEST, &request_headers, 1).is_ok());
+        // 未压缩的正文也受同一上限约束。
+        assert!(matches!(
+            decode_request_with_headers(REQUEST, &request_headers, 1),
+            Err(RequestDecodeError::DecompressedBodyTooLarge { .. })
+        ));
     }
 }

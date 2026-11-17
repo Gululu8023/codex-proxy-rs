@@ -19,6 +19,17 @@ inputs:
 runs:
   using: composite
   steps:
+    # Veil 是脚本准备的 path 依赖，必须在 cargo metadata（含缓存步骤）之前就绪。
+    - name: Prepare Veil source
+      if: runner.os != 'Windows'
+      shell: bash
+      run: sh scripts/prepare-veil.sh
+
+    - name: Prepare Veil source on Windows
+      if: runner.os == 'Windows'
+      shell: pwsh
+      run: ./scripts/prepare-veil.ps1
+
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
@@ -48,6 +59,7 @@ runs:
         BUILD_PLATFORM: ${{ inputs.platform }}
         BUILD_BINARY: ${{ inputs.binary }}
         RUST_IMAGE: ${{ inputs.rust-image }}
+        VEIL_SKIP_UI_BUILD: '1'
       run: |
         set -euo pipefail
         if [ -n "$RUST_IMAGE" ]; then
@@ -55,6 +67,7 @@ runs:
           docker run --rm --user "$(id -u):$(id -g)" \
             -e CARGO_HOME=/cargo -e HOME=/tmp \
             -e CPR_VERSION -e CPR_GIT_SHA -e CPR_BUILD_TIME -e CPR_BUILD_TYPE \
+            -e VEIL_SKIP_UI_BUILD \
             -v "$HOME/.cargo:/cargo" -v "$PWD/..:/workspace" \
             -w /workspace/backend "$RUST_IMAGE" \
             cargo build --release --locked --timings --target "$BUILD_TARGET" --bin codex-proxy-rs

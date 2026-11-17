@@ -52,4 +52,4 @@ pub(crate) use error::{
 pub(crate) use postgres::mutation_audit;
 pub use value::*;
 pub(crate) use workers::*;
-pub use workers::{CommandStoreDrainError, PostgresHealthProbe, RequestAnalyticsCycle};
+pub use workers::{PostgresHealthProbe, RequestAnalyticsCycle};

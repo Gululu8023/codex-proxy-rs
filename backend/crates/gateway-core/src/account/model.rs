@@ -557,10 +557,11 @@ impl QuotaState {
     }
 }
 
-/// 对外唯一的五态账号状态
+/// 对外唯一的账号状态
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum AccountStatus {
     Normal,
+    QuotaPaused,
     QuotaExhausted,
     RateLimited,
     Disabled,
@@ -572,6 +573,7 @@ impl AccountStatus {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::Normal => "normal",
+            Self::QuotaPaused => "quota_paused",
             Self::QuotaExhausted => "quota_exhausted",
             Self::RateLimited => "rate_limited",
             Self::Disabled => "disabled",
@@ -583,6 +585,7 @@ impl AccountStatus {
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "normal" => Some(Self::Normal),
+            "quota_paused" => Some(Self::QuotaPaused),
             "quota_exhausted" => Some(Self::QuotaExhausted),
             "rate_limited" => Some(Self::RateLimited),
             "disabled" => Some(Self::Disabled),
@@ -633,14 +636,6 @@ pub enum AccountCooldownKind {
     /// 上游 429 临时限流；默认类别，兼容升级前未标记的存量 key
     #[default]
     RateLimit,
-    /// 容量类错误高频触发后由熔断策略写入的自动冻结
-    CapacityFreeze,
-    /// 到期后仍阻止调度，必须由恢复探测成功或管理员恢复解除
-    CapacityFreezeProbe,
-    /// 自定义错误规则触发的账号保护
-    ErrorProtection,
-    /// 账号保护到期后需要探测确认恢复
-    ErrorProtectionProbe,
 }
 
 impl AccountCooldownKind {
@@ -648,37 +643,13 @@ impl AccountCooldownKind {
     pub const fn as_str(self) -> &'static str {
         match self {
             Self::RateLimit => "rate_limit",
-            Self::CapacityFreeze => "capacity_freeze",
-            Self::CapacityFreezeProbe => "capacity_freeze_probe",
-            Self::ErrorProtection => "error_protection",
-            Self::ErrorProtectionProbe => "error_protection_probe",
         }
-    }
-
-    #[must_use]
-    pub const fn is_error_protection(self) -> bool {
-        matches!(
-            self,
-            Self::CapacityFreeze
-                | Self::CapacityFreezeProbe
-                | Self::ErrorProtection
-                | Self::ErrorProtectionProbe
-        )
-    }
-
-    #[must_use]
-    pub const fn requires_probe(self) -> bool {
-        matches!(self, Self::CapacityFreezeProbe | Self::ErrorProtectionProbe)
     }
 
     #[must_use]
     pub fn parse(value: &str) -> Option<Self> {
         match value {
             "rate_limit" => Some(Self::RateLimit),
-            "capacity_freeze" => Some(Self::CapacityFreeze),
-            "capacity_freeze_probe" => Some(Self::CapacityFreezeProbe),
-            "error_protection" => Some(Self::ErrorProtection),
-            "error_protection_probe" => Some(Self::ErrorProtectionProbe),
             _ => None,
         }
     }
@@ -694,7 +665,7 @@ pub struct AccountCooldown {
 impl AccountCooldown {
     #[must_use]
     pub fn is_active(self, now: SystemTime) -> bool {
-        self.kind.requires_probe() || self.until > now
+        self.until > now
     }
 }
 
@@ -710,6 +681,7 @@ impl From<SystemTime> for AccountCooldown {
 /// 唯一状态解析器的完整输入事实
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct AccountStatusFacts {
+    pub quota_paused: bool,
     pub enabled: bool,
     pub credential_state: CredentialState,
     pub access_token_expires_at: Option<SystemTime>,
@@ -766,6 +738,9 @@ pub fn resolve_account_status(
             cooldown: facts.cooldown,
         };
     }
+    if facts.quota_paused {
+        return status_projection(AccountStatus::QuotaPaused);
+    }
     status_projection(AccountStatus::Normal)
 }
 
@@ -821,6 +796,8 @@ pub struct ProviderAccount {
     enabled: bool,
     concurrency_limit: Option<AccountConcurrencyLimit>,
     weight: AccountWeight,
+    quota_limits: super::AccountQuotaLimits,
+    quota_paused: bool,
     auto_use_quota_credits: bool,
     model_access: super::AccountModelAccess,
     credential_state: CredentialState,
@@ -860,6 +837,8 @@ impl ProviderAccount {
             enabled: true,
             concurrency_limit: None,
             weight: AccountWeight::DEFAULT,
+            quota_limits: super::AccountQuotaLimits::disabled(),
+            quota_paused: false,
             auto_use_quota_credits: false,
             model_access: super::AccountModelAccess::all(),
             credential_state: CredentialState::Unknown,
@@ -872,6 +851,24 @@ impl ProviderAccount {
             outbound_proxy: None,
             request_location: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_quota_limits(mut self, limits: super::AccountQuotaLimits, paused: bool) -> Self {
+        // 只有限额账号需要在取得租约前检测额度窗口的并发更新
+        self.quota_paused = paused;
+        self.quota_limits = limits;
+        self
+    }
+
+    #[must_use]
+    pub const fn quota_limits(&self) -> &super::AccountQuotaLimits {
+        &self.quota_limits
+    }
+
+    #[must_use]
+    pub const fn quota_paused(&self) -> bool {
+        self.quota_paused
     }
 
     #[must_use]
@@ -1101,6 +1098,7 @@ impl ProviderAccount {
     ) -> AccountStatusProjection {
         resolve_account_status(
             &AccountStatusFacts {
+                quota_paused: self.quota_paused,
                 enabled: self.enabled,
                 credential_state: self.credential_state,
                 access_token_expires_at: self.access_token_expires_at,
@@ -1430,6 +1428,8 @@ pub struct QuotaObservationVersion {
 /// Provider quota 的一次完整观察结果
 #[derive(Clone, PartialEq)]
 pub struct QuotaObservation {
+    /// 本地阈值决策与观测一起写入，策略已变时拒绝旧结论
+    pub quota_pause: Option<super::QuotaPauseDecision>,
     /// 网络查询可额外校验请求出口与启用状态，避免连接变化后的迟到写入
     pub expected_connection: Option<super::UpstreamConnection>,
     pub account_id: ProviderAccountId,

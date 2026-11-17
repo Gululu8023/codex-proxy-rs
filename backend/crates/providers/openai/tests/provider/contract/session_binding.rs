@@ -67,211 +67,6 @@ async fn session_affinity_storage_tolerates_delays_but_rejects_expired_requests_
     }
 }
 
-#[tokio::test]
-async fn cyber_policy_session_exclusion_has_actionable_non_retryable_error() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_subagent_a").await;
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/responses"))
-        .respond_with(ResponseTemplate::new(400).set_body_json(json!({
-            "error": {"code":"cyber_policy","type":"invalid_request_error","message":"synthetic policy rejection"}
-        })))
-        .mount(&server).await;
-    let provider = provider_with_affinity_and_base_url(
-        &store,
-        Arc::new(MemorySessionAffinity::default()),
-        server.uri(),
-    );
-    let request = || planned_request("openai", turn_request("policy-session", "policy-turn"));
-    let mut stream = provider
-        .clone()
-        .execute(
-            request(),
-            context("req_policy_first", CancellationToken::new()),
-        )
-        .await
-        .unwrap();
-    let first_error = loop {
-        match stream.next().await {
-            Some(Err(error)) => break error,
-            Some(Ok(_)) => {}
-            None => panic!("upstream rejection must surface"),
-        }
-    };
-    assert_eq!(first_error.upstream_status(), Some(400));
-    assert_eq!(
-        first_error
-            .client_visible_upstream_error()
-            .unwrap()
-            .message(),
-        "synthetic policy rejection"
-    );
-    assert!(
-        first_error
-            .error_details()
-            .unwrap()
-            .contains("synthetic policy rejection")
-    );
-    let error = provider
-        .clone()
-        .execute(
-            request(),
-            context("req_policy_retry", CancellationToken::new()),
-        )
-        .await
-        .err()
-        .expect("excluded session must fail before upstream");
-    assert_eq!(error.kind(), ProviderErrorKind::SessionPolicyRestricted);
-    assert!(error.retry_is_prohibited());
-    let visible = error
-        .client_visible_upstream_error()
-        .expect("actionable client message");
-    assert_eq!(visible.code(), Some("cyber_policy"));
-    assert_eq!(
-        visible.message(),
-        "No account is available for this session after an upstream cyber policy rejection."
-    );
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    // 可见但不属于固定账号范围的候选不能掩盖会话限制
-    create_account(&store, "acct_subagent_b").await;
-    let pinned = AttemptContext::new(
-        RequestAttemptContext::new(
-            ModelRequestId::new("req_policy_pinned").unwrap(),
-            ClientApiKeyId::new("key_openai_contract").unwrap(),
-        )
-        .with_request_location(Some(global_request_location())),
-        NonZeroU32::MIN,
-        SystemTime::now() + Duration::from_secs(5),
-        account_policy(),
-        AccountAttemptContext::new(
-            BTreeSet::new(),
-            Some(ProviderAccountId::new("acct_subagent_a").unwrap()),
-            None,
-        )
-        .with_account_scope(contract_account_scope()),
-        None,
-        CancellationToken::new(),
-    );
-    let error = provider
-        .clone()
-        .execute(request(), pinned)
-        .await
-        .err()
-        .unwrap();
-    assert_eq!(error.kind(), ProviderErrorKind::SessionPolicyRestricted);
-    assert!(error.retry_is_prohibited());
-    assert_eq!(
-        error.client_visible_upstream_error().unwrap().code(),
-        Some("cyber_policy")
-    );
-    assert_eq!(server.received_requests().await.unwrap().len(), 1);
-    // 其他账号仍可用于该会话时，不能误报全部账号受限
-    let available = provider
-        .clone()
-        .execute(
-            request(),
-            context("req_policy_available", CancellationToken::new()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        available.metadata().provider_account_id().as_str(),
-        "acct_subagent_b"
-    );
-    drop(available);
-    // 会话限制不能影响同一密钥的其他会话
-    store
-        .set_enabled(&ProviderAccountId::new("acct_subagent_b").unwrap(), false)
-        .await
-        .unwrap();
-    drop(
-        provider
-            .execute(
-                planned_request("openai", turn_request("unrelated-session", "other-turn")),
-                context("req_other_session", CancellationToken::new()),
-            )
-            .await
-            .unwrap(),
-    );
-}
-
-#[derive(Debug)]
-struct ChangeTurnMetadata(&'static [u8]);
-
-impl MiddlewarePlan for ChangeTurnMetadata {
-    fn handle(
-        &self,
-        _context: MiddlewareContext,
-        request: MiddlewareRequest,
-        next: MiddlewareNext,
-    ) -> BoxFuture<'static, Result<MiddlewareResponse, MiddlewareError>> {
-        let metadata = self.0;
-        Box::pin(async move {
-            let protocol = request.protocol().to_owned();
-            let mut headers = request.headers().to_vec();
-            let body = request.body().clone();
-            headers.push(MiddlewareHeader::new(
-                "x-codex-turn-metadata",
-                Bytes::from_static(metadata),
-            ));
-            next.run(request.replace_parts(protocol, headers, body, None)?)
-                .await
-        })
-    }
-}
-
-#[tokio::test]
-async fn final_middleware_session_header_cannot_use_another_sessions_account() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_subagent_a").await;
-    let affinity = Arc::new(MemorySessionAffinity::default());
-    let server = MockServer::start().await;
-    let provider = provider_with_affinity_and_base_url(&store, affinity, server.uri());
-    let request = |session| {
-        planned_request(
-            "openai",
-            Operation::Generate(generate_with_session_context(session, None, None)),
-        )
-    };
-    drop(
-        provider
-            .clone()
-            .execute(
-                request("session-a"),
-                context("req_seed_a", CancellationToken::new()),
-            )
-            .await
-            .unwrap(),
-    );
-    create_account(&store, "acct_subagent_b").await;
-    store.set_scheduling("acct_subagent_b", None, AccountWeight::new(100).unwrap());
-    drop(
-        provider
-            .clone()
-            .execute(
-                request("session-b"),
-                context("req_seed_b", CancellationToken::new()),
-            )
-            .await
-            .unwrap(),
-    );
-    let error = provider
-        .execute(
-            request("session-a"),
-            context_with_middleware(
-                "req_final_identity",
-                Arc::new(ChangeTurnMetadata(br#"{"session_id":"session-b"}"#)),
-                FastMode::Default,
-            ),
-        )
-        .await
-        .err()
-        .expect("mismatched owner must fail before send");
-    assert!(error.retry_is_prohibited());
-    assert!(server.received_requests().await.unwrap().is_empty());
-}
-
 pub(super) fn turn_request(session: &str, turn: &str) -> Operation {
     Operation::Generate(GenerateRequest::from_protocol_payload(
         ProtocolPayload::json_object("openai", json!({
@@ -468,45 +263,6 @@ async fn parent_metadata_without_a_session_does_not_invent_a_binding() {
         "acct_subagent_a"
     );
     assert_eq!(affinity.binding_count(), 0);
-}
-
-#[tokio::test]
-async fn final_middleware_child_identity_can_claim_a_missing_binding() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_subagent_a").await;
-    let affinity = Arc::new(MemorySessionAffinity::default());
-    let server = MockServer::start().await;
-    let provider = provider_with_affinity_and_base_url(&store, affinity.clone(), server.uri());
-    let stream = provider.execute(
-        planned_request("openai", generate_operation()),
-        context_with_middleware(
-            "req_final_child_claim",
-            Arc::new(ChangeTurnMetadata(br#"{"session_id":"new-session","thread_id":"child","subagent_kind":"thread_spawn"}"#)),
-            FastMode::Default,
-        ),
-    ).await.expect("final child identity can atomically claim its session");
-    assert_eq!(
-        stream.metadata().provider_account_id().as_str(),
-        "acct_subagent_a"
-    );
-    drop(stream);
-    // 初始正文的缓存偏好与中间件最终声明的会话分别准入；后续显式会话直接复用后者。
-    let claimed = affinity.lookup_keys();
-    assert_eq!(claimed.iter().collect::<BTreeSet<_>>().len(), 2);
-    let follow = provider_with_affinity_and_base_url(&store, affinity.clone(), server.uri())
-        .execute(
-            planned_request("openai", turn_request("new-session", "next")),
-            context("req_final_child_follow", CancellationToken::new()),
-        )
-        .await
-        .unwrap();
-    assert_eq!(
-        follow.metadata().provider_account_id().as_str(),
-        "acct_subagent_a"
-    );
-    assert_eq!(affinity.lookup_keys().last(), claimed.last());
-    assert_eq!(affinity.binding_count(), 2);
-    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -852,171 +608,13 @@ async fn child_queue_timeout_does_not_rebind_or_allow_provider_fallback() {
         .err()
         .expect("queue timeout");
     assert_eq!(error.kind(), ProviderErrorKind::ConcurrencyQueueTimeout);
+    assert_eq!(
+        gateway_core::error::GatewayError::from_provider(&error).client_message(),
+        "Request queue wait timed out."
+    );
     assert!(error.retry_is_prohibited());
     assert_eq!(affinity.binding_count(), 1);
     assert!(server.received_requests().await.unwrap().is_empty());
-}
-
-#[derive(Debug)]
-struct SessionScheduler {
-    decision: gateway_core::engine::policy::AccountScheduleDecision,
-}
-impl gateway_core::engine::policy::RequestPolicyPlan for SessionScheduler {
-    fn route_model(
-        &self,
-        _: gateway_core::engine::policy::ModelRouteInput,
-    ) -> BoxFuture<
-        'static,
-        Result<
-            gateway_core::engine::policy::ModelRouteDecision,
-            gateway_core::engine::policy::RequestPolicyFault,
-        >,
-    > {
-        Box::pin(async { Ok(gateway_core::engine::policy::ModelRouteDecision::Unhandled) })
-    }
-    fn schedule_account(
-        &self,
-        input: gateway_core::engine::policy::AccountScheduleInput,
-    ) -> BoxFuture<
-        'static,
-        Result<
-            gateway_core::engine::policy::AccountScheduleDecision,
-            gateway_core::engine::policy::RequestPolicyFault,
-        >,
-    > {
-        assert!(
-            input
-                .candidates()
-                .iter()
-                .any(|candidate| candidate.account_id().as_str() == "acct_subagent_b")
-        );
-        let decision = self.decision.clone();
-        Box::pin(async move { Ok(decision) })
-    }
-}
-struct SessionExtensionLease;
-impl gateway_core::routing::extensions::ExtensionSetLease for SessionExtensionLease {
-    fn is_ready(&self) -> bool {
-        true
-    }
-}
-
-#[tokio::test]
-async fn child_binding_respects_filtered_delegation_and_explicit_plugin_choices() {
-    use gateway_core::account::AccountAffinity;
-    use gateway_core::engine::policy::RequestPolicyContext;
-    use gateway_core::routing::extensions::{ExtensionSetId, ExtensionSetReference};
-    for (choice, mode) in [
-        ("delegate", AccountAffinity::Strict),
-        ("pick", AccountAffinity::Strict),
-        ("filter", AccountAffinity::Strict),
-        ("filter", AccountAffinity::Preferred),
-    ] {
-        let store = Arc::new(MemoryAccountStore::default());
-        create_account(&store, "acct_subagent_a").await;
-        let affinity = Arc::new(MemorySessionAffinity::default());
-        let leases = Arc::new(TestLeaseCoordinator::default());
-        let server = MockServer::start().await;
-        let provider = provider_with_affinity_and_base_url_and_leases(
-            &store,
-            affinity,
-            server.uri(),
-            leases.clone(),
-        );
-        drop(
-            provider
-                .clone()
-                .execute(
-                    planned_request("openai", turn_request("root", "root-turn")),
-                    context("req_plugin_root", CancellationToken::new()),
-                )
-                .await
-                .unwrap(),
-        );
-        create_account(&store, "acct_subagent_b").await;
-        leases
-            .busy_accounts
-            .lock()
-            .unwrap()
-            .insert(ProviderAccountId::new("acct_subagent_a").unwrap());
-        let id = ModelRequestId::new("req_plugin_child").unwrap();
-        let key = ClientApiKeyId::new("key_openai_contract").unwrap();
-        let policy = RequestPolicyContext::new(
-            Arc::new(SessionScheduler {
-                decision: match choice {
-                    "pick" => gateway_core::engine::policy::AccountScheduleDecision::Pick(
-                        ProviderAccountId::new("acct_subagent_b").unwrap(),
-                    ),
-                    "filter" => {
-                        gateway_core::engine::policy::AccountScheduleDecision::DelegateFiltered(
-                            BTreeSet::from([ProviderAccountId::new("acct_subagent_a").unwrap()]),
-                        )
-                    }
-                    _ => gateway_core::engine::policy::AccountScheduleDecision::Delegate,
-                },
-            }),
-            ExtensionSetReference::new(
-                ExtensionSetId::new("session-choice".into()).unwrap(),
-                Arc::new(SessionExtensionLease),
-            ),
-            id.clone(),
-            key.clone(),
-            vec![],
-        );
-        let attempt = AttemptContext::new(
-            RequestAttemptContext::new(id, key).with_request_policy(Some(policy)),
-            NonZeroU32::new(1).unwrap(),
-            SystemTime::now() + Duration::from_secs(5),
-            account_policy().with_openai_account_affinity(mode),
-            AccountAttemptContext::new(BTreeSet::new(), None, None)
-                .with_account_scope(contract_account_scope()),
-            None,
-            CancellationToken::new(),
-        );
-        let mut pending = Box::pin(provider.clone().execute(
-            planned_request(
-                "openai",
-                Operation::Generate(generate_with_session_context("root", Some("child"), None)),
-            ),
-            attempt,
-        ));
-        if choice == "filter" && mode == AccountAffinity::Strict {
-            let error = timeout(Duration::from_secs(2), pending)
-                .await
-                .unwrap()
-                .err()
-                .expect("excluded child owner must be terminal");
-            assert_eq!(error.kind(), ProviderErrorKind::RequestPolicyDenied);
-            assert_eq!(
-                error.send_state(),
-                gateway_core::upstream::UpstreamSendState::NotSent
-            );
-        } else if choice == "pick" || choice == "filter" {
-            let stream = timeout(Duration::from_secs(2), pending)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                stream.metadata().provider_account_id().as_str(),
-                "acct_subagent_b"
-            );
-        } else {
-            assert!(
-                timeout(Duration::from_millis(150), pending.as_mut())
-                    .await
-                    .is_err()
-            );
-            leases.busy_accounts.lock().unwrap().clear();
-            let stream = timeout(Duration::from_secs(2), pending)
-                .await
-                .unwrap()
-                .unwrap();
-            assert_eq!(
-                stream.metadata().provider_account_id().as_str(),
-                "acct_subagent_a"
-            );
-        }
-    }
 }
 
 #[tokio::test]
@@ -1406,26 +1004,31 @@ async fn relaxed_and_preferred_session_requests_apply_distinct_scheduling_polici
 }
 
 #[tokio::test]
-async fn preferred_child_can_claim_without_a_root_and_model_access_can_split_accounts() {
+async fn child_model_mismatch_waits_for_the_parent_or_splits_by_affinity_mode() {
     use gateway_core::account::{AccountModelAccess, AccountModelAccessMode};
     let store = Arc::new(MemoryAccountStore::default());
     create_account(&store, "acct_subagent_a").await;
     let affinity = Arc::new(MemorySessionAffinity::default());
     let provider = provider_with_affinity(&store, affinity.clone());
-    let select = |thread, model: &'static str, scope| {
+    let preferred = |scope| preferred_context("req_preferred_model", scope);
+    let select = |thread, model: &'static str, attempt| {
         provider.clone().execute(
             planned_request_for_model(
                 "openai",
                 Operation::Generate(generate_with_session_context("root", Some(thread), None)),
                 model,
             ),
-            preferred_context("req_preferred_model", scope),
+            attempt,
         )
     };
     drop(
-        select("early-child", "gpt-5.4", contract_account_scope())
-            .await
-            .unwrap(),
+        select(
+            "early-child",
+            "gpt-5.4",
+            preferred(contract_account_scope()),
+        )
+        .await
+        .unwrap(),
     );
     assert_eq!(
         affinity.binding_count(),
@@ -1433,7 +1036,7 @@ async fn preferred_child_can_claim_without_a_root_and_model_access_can_split_acc
         "the first session request claims the shared primary"
     );
     drop(
-        select("root", "gpt-5.4", contract_account_scope())
+        select("root", "gpt-5.4", preferred(contract_account_scope()))
             .await
             .unwrap(),
     );
@@ -1463,7 +1066,44 @@ async fn preferred_child_can_claim_without_a_root_and_model_access_can_split_acc
         Arc::new(directory),
         ClientRoutingScope::all_accounts(),
     ));
-    let child = select("model-child", "gpt-5.5", scope.clone())
+    for (scope, reason) in [
+        (
+            scope.clone(),
+            "The parent session's account does not allow the requested model.",
+        ),
+        (
+            Arc::new(scope.excluding_account(ProviderAccountId::new("acct_subagent_a").unwrap())),
+            "The parent session's account cannot serve this request.",
+        ),
+    ] {
+        let strict = context_with_affinity_policy(
+            "req_strict_model",
+            scope,
+            account_policy().with_queue(gateway_core::concurrency::ConcurrencyQueuePolicy {
+                max_waiting: 1,
+                timeout: Duration::from_millis(120),
+            }),
+        );
+        let error = select("model-child", "gpt-5.5", strict)
+            .await
+            .err()
+            .expect("strict child waits for the parent to switch accounts");
+        assert_eq!(error.kind(), ProviderErrorKind::ConcurrencyQueueTimeout);
+        assert!(error.retry_is_prohibited());
+        let gateway = gateway_core::error::GatewayError::from_provider(&error);
+        assert_eq!(
+            gateway.client_message(),
+            format!("{reason} Timed out waiting for the session to switch accounts.")
+        );
+        assert!(
+            error
+                .error_details()
+                .unwrap()
+                .contains(gateway.client_message())
+        );
+    }
+
+    let child = select("model-child", "gpt-5.5", preferred(scope.clone()))
         .await
         .unwrap();
     assert_eq!(
@@ -1472,7 +1112,7 @@ async fn preferred_child_can_claim_without_a_root_and_model_access_can_split_acc
     );
     drop(child);
     assert_eq!(
-        select("root", "gpt-5.4", scope)
+        select("root", "gpt-5.4", preferred(scope))
             .await
             .unwrap()
             .metadata()
@@ -1620,97 +1260,6 @@ async fn configured_ttl_renews_binding_and_image_alias_only_at_successful_admiss
     );
     assert_eq!(affinity.renewal_ttls(), vec![week, hour, week]);
     assert_eq!(affinity.alias_ttls(), vec![week, hour, week]);
-}
-
-#[tokio::test]
-async fn preferred_final_thread_rewrite_within_the_session_preserves_the_primary() {
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, "acct_subagent_a").await;
-    let affinity = Arc::new(MemorySessionAffinity::default());
-    let leases = Arc::new(TestLeaseCoordinator::default());
-    let server = MockServer::start().await;
-    let provider = provider_with_affinity_and_base_url_and_leases(
-        &store,
-        affinity,
-        server.uri(),
-        leases.clone(),
-    );
-    let request = |thread| {
-        planned_request(
-            "openai",
-            Operation::Generate(generate_with_session_context("root", Some(thread), None)),
-        )
-    };
-    drop(
-        provider
-            .clone()
-            .execute(
-                request("root"),
-                preferred_context("req_seed_root", contract_account_scope()),
-            )
-            .await
-            .unwrap(),
-    );
-    create_account(&store, "acct_subagent_b").await;
-    let a = store.account("acct_subagent_a").unwrap();
-    leases.signals.lock().unwrap().insert(
-        a.id().clone(),
-        gateway_core::account::AccountRuntimeSignals {
-            in_flight: 100,
-            last_started_at: None,
-            quota_reset_at: None,
-            quota_remaining_rank: None,
-            cooldown: None,
-            failure_rate_basis_points: None,
-            first_output_latency_ms: None,
-        },
-    );
-    drop(
-        provider
-            .clone()
-            .execute(
-                request("child"),
-                preferred_context("req_seed_child", contract_account_scope()),
-            )
-            .await
-            .unwrap(),
-    );
-    leases.signals.lock().unwrap().clear();
-    let plan = FrozenMiddlewarePlan::new(
-        Arc::new(ChangeTurnMetadata(
-            br#"{"session_id":"root","thread_id":"child"}"#,
-        )),
-        ExtensionSetReference::new(
-            ExtensionSetId::new("rewrite-thread".into()).unwrap(),
-            Arc::new(TestExtensionLease),
-        ),
-    );
-    let attempt = AttemptContext::new(
-        RequestAttemptContext::new(
-            ModelRequestId::new("req_final_thread").unwrap(),
-            ClientApiKeyId::new("key_openai_contract").unwrap(),
-        )
-        .with_middleware(
-            Some(plan),
-            Arc::from([]),
-            "/v1/responses".into(),
-            ClientTransport::HttpSse,
-        ),
-        NonZeroU32::MIN,
-        SystemTime::now() + Duration::from_secs(5),
-        account_policy()
-            .with_openai_account_affinity(gateway_core::account::AccountAffinity::Preferred),
-        AccountAttemptContext::new(BTreeSet::new(), None, None)
-            .with_account_scope(contract_account_scope()),
-        None,
-        CancellationToken::new(),
-    );
-    let stream = provider.execute(request("root"), attempt).await.unwrap();
-    assert_eq!(
-        stream.metadata().provider_account_id().as_str(),
-        "acct_subagent_a"
-    );
-    assert!(server.received_requests().await.unwrap().is_empty());
 }
 
 #[tokio::test]
@@ -1885,6 +1434,7 @@ async fn preferred_primary_migration_distinguishes_temporary_and_persistent_unav
                 leases.signals.lock().unwrap().insert(
                     primary.clone(),
                     AccountRuntimeSignals {
+                        quota_reset_windows: None,
                         in_flight: 2,
                         last_started_at: None,
                         quota_reset_at: None,
@@ -2010,6 +1560,7 @@ async fn preferred_spillover_stays_stable_and_concurrent_migration_claims_one_pr
     leases.signals.lock().unwrap().insert(
         primary.clone(),
         AccountRuntimeSignals {
+            quota_reset_windows: None,
             in_flight: 100,
             last_started_at: None,
             quota_reset_at: None,

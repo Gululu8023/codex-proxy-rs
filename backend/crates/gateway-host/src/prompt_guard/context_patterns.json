@@ -1,0 +1,27 @@
+{
+  "defensiveContextPatterns": [
+    "(?i)\\b(defensive|defense|prevent|prevention|mitigation|detect|detection|hardening|patch|remediation|incident\\s+response)\\b",
+    "(?i)\\b(do\\s+not\\s+provide|without\\s+code|no\\s+commands|high\\s+level|non[-\\s]?operational|refusal|unsafe)\\b",
+    "(?i)\\bprompt[-\\s]?injection\\s+(?:detector|detection|classifier|scanner|test)\\b",
+    "(?i)\\bdo\\s+not\\s+(?:follow|obey|execute|apply)\\b",
+    "防御|防护|修复|检测|识别|排查|加固|缓解|研判|监控|告警|事件响应",
+    "不要提供|不提供(代码|命令|绕过|操作步骤)|不提供.{0,8}(攻击|利用|执行|操作).{0,4}(步骤|代码|命令)|仅分析.{0,20}(特征|原理|风险)",
+    "(?:汇总|总结|说明|介绍).{0,80}(?:检测|防御|防护|风险|告警|修复|缓解|响应|特征)"
+  ],
+  "operationalRequestPatterns": [
+    "(?i)(?:^|[\\n.!?;:。！？；：]\\s*)(?:please\\s+)?(?:write|generate|create|build|craft|make|provide|implement|execute|run|launch|deploy|install|steal|dump|extract|exfiltrate|harvest|bypass|evade|disable|exploit|attack|compromise|take\\s+over|clear|delete)\\b",
+    "(?i)\\b(?:can|could|would)\\s+you\\b.{0,40}\\b(?:write|generate|create|build|craft|make|provide|implement|execute|run|launch|deploy|install|steal|dump|extract|exfiltrate|harvest|bypass|evade|disable|exploit|attack|compromise|take\\s+over|clear|delete)\\b|\\b(?:help\\s+me|i\\s+(?:want|need)|need\\s+you\\s+to|show\\s+me\\s+how\\s+to|how\\s+to|how\\s+(?:can|do|would)\\s+i)\\b.{0,40}\\b(?:write|generate|create|build|craft|make|provide|implement|execute|run|launch|deploy|install|steal|dump|extract|exfiltrate|harvest|bypass|evade|disable|exploit|attack|compromise|take\\s+over|clear|delete)\\b",
+    "(?i)(?:^|[\\n.!?;:]\\s*)(?:please\\s+|now\\s+)?(?:ignore|disregard|override)\\b.{0,60}\\b(?:previous|prior|above|system|developer|safety)\\b.{0,24}\\b(?:instructions?|rules?|polic(?:y|ies)|guardrails?)\\b|(?:^|[\\n。！？；：])\\s*(?:请|请你|现在|立即)?(?:忽略|无视|覆盖).{0,30}(?:之前|以上|系统|开发者|安全).{0,12}(?:指令|规则|政策|限制)",
+    "(?:^|[\\n。！？；：])\\s*(?:(?:请|请你|帮我|给我|我要|需要你|直接|立即|马上)\\s*)?(?:编写|生成|创建|构造|制作|提供|实现|执行|运行|发起|部署|安装|窃取|导出|转储|提取|外传|绕过|规避|禁用|关闭|利用|攻击|接管|清除|删除)",
+    "(?:请|请你|帮我|给我|我要|需要你).{0,20}(?:编写|生成|创建|构造|制作|提供|实现|执行|运行|发起|部署|安装|窃取|导出|转储|提取|外传|绕过|规避|禁用|关闭|利用|攻击|接管|清除|删除)|(?:如何|怎么)(?:实现|执行|生成|编写|绕过|窃取|攻击|利用|提权|接管|外传)"
+  ],
+  "operationalNegationPatterns": [
+    "(?i)\\b(?:do\\s+not|don't|never|avoid|must\\s+not|should\\s+not|refuse\\s+to)\\s+(?:please\\s+)?(?:write|generate|create|build|craft|make|provide|implement|execute|run|launch|deploy|install|steal|dump|extract|exfiltrate|harvest|bypass|evade|disable|exploit|attack|compromise|take\\s+over|clear|delete)\\b",
+    "(?:不要|不得|禁止|避免|不应|无需|拒绝).{0,6}(?:编写|生成|创建|构造|制作|提供|实现|执行|运行|发起|部署|安装|窃取|导出|转储|提取|外传|绕过|规避|禁用|关闭|利用|攻击|接管|清除|删除)"
+  ],
+  "benignOperationalArtifactPatterns": [
+    "(?i)\\b(?:write|create|generate|build|provide|implement)\\b.{0,64}\\b(?:yara|sigma|snort|suricata)\\b(?:.{0,20}\\b(?:rule|signature)\\b)?",
+    "(?i)\\b(?:write|create|generate|build|provide|implement|develop|draft|design)\\b.{0,64}\\b(?:detect(?:ion|or)|monitoring|alerting|mitigation|remediation|patch|analysis|report|documentation|classifier|sensor|policy|signature|unit\\s+test|test\\s+fixture|indicator|ioc|yara|sigma)\\b(?:.{0,32}\\b(?:rule|logic|concept|code|script|guidance|test|report|model|signature|sensor|policy|template)\\b)?",
+    "(?:编写|创建|生成|构建|提供|实现|设计).{0,48}(?:检测规则|检测思路|检测概念|告警规则|监控规则|防护规则|修复补丁|缓解方案|分析报告|报告模板|测试用例|测试夹具|检测脚本|检测代码|威胁指标|IOC)"
+  ]
+}

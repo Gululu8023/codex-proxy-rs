@@ -311,7 +311,6 @@ struct AtomicFailureTrace {
     initial_errors: Mutex<std::collections::VecDeque<EngineError>>,
     first_batch: Mutex<Option<CoordinatedEvent>>,
     session_drops: Arc<AtomicUsize>,
-    middleware: Option<gateway_core::engine::middleware::FrozenMiddlewarePlan>,
 }
 
 struct AtomicFailureSession {
@@ -401,13 +400,6 @@ struct AtomicFailureExecution {
 }
 
 impl ExecutionService for AtomicFailureExecution {
-    fn middleware_plan(
-        &self,
-        _: &gateway_core::engine::execution::PreparedRootExecution,
-    ) -> Option<gateway_core::engine::middleware::FrozenMiddlewarePlan> {
-        self.trace.middleware.clone()
-    }
-
     fn authenticate(
         &self,
         plaintext: &str,
@@ -1114,6 +1106,7 @@ async fn websocket_disconnect_during_core_settlement_finishes_charge_before_rele
     let lifecycle = Arc::new(SettlementConnectionLifecycle::default());
     let admin = crate::admin::AdminTestFixture::new().await;
     let app = gateway_api::initialize(
+        uuid::Uuid::new_v4(),
         gateway_api::ApiConfig {
             asset_directory: std::env::temp_dir(),
             cors_allowed_origins: Vec::new(),

@@ -39,8 +39,8 @@ pub use admin::{
     PreparedCodexCredentialRotationGuard,
 };
 pub use catalog::{
-    CodexCatalogScope, CodexCredentialCatalogError, CodexCredentialCatalogService,
-    CodexCredentialCatalogSnapshot, CodexPlanCatalog,
+    CodexAccountCatalog, CodexCatalogScope, CodexCredentialCatalogError,
+    CodexCredentialCatalogService, CodexCredentialCatalogSnapshot,
 };
 pub use codec::{
     CodexCredentialCodec, CodexCredentialDataError, CodexRuntimeAuthentication,
@@ -67,11 +67,11 @@ pub use refresh::{
     DueCodexCredential,
 };
 pub use repository::{CodexCredentialRepository, CredentialRepositoryError};
+pub(crate) use selector::SelectCodexProviderEndpointCredential;
 pub use selector::{
     CodexAccountFailure, CodexCredentialLease, CodexCredentialSelector, CredentialSelectionError,
     SelectCodexCredential,
 };
-pub(crate) use selector::{CodexCyberPolicyScope, SelectCodexProviderEndpointCredential};
 pub(crate) use types::oauth_identity_key;
 pub use types::{
     CODEX_AUTHENTICATION_KIND_OAUTH, CodexAccountProfile, CodexCookie, CodexCookieCaptureOutcome,

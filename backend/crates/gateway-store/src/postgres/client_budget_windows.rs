@@ -5,8 +5,7 @@ use gateway_admin::{
         MutationContext,
         audit::MutationAuditOperation,
         client_keys::{
-            ClientKeyBudgetMutationOrigin, ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod,
-            SetClientKeyBudgetWindow,
+            ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod, SetClientKeyBudgetWindow,
         },
     },
     ports::store::{AdminStoreError, AdminStoreErrorKind, AdminStoreResult},
@@ -59,15 +58,9 @@ pub(super) async fn get(
 pub(super) async fn set(
     pool: &PgPool,
     command: SetClientKeyBudgetWindow,
-    origin: ClientKeyBudgetMutationOrigin,
     context: &MutationContext,
 ) -> AdminStoreResult<u64> {
-    let mut tx = match &origin {
-        ClientKeyBudgetMutationOrigin::Admin => pool.begin().await.map_err(unavailable)?,
-        ClientKeyBudgetMutationOrigin::Plugin(owner) => {
-            super::plugins::begin_plugin_mutation(pool, owner).await?
-        }
-    };
+    let mut tx = pool.begin().await.map_err(unavailable)?;
     let exists = sqlx::query("select id from client_api_keys where id=$1 for update")
         .bind(command.id.as_str())
         .fetch_optional(&mut *tx)
@@ -80,14 +73,10 @@ pub(super) async fn set(
             "API Key 不存在",
         ));
     }
-    let owner = match &origin {
-        ClientKeyBudgetMutationOrigin::Admin => None,
-        ClientKeyBudgetMutationOrigin::Plugin(owner) => Some(&owner.instance_id),
-    };
     let request = serde_json::json!({
         "period": command.period.as_str(),
         "starts_at": command.window.map(|window| window.starts_at),
-        "ends_at": command.window.map(|window| window.ends_at), "owner": owner,
+        "ends_at": command.window.map(|window| window.ends_at), "owner": serde_json::Value::Null,
     });
     // 只创建未开启的账本，不因窗口管理顺带开启另一个原生周期
     sqlx::query(

@@ -785,7 +785,6 @@ fn selection_failure(error: &CredentialSelectionError) -> ProviderError {
         CredentialSelectionError::Store(_) => Some("account_store_unavailable"),
         CredentialSelectionError::Coordinator(_) => Some("account_coordinator_unavailable"),
         CredentialSelectionError::CookiePolicy(_) => Some("account_cookie_policy_rejected"),
-        CredentialSelectionError::PolicyUnavailable => Some("account_policy_unavailable"),
         CredentialSelectionError::PolicyFiltered => Some("account_policy_filtered"),
         _ => None,
     };
@@ -807,6 +806,15 @@ fn selection_failure(error: &CredentialSelectionError) -> ProviderError {
         CredentialSelectionError::QueueRejected(error) => {
             provider_error(error.provider_kind(), UpstreamSendState::NotSent)
         }
+        CredentialSelectionError::IneligibleSessionAccountTimeout(_) => provider_error(
+            ProviderErrorKind::ConcurrencyQueueTimeout,
+            UpstreamSendState::NotSent,
+        )
+        .with_client_visible_upstream_error(ClientVisibleUpstreamError::new(
+            error.to_string(),
+            None,
+            None,
+        )),
         CredentialSelectionError::CapacityUnavailable { retry_after } => {
             let error = provider_error(
                 ProviderErrorKind::AccountCapacityUnavailable,
@@ -856,15 +864,10 @@ fn selection_failure(error: &CredentialSelectionError) -> ProviderError {
             ProviderErrorKind::ProviderInfrastructureUnavailable,
             UpstreamSendState::NotSent,
         ),
-        CredentialSelectionError::PolicyRejected | CredentialSelectionError::PolicyFiltered => {
-            provider_error(
-                ProviderErrorKind::RequestPolicyDenied,
-                UpstreamSendState::NotSent,
-            )
-        }
-        CredentialSelectionError::PolicyUnavailable => {
-            provider_error(ProviderErrorKind::Unavailable, UpstreamSendState::NotSent)
-        }
+        CredentialSelectionError::PolicyFiltered => provider_error(
+            ProviderErrorKind::RequestPolicyDenied,
+            UpstreamSendState::NotSent,
+        ),
     };
     match diagnostic {
         Some(diagnostic) => mapped.with_diagnostic(diagnostic),

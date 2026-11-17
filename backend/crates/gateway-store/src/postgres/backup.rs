@@ -11,9 +11,9 @@ use secrecy::{ExposeSecret as _, SecretString};
 use sqlx::{Acquire as _, PgPool, Postgres, Row as _, Transaction};
 
 use gateway_admin::model::backup::{
-    BackupRecord, BackupRecordListQuery, BackupRecordPage, BackupRecordSeed, BackupSettings,
-    BackupStatus, BackupStatusTransition, BackupTriggerKind, UpdateBackupScheduleCommand,
-    UpdateBackupStorageCommand,
+    BackupObject, BackupRecord, BackupRecordListQuery, BackupRecordPage, BackupRecordSeed,
+    BackupSettings, BackupStatus, BackupStatusTransition, BackupTriggerKind,
+    UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
 };
 use gateway_admin::model::{MutationContext, Revision as AdminRevision};
 use gateway_admin::ports::backup::{BackupRepository, StatusTransitionUpdate};
@@ -372,6 +372,7 @@ impl BackupRepository for PgBackupRepository {
 
         let rows = sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records
@@ -407,6 +408,7 @@ impl BackupRepository for PgBackupRepository {
     async fn load_backup_record(&self, id: &str) -> AdminStoreResult<Option<BackupRecord>> {
         sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records where id = $1",
@@ -422,6 +424,7 @@ impl BackupRepository for PgBackupRepository {
     async fn list_intermediate_records(&self) -> AdminStoreResult<Vec<BackupRecord>> {
         let rows = sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records
@@ -442,6 +445,7 @@ impl BackupRepository for PgBackupRepository {
         let limit = limit.clamp(1, 100);
         let rows = sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records
@@ -463,6 +467,7 @@ impl BackupRepository for PgBackupRepository {
         let now = Utc::now();
         let rows = sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records
@@ -503,7 +508,8 @@ impl BackupRepository for PgBackupRepository {
                from claimed
               where br.id = claimed.id
               returning br.id, br.trigger_kind, br.status, br.scheduled_at, br.object_key,
-                        br.size_bytes, br.sha256, br.attempt_count, br.error_code,
+                        br.size_bytes, br.sha256, br.privacy_object_key, br.privacy_size_bytes,
+                        br.privacy_sha256, br.attempt_count, br.error_code,
                         br.error_message, br.started_at, br.completed_at, br.expires_at,
                         br.created_at, br.updated_at",
         )
@@ -527,11 +533,20 @@ impl BackupRepository for PgBackupRepository {
             .map(i64::try_from)
             .transpose()
             .map_err(|source| store_invalid("size bytes").with_source(source))?;
+        let privacy = update.privacy_store;
+        let privacy_size_bytes = privacy
+            .as_ref()
+            .map(|object| i64::try_from(object.size_bytes))
+            .transpose()
+            .map_err(|source| store_invalid("privacy size bytes").with_source(source))?;
         sqlx::query(
             "update backup_records
                 set status = $1,
                     size_bytes = coalesce($2, size_bytes),
                     sha256 = coalesce($3, sha256),
+                    privacy_object_key = coalesce($10, privacy_object_key),
+                    privacy_size_bytes = coalesce($11, privacy_size_bytes),
+                    privacy_sha256 = coalesce($12, privacy_sha256),
                     error_code = coalesce($4, error_code),
                     error_message = coalesce($5, error_message),
                     completed_at = coalesce(
@@ -541,6 +556,7 @@ impl BackupRepository for PgBackupRepository {
                     updated_at = $7
               where id = $8 and status = $9
               returning id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                         attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                         created_at, updated_at",
         )
@@ -553,6 +569,9 @@ impl BackupRepository for PgBackupRepository {
         .bind(now)
         .bind(id)
         .bind(transition.from().as_str())
+        .bind(privacy.as_ref().map(|object| object.object_key.as_str()))
+        .bind(privacy_size_bytes)
+        .bind(privacy.as_ref().map(|object| object.sha256.as_str()))
         .fetch_optional(&self.pool)
         .await
         .map_err(|source| store_unavailable("transition backup task").with_source(source))?
@@ -575,6 +594,7 @@ impl BackupRepository for PgBackupRepository {
                     set status = 'deleting', updated_at = $1
                   where id = $2 and status in ('completed', 'failed')
                   returning id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                             attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                             created_at, updated_at",
             )
@@ -663,6 +683,7 @@ impl BackupRepository for PgBackupRepository {
         let limit = limit.clamp(1, 10000);
         let rows = sqlx::query(
             "select id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                     attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                     created_at, updated_at
                from backup_records
@@ -753,6 +774,7 @@ async fn insert_queued_in_transaction(
            id, trigger_kind, status, scheduled_at, object_key, expires_at, created_at, updated_at
          ) values ($1, $2, 'queued', $3, $4, $5, now(), now())
          returning id, trigger_kind, status, scheduled_at, object_key, size_bytes, sha256,
+                   privacy_object_key, privacy_size_bytes, privacy_sha256,
                    attempt_count, error_code, error_message, started_at, completed_at, expires_at,
                    created_at, updated_at",
     )
@@ -919,6 +941,7 @@ fn backup_record_from_row(row: &sqlx::postgres::PgRow) -> AdminStoreResult<Backu
         object_key: decode(row.try_get("object_key"))?,
         size_bytes,
         sha256: decode(row.try_get("sha256"))?,
+        privacy_store: privacy_store_from_row(row)?,
         attempt_count: u32::try_from(decode(row.try_get::<i32, _>("attempt_count"))?)
             .map_err(|source| store_invalid("attempt_count").with_source(source))?,
         error_code: decode(row.try_get("error_code"))?,
@@ -929,6 +952,23 @@ fn backup_record_from_row(row: &sqlx::postgres::PgRow) -> AdminStoreResult<Backu
         created_at: decode(row.try_get("created_at"))?,
         updated_at: decode(row.try_get("updated_at"))?,
     })
+}
+
+/// 三列由约束保证同时为空或同时存在
+fn privacy_store_from_row(row: &sqlx::postgres::PgRow) -> AdminStoreResult<Option<BackupObject>> {
+    let object_key: Option<String> = decode(row.try_get("privacy_object_key"))?;
+    let size_bytes: Option<i64> = decode(row.try_get("privacy_size_bytes"))?;
+    let sha256: Option<String> = decode(row.try_get("privacy_sha256"))?;
+    match (object_key, size_bytes, sha256) {
+        (None, None, None) => Ok(None),
+        (Some(object_key), Some(size_bytes), Some(sha256)) => Ok(Some(BackupObject {
+            object_key,
+            size_bytes: u64::try_from(size_bytes)
+                .map_err(|source| store_invalid("privacy_size_bytes").with_source(source))?,
+            sha256,
+        })),
+        _ => Err(store_invalid("privacy_store")),
+    }
 }
 
 fn backup_settings_from_row(row: &sqlx::postgres::PgRow) -> AdminStoreResult<BackupSettings> {

@@ -18,6 +18,9 @@ const enabled = defineModel<boolean>('enabled', { required: true })
 
 <template>
   <ZCard :title="t('settings.location.requestLocationOverride')" :description="t('settings.location.description')">
+    <template #actions>
+      <slot name="actions" />
+    </template>
     <template #body>
       <div class="flex max-w-6xl items-center justify-between gap-3">
         <ZSwitch v-model="enabled" :label="t('settings.location.enableLocationOverlay')" :disabled="disabled" />
@@ -26,6 +29,7 @@ const enabled = defineModel<boolean>('enabled', { required: true })
       <div class="grid min-w-0 gap-4.5 mt-4 max-w-6xl">
         <RequestLocationFields v-model="location" :form-prop="enabled ? 'requestLocation' : undefined" :disabled="disabled || !enabled" />
       </div>
+      <slot name="footer" />
     </template>
   </ZCard>
 </template>

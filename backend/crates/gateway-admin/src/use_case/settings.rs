@@ -22,6 +22,39 @@ use super::{map_store_error, publish_committed};
 /// API 消费的 Runtime settings 管理服务
 #[async_trait]
 pub trait SettingsService: Send + Sync {
+    async fn update_domain(
+        &self,
+        context: &MutationContext,
+        expected_revision: crate::model::Revision,
+        update: crate::model::settings::DomainSettingsUpdate,
+    ) -> Result<RuntimeSettings, AdminError> {
+        let mut current = self.load().await?;
+        if current.config_revision != expected_revision {
+            return Err(AdminError::conflict(
+                "运行设置已更改，请保留草稿并重新读取版本",
+            ));
+        }
+        match update {
+            crate::model::settings::DomainSettingsUpdate::ClaudePublicUrl(url) => {
+                current.values.claude_public_url = url
+            }
+            crate::model::settings::DomainSettingsUpdate::PromptGuard(config) => {
+                current.values.prompt_guard = *config
+            }
+        }
+        self.replace(
+            context,
+            ReplaceRuntimeSettings {
+                expected_revision,
+                values: current.values,
+                request_profile_updates: Default::default(),
+                model_mappings: current.model_mappings,
+                rotation_strategy: current.rotation_strategy,
+            },
+        )
+        .await
+    }
+
     async fn preview_privacy_policy(
         &self,
         _request: gateway_core::settings::privacy::PrivacyPreviewRequest,
@@ -259,16 +292,6 @@ impl SettingsService for DefaultSettingsService {
         match &command.change {
             PricingChange::Replace(pricing) => {
                 pricing.validate().map_err(AdminError::invalid)?;
-                if command.provider == "xai"
-                    && pricing.bands.keys().any(|band| {
-                        matches!(
-                            band.as_str(),
-                            "image" | "flex" | "long_flex" | "ultrafast" | "long_ultrafast"
-                        )
-                    })
-                {
-                    return Err(AdminError::invalid("xAI 不支持此价格档位"));
-                }
                 if !pricing.bands.contains_key("standard")
                     && command
                         .models
@@ -376,6 +399,20 @@ impl SettingsService for DefaultSettingsService {
         context: &MutationContext,
         mut command: ReplaceRuntimeSettings,
     ) -> Result<RuntimeSettings, AdminError> {
+        // 空缺密钥表示保留，显式空字符串表示清除；revision CAS 防止并发覆盖
+        if command.values.prompt_guard.review_api_key.is_none() {
+            command.values.prompt_guard.review_api_key =
+                self.load().await?.values.prompt_guard.review_api_key;
+        }
+        if command
+            .values
+            .prompt_guard
+            .review_api_key
+            .as_ref()
+            .is_some_and(|key| key.expose().is_empty())
+        {
+            command.values.prompt_guard.review_api_key = None;
+        }
         validate_settings(&command)?;
         if command.values.codex_privacy_policy != Default::default() {
             self.profile_provider("openai")?

@@ -16,7 +16,7 @@ const OPENAI_PROTOCOL: &str = "openai";
 
 /// OpenAI Responses wire 的转发器
 ///
-/// OpenAI Provider 与 xAI adapter 都必须交付 OpenAI wire
+/// OpenAI Provider 与扩展 adapter 都必须交付 OpenAI wire
 /// wire 是客户端交付
 /// 与终态判断的事实来源；canonical facts 只在 wire 暂未携带 ID 时提供旁路观测，
 /// 不得反过来拒绝或改写上游事件；客户端错误兼容投影只发生在编码出口

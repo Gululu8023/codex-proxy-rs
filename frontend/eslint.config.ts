@@ -113,7 +113,8 @@ export default antfu(
         localeDir: {
           pattern: './src/i18n/locales/*/*.json',
           localeKey: 'path',
-          localePattern: /\/locales\/(?<locale>[^/]+)\//,
+          // ESLint 接收平台原生路径，Windows 与 Unix 都按目录名识别语言。
+          localePattern: /[/\\]locales[/\\](?<locale>[^/\\]+)[/\\]/,
         },
         messageSyntaxVersion: '^11.0.0',
       },
@@ -128,6 +129,29 @@ export default antfu(
         'error',
         {
           extensions: ['.ts', '.vue'],
+          // 动态键无法被静态扫描识别；仅豁免已有调用对应的范围。
+          ignores: [
+            // 账号额度状态和证据来源由服务端返回，额度面板按字段拼接键。
+            '/^accounts\\.quota\\.states\\.(unsampled|stale|query_failed|exhausted|sampled)$/',
+            'accounts.quota.sources.oauth_usage',
+            // 审查页的页签、动作、覆盖范围和统计项按枚举或列表拼接键。
+            '/^guard\\.tabs\\.(overview|records|profiles|policy|learning|help)$/',
+            '/^guard\\.mode\\.(enforce|observe)$/',
+            '/^guard\\.action\\.[^.]+$/',
+            '/^guard\\.coverage\\.[^.]+$/',
+            '/^guard\\.summary\\.[^.]+$/',
+            // 规则类别和 Moderations 类别来自服务端目录，保留本地化显示名。
+            '/^guard\\.ruleCategory\\.[^.]+$/',
+            '/^guard\\.flow\\.moderationCategory\\.[^.]+$/',
+            // 审查详情、策略选项与帮助章节在 v-for 或选项列表中拼接键。
+            '/^guard\\.(rawScore|signalScore|auditScore|decisionScore|localMs|totalMs|evaluationCount|reuseCount)$/',
+            '/^guard\\.layout\\.(enabled|disabled|builtin|custom|local|review|upstream|learning|coverage|retention)$/',
+            '/^guard\\.flow\\.(allPatterns|anyPatterns|excludePatterns)$/',
+            '/^guard\\.flow\\.(local|scope|origin|profile|status|help)\\.[^.]+$/',
+            // 连接诊断阶段和审查状态使用服务端返回的阶段名、状态名。
+            '/^claude\\.stages\\.[^.]+$/',
+            '/^settings\\.promptGuard\\.(disabled|ready|candidate_review_unavailable)$/',
+          ],
         },
       ],
     },

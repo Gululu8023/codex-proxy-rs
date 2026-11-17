@@ -4,7 +4,7 @@ import type { AccountAuthorizationView } from '../../composables/useAccountAutho
 import type { AccountCreateForm, AccountImportMode } from '../../utils/accountCreate'
 import type { Account, AccountGroupRef } from '@/api'
 
-import { Openai, Xai } from '@boxicons/vue'
+import { Openai } from '@boxicons/vue'
 import { ZButton, ZDialog, ZForm, ZIconButton, ZSegmented } from '@codex-proxy/ui'
 import { Copy, LayoutGrid, Settings2 } from '@lucide/vue'
 import { computed, useTemplateRef, watch } from 'vue'
@@ -121,7 +121,6 @@ async function requestCreate() {
     <template #icon>
       <Settings2 v-if="view.configuring" class="text-z-text" :size="20" aria-hidden="true" />
       <LayoutGrid v-else-if="view.isBatch" class="text-z-text" :size="20" aria-hidden="true" />
-      <Xai v-else-if="view.provider === 'xai'" class="text-z-text" :width="20" :height="20" aria-hidden="true" />
       <Openai v-else-if="view.provider === 'openai'" class="text-z-text" :width="20" :height="20" aria-hidden="true" />
     </template>
 

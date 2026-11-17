@@ -49,6 +49,7 @@ async fn select(
 
 fn signal(in_flight: u32) -> AccountRuntimeSignals {
     AccountRuntimeSignals {
+        quota_reset_windows: None,
         in_flight,
         last_started_at: None,
         quota_reset_at: None,

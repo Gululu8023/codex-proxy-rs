@@ -9,8 +9,8 @@ use futures::future::BoxFuture;
 use gateway_core::engine::CommitRequirement;
 use gateway_core::engine::execution::{ExecutionSession, StartedExecution};
 use gateway_core::engine::middleware::{
-    MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareHeader,
-    MiddlewareResponse,
+    MiddlewareBody, MiddlewareError, MiddlewareFrame, MiddlewareFraming, MiddlewareResponse,
+    RequestHeader,
 };
 use gateway_core::engine::response_control::{ResponseControl, ResponseControlUnavailable};
 use gateway_core::error::{GatewayError, GatewayErrorKind};
@@ -19,7 +19,6 @@ use gateway_core::operation::ProviderSessionState;
 
 use crate::openai::error::{gateway_error_contract, gateway_error_from_engine};
 use crate::openai::middleware::{PendingExecution, pending_execution_response};
-use crate::openai::responses::validation::{ResponseValidationFacts, ResponsesDeliveryValidator};
 
 use super::{
     super::{DecodedResponsesRequest, OpenAiResponsesEncoder, ProtocolErrorBody},
@@ -58,7 +57,7 @@ impl ConnectionReplaySnapshot {
         }
     }
 
-    fn commit(&mut self, capture: &ReplayCaptureHandle, delivered: Option<&str>) -> ForwardOutcome {
+    fn commit(&mut self, capture: &ReplayCaptureHandle, delivered: bool) -> ForwardOutcome {
         let mut capture = capture
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -66,7 +65,8 @@ impl ConnectionReplaySnapshot {
             return ForwardOutcome::Continue;
         };
         self.provider_state = capture.provider_state.take();
-        let reconnect = delivered == Some(&id)
+        // 原生编码后的响应不再改写；只有终态实际写入才允许为下一轮重连。
+        let reconnect = delivered
             && self
                 .provider_state
                 .as_ref()
@@ -95,7 +95,6 @@ pub(super) fn new_replay_capture() -> ReplayCaptureHandle {
 pub(super) async fn execution_response(
     started: StartedExecution,
     capture: ReplayCaptureHandle,
-    validation: ResponseValidationFacts,
 ) -> Result<MiddlewareResponse, MiddlewareError> {
     if !started.stream {
         return Err(MiddlewareError::InvalidState);
@@ -105,7 +104,6 @@ pub(super) async fn execution_response(
         started.session,
         Arc::clone(&request_id),
         Arc::clone(&capture),
-        validation,
     );
     if let Err(error) = body.prime().await {
         let headers = body.response_headers().to_vec();
@@ -114,9 +112,9 @@ pub(super) async fn execution_response(
         if let MiddlewareError::Engine(error) = error {
             let response_headers = headers
                 .iter()
-                .map(|header| MiddlewareHeader::new(header.name(), header.value().clone()))
+                .map(|header| RequestHeader::new(header.name(), header.value().clone()))
                 .collect();
-            // 失败也要保留会话到洋葱链返回，否则释放会话会取消仍在等待 next 的插件
+            // 失败也保留会话到交付路径结束，避免提前取消执行
             return Ok(pending_execution_response(
                 "openai".to_owned(),
                 status,
@@ -139,7 +137,7 @@ pub(super) async fn execution_response(
     let headers = body
         .response_headers()
         .iter()
-        .map(|header| MiddlewareHeader::new(header.name(), header.value().clone()))
+        .map(|header| RequestHeader::new(header.name(), header.value().clone()))
         .collect();
     Ok(MiddlewareResponse::new(
         "openai".to_owned(),
@@ -155,10 +153,9 @@ pub(super) async fn forward_response(
     request_id: Arc<str>,
     replay: &mut ConnectionReplaySnapshot,
     capture: ReplayCaptureHandle,
-    validation: ResponseValidationFacts,
     response_control: &ResponseControl,
 ) -> ForwardOutcome {
-    let (protocol, status, headers, mut body, _) = response.into_parts();
+    let (protocol, status, headers, mut body) = response.into_parts();
     if protocol != "openai" || StatusCode::from_u16(status).is_err() {
         return fail_body(connection, body, MiddlewareError::InvalidState, &request_id).await;
     }
@@ -197,13 +194,6 @@ pub(super) async fn forward_response(
     if let Err(error) = validate_frame(&first) {
         return fail_body(connection, body, error, &request_id).await;
     }
-    let mut delivery_validator = ResponsesDeliveryValidator::default();
-    if delivery_validator
-        .validate_websocket_frame(first.bytes(), first.transformed(), &validation)
-        .is_err()
-    {
-        return fail_body(connection, body, MiddlewareError::InvalidState, &request_id).await;
-    }
     if let Err(error) = body.commit_downstream(None).await {
         return fail_body(connection, body, error, &request_id).await;
     }
@@ -221,7 +211,6 @@ pub(super) async fn forward_response(
     let mut first_frame_written = false;
     let mut current = Some(first);
     let mut terminal_write = None;
-    let mut first_protocol_validated = true;
     loop {
         let frame = match current.take() {
             Some(frame) => frame,
@@ -241,18 +230,7 @@ pub(super) async fn forward_response(
                     BodyInput::Frame(Ok(None))
                         if terminal_write.is_some() && body.is_finalized() =>
                     {
-                        if delivery_validator.finish_websocket_delivery().is_err() {
-                            return fail_body(
-                                connection,
-                                body,
-                                MiddlewareError::InvalidState,
-                                &request_id,
-                            )
-                            .await;
-                        }
-                        let delivered = delivery_validator
-                            .completed_response_id()
-                            .filter(|_| terminal_write == Some(WriteOutcome::Written));
+                        let delivered = terminal_write == Some(WriteOutcome::Written);
                         let outcome = replay.commit(&capture, delivered);
                         body.close().await;
                         return if reconnect_after_terminal {
@@ -281,14 +259,6 @@ pub(super) async fn forward_response(
             }
         };
         if terminal_write.is_some() || validate_frame(&frame).is_err() {
-            return fail_body(connection, body, MiddlewareError::InvalidState, &request_id).await;
-        }
-        if first_protocol_validated {
-            first_protocol_validated = false;
-        } else if delivery_validator
-            .validate_websocket_frame(frame.bytes(), frame.transformed(), &validation)
-            .is_err()
-        {
             return fail_body(connection, body, MiddlewareError::InvalidState, &request_id).await;
         }
         let terminal = frame.terminal();
@@ -422,18 +392,14 @@ fn middleware_gateway_error(error: MiddlewareError) -> GatewayError {
         MiddlewareError::Gateway(error) => error,
         MiddlewareError::Engine(error) => gateway_error_from_engine(&error),
         MiddlewareError::Provider(error) => GatewayError::from_provider(&error),
-        MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
-            GatewayError::new(
-                GatewayErrorKind::PolicyDenied,
-                "Request middleware rejected the request.",
-            )
-        }
-        MiddlewareError::Fault | MiddlewareError::Remote { .. } | MiddlewareError::InvalidState => {
-            GatewayError::new(
-                GatewayErrorKind::Internal,
-                "Request middleware returned an invalid response.",
-            )
-        }
+        MiddlewareError::Rejected => GatewayError::new(
+            GatewayErrorKind::PolicyDenied,
+            "Request middleware rejected the request.",
+        ),
+        MiddlewareError::Fault | MiddlewareError::InvalidState => GatewayError::new(
+            GatewayErrorKind::Internal,
+            "Request middleware returned an invalid response.",
+        ),
     }
 }
 
@@ -450,10 +416,8 @@ fn middleware_error_status(error: &MiddlewareError) -> u16 {
                 .0
                 .as_u16()
         }
-        MiddlewareError::Rejected | MiddlewareError::Remote { rejected: true, .. } => {
-            StatusCode::FORBIDDEN.as_u16()
-        }
-        MiddlewareError::Fault | MiddlewareError::Remote { .. } | MiddlewareError::InvalidState => {
+        MiddlewareError::Rejected => StatusCode::FORBIDDEN.as_u16(),
+        MiddlewareError::Fault | MiddlewareError::InvalidState => {
             StatusCode::INTERNAL_SERVER_ERROR.as_u16()
         }
     }
@@ -470,13 +434,11 @@ pub(super) async fn send_middleware_error(
 struct WebSocketExecutionBody {
     execution: PendingExecution,
     encoder: OpenAiResponsesEncoder,
-    validation: ResponseValidationFacts,
     pending: VecDeque<MiddlewareFrame>,
     provider_state: Option<ProviderSessionState>,
     request_id: Arc<str>,
     capture: ReplayCaptureHandle,
     batch_pending: bool,
-    transformed_pending: bool,
     awaiting_terminal_eof: bool,
     committed: bool,
     finished: bool,
@@ -487,18 +449,15 @@ impl WebSocketExecutionBody {
         session: Box<dyn ExecutionSession>,
         request_id: Arc<str>,
         capture: ReplayCaptureHandle,
-        validation: ResponseValidationFacts,
     ) -> Self {
         Self {
             execution: PendingExecution::new(session),
             encoder: OpenAiResponsesEncoder::new(),
-            validation,
             pending: VecDeque::new(),
             provider_state: None,
             request_id,
             capture,
             batch_pending: false,
-            transformed_pending: false,
             awaiting_terminal_eof: false,
             committed: false,
             finished: false,
@@ -588,14 +547,11 @@ impl WebSocketExecutionBody {
             }
             let mut messages = Vec::new();
             for mut event in delivery.into_provider_events() {
-                self.validation.observe_event(&event);
-                let transformed = self.transformed_pending || event.middleware_transformed();
                 if let Some(update) = event.take_session_update() {
                     self.provider_state = Some(update);
                 }
                 let encoded = self.encoder.push_websocket(&event);
                 if encoded.is_empty() {
-                    self.transformed_pending = transformed;
                     continue;
                 }
                 let framing = if event.wire_event().is_some_and(|wire| {
@@ -605,19 +561,13 @@ impl WebSocketExecutionBody {
                 } else {
                     MiddlewareFraming::JsonDocument
                 };
-                messages.extend(
-                    encoded
-                        .into_iter()
-                        .map(|message| (message, transformed, framing)),
-                );
-                self.transformed_pending = false;
+                messages.extend(encoded.into_iter().map(|message| (message, framing)));
             }
             let terminal = self.encoder.is_completed() || self.encoder.has_wire_failure();
             let last = messages.len().saturating_sub(1);
             self.pending.extend(messages.into_iter().enumerate().map(
-                |(index, (message, transformed, framing))| {
+                |(index, (message, framing))| {
                     MiddlewareFrame::new(Bytes::from(message), framing, terminal && index == last)
-                        .with_transformed(transformed)
                 },
             ));
             self.awaiting_terminal_eof = terminal;

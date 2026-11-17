@@ -43,27 +43,11 @@ fn attempt(
     accounts: AccountAttemptContext,
     affinity: AccountAffinity,
     index: u32,
-    middleware: Option<Arc<dyn MiddlewarePlan>>,
 ) -> AttemptContext {
-    let middleware = middleware.map(|plan| {
-        FrozenMiddlewarePlan::new(
-            plan,
-            ExtensionSetReference::new(
-                ExtensionSetId::new("search-access".to_owned()).unwrap(),
-                Arc::new(TestExtensionLease),
-            ),
-        )
-    });
     AttemptContext::new(
         RequestAttemptContext::new(
             ModelRequestId::new("req_search_access").unwrap(),
             ClientApiKeyId::new("key_openai_contract").unwrap(),
-        )
-        .with_middleware(
-            middleware,
-            Arc::from([]),
-            "/v1/alpha/search".to_owned(),
-            ClientTransport::HttpJson,
         ),
         NonZeroU32::new(index).unwrap(),
         SystemTime::now() + Duration::from_secs(30),
@@ -122,7 +106,6 @@ async fn search_filters_oauth_and_api_key_accounts_before_weight_and_preserves_w
                             .with_account_scope(scope),
                         AccountAffinity::Strict,
                         1,
-                        None,
                     ),
                 )
                 .await
@@ -185,7 +168,6 @@ async fn search_does_not_use_forbidden_accounts_when_pinned_or_after_failover() 
                                 )),
                             AccountAffinity::Strict,
                             index,
-                            None,
                         ),
                     )
                     .await
@@ -246,7 +228,6 @@ async fn unresolved_search_models_only_use_unrestricted_accounts_and_preserve_wi
                                 .with_account_scope(scope),
                             AccountAffinity::Strict,
                             1,
-                            None,
                         ),
                     )
                     .await;
@@ -318,7 +299,6 @@ async fn search_model_policy_overrides_existing_session_affinity() {
                             .with_account_scope(scope),
                         affinity,
                         1,
-                        None,
                     ),
                 )
                 .await
@@ -328,44 +308,4 @@ async fn search_model_policy_overrides_existing_session_affinity() {
         }
         assert!(server.received_requests().await.unwrap().is_empty());
     }
-}
-
-#[tokio::test]
-async fn search_model_selection_does_not_restrict_plugin_body_rewrites() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/codex/alpha/search"))
-        .respond_with(ResponseTemplate::new(200).set_body_json(json!({"output":"result"})))
-        .expect(1)
-        .mount(&server)
-        .await;
-    let store = Arc::new(MemoryAccountStore::default());
-    create_account(&store, FIRST).await;
-    let middleware = Arc::new(RecordingMiddleware {
-        observed: Arc::default(),
-        replacement: ("model".to_owned(), json!("plugin-model")),
-        request_headers: Vec::new(),
-    });
-    let mut stream = provider_with_base_url(&store, server.uri())
-        .execute(
-            search(BODY),
-            attempt(
-                AccountAttemptContext::new(BTreeSet::new(), None, None).with_account_scope(scope(
-                    policy(AccountModelAccessMode::Allowlist, MODEL),
-                    AccountModelAccess::all(),
-                )),
-                AccountAffinity::Strict,
-                1,
-                Some(middleware),
-            ),
-        )
-        .await
-        .unwrap();
-    while let Some(event) = stream.next().await {
-        event.unwrap();
-    }
-    assert_eq!(
-        captured_request_body(&server.received_requests().await.unwrap()[0])["model"],
-        "plugin-model"
-    );
 }

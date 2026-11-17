@@ -43,6 +43,43 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('@/views/proxies/index.vue'),
       },
       {
+        path: 'prompt-guard',
+        component: () => import('@/views/prompt-guard/index.vue'),
+        children: [
+          {
+            path: '',
+            name: 'prompt-guard',
+            component: () => import('@/views/prompt-guard/Overview.vue'),
+          },
+          {
+            path: 'records',
+            name: 'prompt-guard-records',
+            component: () => import('@/views/prompt-guard/Records.vue'),
+          },
+          {
+            path: 'policy',
+            name: 'prompt-guard-policy',
+            component: () => import('@/views/prompt-guard/Policy.vue'),
+            props: { rulesOnly: true },
+          },
+          {
+            path: 'profiles',
+            name: 'prompt-guard-profiles',
+            component: () => import('@/views/prompt-guard/Profiles.vue'),
+          },
+          {
+            path: 'learning',
+            name: 'prompt-guard-learning',
+            component: () => import('@/views/prompt-guard/Learning.vue'),
+          },
+          {
+            path: 'help',
+            name: 'prompt-guard-help',
+            component: () => import('@/views/prompt-guard/Help.vue'),
+          },
+        ],
+      },
+      {
         path: 'groups',
         name: 'groups',
         component: () => import('@/views/groups/index.vue'),
@@ -56,22 +93,6 @@ export const routes: RouteRecordRaw[] = [
         path: 'usage',
         name: 'usage',
         component: () => import('@/views/usage/index.vue'),
-      },
-      {
-        path: 'plugins',
-        component: () => import('@/views/plugins/index.vue'),
-        children: [
-          {
-            path: '',
-            name: 'plugins',
-            component: () => import('@/views/plugins/components/PluginManagement.vue'),
-          },
-          {
-            path: ':instanceId/:pageId',
-            name: 'plugin-page',
-            component: () => import('@/views/plugins/components/PluginPage.vue'),
-          },
-        ],
       },
       {
         path: 'theme',

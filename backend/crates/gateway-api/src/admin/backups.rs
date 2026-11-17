@@ -14,8 +14,8 @@ use axum::{
 };
 use chrono::{DateTime, Utc};
 use gateway_admin::model::backup::{
-    BackupRecord, BackupSettings, BackupStatus, BackupTriggerKind, ConnectionTestResult,
-    UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
+    BackupArtifact, BackupRecord, BackupSettings, BackupStatus, BackupTriggerKind,
+    ConnectionTestResult, UpdateBackupScheduleCommand, UpdateBackupStorageCommand,
 };
 use secrecy::{ExposeSecret as _, SecretString};
 use serde::{Deserialize, Serialize};
@@ -121,6 +121,8 @@ pub struct BackupRecordView {
     pub object_key: String,
     pub size_bytes: Option<u64>,
     pub sha256: Option<String>,
+    /// Claude 隐私存储归档；映射卷从未初始化时为空
+    pub privacy_store: Option<BackupObjectView>,
     pub attempt_count: u32,
     pub error_code: Option<String>,
     pub error_message: Option<String>,
@@ -134,6 +136,15 @@ pub struct BackupRecordView {
     pub created_at_display: String,
     pub updated_at: DateTime<Utc>,
     pub updated_at_display: String,
+}
+
+/// 附属归档 wire 视图
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct BackupObjectView {
+    pub object_key: String,
+    pub size_bytes: u64,
+    pub sha256: String,
 }
 
 impl From<(BackupRecord, crate::time::TimePresenter)> for BackupRecordView {
@@ -150,6 +161,11 @@ impl From<(BackupRecord, crate::time::TimePresenter)> for BackupRecordView {
             object_key: record.object_key,
             size_bytes: record.size_bytes,
             sha256: record.sha256,
+            privacy_store: record.privacy_store.map(|object| BackupObjectView {
+                object_key: object.object_key,
+                size_bytes: object.size_bytes,
+                sha256: object.sha256,
+            }),
             attempt_count: record.attempt_count,
             error_code: record.error_code,
             error_message: record.error_message,
@@ -180,11 +196,20 @@ pub struct BackupRecordsQuery {
     pub trigger: Option<String>,
 }
 
-/// 下载地址请求
+/// 备份 ID 请求
 #[derive(Debug, Clone, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct BackupIdRequest {
     pub backup_id: String,
+}
+
+/// 下载地址请求；`artifact` 缺省为数据库归档
+#[derive(Debug, Clone, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct DownloadBackupRequest {
+    pub backup_id: String,
+    #[serde(default)]
+    pub artifact: Option<String>,
 }
 
 /// 下载地址响应
@@ -451,15 +476,24 @@ pub struct CreateBackupRequest {
 async fn download_backup_url<S>(
     auth: AdminAuth,
     State(state): State<S>,
-    AdminJson(request): AdminJson<BackupIdRequest>,
+    AdminJson(request): AdminJson<DownloadBackupRequest>,
 ) -> Result<impl IntoResponse, AdminError>
 where
     S: SessionState + Send + Sync,
 {
+    let artifact = match request.artifact.as_deref() {
+        None => BackupArtifact::Database,
+        Some(value) => BackupArtifact::parse(value)
+            .ok_or_else(|| AdminError::bad_request("artifact 只能是 database 或 privacyStore"))?,
+    };
     let result = state
         .admin_services()
         .backups()
-        .download_url(&auth.context().mutation_context(), &request.backup_id)
+        .download_url(
+            &auth.context().mutation_context(),
+            &request.backup_id,
+            artifact,
+        )
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(

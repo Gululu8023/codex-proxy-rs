@@ -19,7 +19,7 @@ fn response_create_should_preserve_field_order_when_removing_frame_type() {
         let decoded = decode_response_create(payload).expect("decode response.create");
         let body = decoded
             .operation()
-            .middleware_body()
+            .wire_body()
             .expect("encode transparent body");
         assert_eq!(
             std::str::from_utf8(&body).expect("UTF-8 JSON body"),

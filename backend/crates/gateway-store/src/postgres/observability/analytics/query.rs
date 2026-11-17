@@ -114,7 +114,7 @@ impl<'a> AnalyticsSnapshot<'a> {
             .map_err(|error| postgres_unavailable("complete analytics query snapshot", error))
     }
 
-    pub async fn totals(&mut self) -> StoreResult<DashboardTotals> {
+    pub async fn totals(&mut self, filter: &UsageRecordFilter) -> StoreResult<DashboardTotals> {
         self.require_visible(None)?;
         let bounds=sqlx::query("select least((select started_at from request_analytics_facts order by started_at,id limit 1),(select bucket_start from request_analytics_1h where collection='usage_contribution' order by bucket_start limit 1)) as first_started_at,greatest((select started_at from request_analytics_facts order by started_at desc,id desc limit 1),(select bucket_start from request_analytics_1h where collection='usage_contribution' order by bucket_start desc limit 1)) as last_started_at")
             .fetch_one(&mut *self.tx).await.map_err(|error|postgres_unavailable("read retained analytics bounds",error))?;
@@ -129,14 +129,7 @@ impl<'a> AnalyticsSnapshot<'a> {
                 .ok_or_else(|| invalid("analytics time boundary overflow"))?,
         };
         let states = self
-            .load(
-                range,
-                &UsageRecordFilter::default(),
-                None,
-                None,
-                Default::default(),
-                false,
-            )
+            .load(range, filter, None, None, Default::default(), false)
             .await?;
         let state = merge_states(states.into_values())?;
         Ok(DashboardTotals {
@@ -155,12 +148,13 @@ impl<'a> AnalyticsSnapshot<'a> {
     pub async fn dashboard_card_metrics(
         &mut self,
         range: ObservabilityRange,
+        filter: &UsageRecordFilter,
     ) -> StoreResult<RequestMetrics> {
         // 日对比只读取卡片计数，复用整桶汇总及脏桶回读，不加载费用和延迟分布
         let states = self
             .load_selected(
                 range,
-                &UsageRecordFilter::default(),
+                filter,
                 None,
                 None,
                 Default::default(),
@@ -1232,10 +1226,8 @@ pub(super) fn collection_for(
         || filter.attempt_index.is_some()
         || filter.response_id.is_some()
         || filter.upstream_request_id.is_some()
-        || filter.search.is_some()
         || filter.model_contains.is_some()
-        || filter.client_api_key_name.is_some()
-        || filter.provider_account_name.is_some()
+        || filter.needs_observation_text()
     {
         return None;
     }
@@ -1286,21 +1278,15 @@ pub(crate) fn push_analytics_filter(
     alias: &str,
 ) {
     let mut typed = filter.clone();
-    typed.search = None;
-    typed.client_api_key_name = None;
-    typed.provider_account_name = None;
+    let text = UsageRecordFilter {
+        client_api_key_name: typed.client_api_key_name.take(),
+        provider_account_search: typed.provider_account_search.take(),
+        search: typed.search.take(),
+        ..Default::default()
+    };
     push_usage_filter(query, &typed, alias);
-    if filter.search.is_some()
-        || filter.client_api_key_name.is_some()
-        || filter.provider_account_name.is_some()
-    {
+    if text.needs_observation_text() {
         query.push(format!(" and exists(select 1 from model_request_observations searched where searched.id={alias}.id"));
-        let text = UsageRecordFilter {
-            client_api_key_name: filter.client_api_key_name.clone(),
-            provider_account_name: filter.provider_account_name.clone(),
-            search: filter.search.clone(),
-            ..Default::default()
-        };
         push_usage_filter(query, &text, "searched");
         query.push(")");
     }

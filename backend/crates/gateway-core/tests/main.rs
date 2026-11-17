@@ -10,7 +10,6 @@ mod health;
 mod lifecycle;
 mod live;
 mod metering;
-mod middleware;
 mod operation;
 mod policy;
 mod provider_ports;

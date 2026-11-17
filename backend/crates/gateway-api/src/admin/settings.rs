@@ -36,9 +36,14 @@ pub type ProviderRequestProfileUpdates =
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeSettingsFields {
+    #[serde(default)]
+    pub prompt_guard: super::prompt_guard::PromptGuardWire,
+    #[serde(default)]
+    pub claude_public_url: String,
     pub codex_privacy_policy: gateway_core::settings::privacy::CodexPrivacyPolicy,
     pub request_location_enabled: bool,
     pub request_location: gateway_core::account::RequestLocation,
+    pub anthropic_model_mappings: BTreeMap<String, String>,
     pub refresh_margin_seconds: u64,
     pub refresh_concurrency: u64,
     pub max_concurrent_per_account: u64,
@@ -50,19 +55,24 @@ pub struct RuntimeSettingsFields {
     pub max_retry_after_seconds: u32,
     pub openai_guardian_reserved_concurrency: u32,
     pub openai_account_affinity: gateway_core::account::AccountAffinity,
+    pub anthropic_account_affinity: gateway_core::account::AccountAffinity,
     pub max_account_rotations: u32,
     pub openai_session_affinity_ttl_hours: u32,
+    pub anthropic_session_affinity_ttl_hours: u32,
     pub responses_max_decompressed_body_bytes: u64,
     pub smart_scheduling: gateway_core::account::SmartSchedulingConfig,
+    pub quota_reset_window_weights: gateway_core::account::ResetWindowWeights,
     pub min_codex_desktop_version: Option<String>,
     pub min_codex_cli_version: Option<String>,
+    pub min_claude_code_version: Option<String>,
     pub usage_retention_days: u64,
     pub ops_event_retention_days: u64,
     pub audit_retention_days: u64,
-    pub account_error_protection: gateway_core::account::AccountErrorProtection,
     pub account_warmup_enabled: bool,
     pub account_warmup_cron: String,
     pub account_warmup_model: Option<String>,
+    #[serde(default)]
+    pub reset_credit_on_low_weekly_quota: bool,
     pub reset_credit_lead_minutes: u32,
     pub reset_credit_max_weekly_remaining_percent: Option<u32>,
 }
@@ -75,11 +85,10 @@ pub struct RuntimeSettingsView {
     pub values: RuntimeSettingsFields,
     pub config_revision: u64,
     pub smart_scheduling_defaults: gateway_core::account::SmartSchedulingConfig,
+    pub quota_reset_window_weights_defaults: gateway_core::account::ResetWindowWeights,
     pub provider_request_profiles: ProviderRequestProfiles,
     /// 固定兼容字段；值始终从 provider_request_profiles 派生
     pub openai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
-    /// 固定兼容字段；值始终从 provider_request_profiles 派生
-    pub xai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
     pub model_mappings: ModelMappings,
     pub rotation_strategy: String,
     pub updated_at: DateTime<Utc>,
@@ -98,9 +107,6 @@ pub struct UpdateRuntimeSettingsRequest {
     /// 兼容既有 wire；与泛化字段冲突时拒绝整个请求
     #[serde(default, deserialize_with = "deserialize_profile_update")]
     pub openai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
-    /// 兼容既有 wire；与泛化字段冲突时拒绝整个请求
-    #[serde(default, deserialize_with = "deserialize_profile_update")]
-    pub xai_client_profile: Option<serde_json::Map<String, serde_json::Value>>,
     pub model_mappings: ModelMappings,
     pub rotation_strategy: String,
 }
@@ -120,7 +126,6 @@ impl UpdateRuntimeSettingsRequest {
         let request_profile_updates = normalize_request_profile_updates(
             self.provider_request_profiles,
             self.openai_client_profile,
-            self.xai_client_profile,
         )?;
         Ok(ReplaceRuntimeSettings {
             expected_revision: gateway_admin::model::Revision::new(self.config_revision)
@@ -144,10 +149,11 @@ impl From<(RuntimeSettings, crate::time::TimePresenter)> for RuntimeSettingsView
         Self {
             config_revision: settings.config_revision.get(),
             openai_client_profile: provider_request_profiles.get("openai").cloned(),
-            xai_client_profile: provider_request_profiles.get("xai").cloned(),
             provider_request_profiles,
             model_mappings: wire_model_mappings(settings.model_mappings),
             smart_scheduling_defaults: gateway_core::account::SmartSchedulingConfig::default(),
+            quota_reset_window_weights_defaults: gateway_core::account::ResetWindowWeights::default(
+            ),
             rotation_strategy: settings.rotation_strategy.as_str().to_owned(),
             updated_at_display: time.datetime(&settings.updated_at),
             updated_at: settings.updated_at,
@@ -478,7 +484,16 @@ where
     S: SessionState + Send + Sync,
 {
     let time = crate::time::TimePresenter::new(state.admin_services().timezone());
-    let command = request.into_command().map_err(map_wire_error)?;
+    let mut command = request.into_command().map_err(map_wire_error)?;
+    let current = state
+        .admin_services()
+        .settings()
+        .load()
+        .await
+        .map_err(map_service_error)?;
+    // 迁出的领域只由专项命令更新，通用页面不能用旧快照覆盖它们；replace 仍校验原 revision。
+    command.values.prompt_guard = current.values.prompt_guard;
+    command.values.claude_public_url = current.values.claude_public_url;
     let result = state
         .admin_services()
         .settings()
@@ -605,14 +620,10 @@ fn map_service_error(error: gateway_admin::model::AdminError) -> AdminError {
 fn normalize_request_profile_updates(
     profiles: ProviderRequestProfileUpdates,
     openai: Option<serde_json::Map<String, serde_json::Value>>,
-    xai: Option<serde_json::Map<String, serde_json::Value>>,
 ) -> Result<gateway_admin::model::settings::ProviderRequestProfileUpdates, WireValidationError> {
     let mut normalized = profiles
         .into_iter()
         .map(|(provider, profile)| {
-            if !matches!(provider.as_str(), "openai" | "xai") {
-                return Err(WireValidationError::new("providerRequestProfiles"));
-            }
             let provider = gateway_core::routing::ProviderKind::new(provider)
                 .map_err(|_| WireValidationError::new("providerRequestProfiles"))?;
             Ok((
@@ -621,7 +632,7 @@ fn normalize_request_profile_updates(
             ))
         })
         .collect::<Result<gateway_admin::model::settings::ProviderRequestProfileUpdates, _>>()?;
-    for (provider, profile) in [("openai", openai), ("xai", xai)] {
+    for (provider, profile) in [("openai", openai)] {
         let Some(profile) = profile else {
             continue;
         };
@@ -656,7 +667,7 @@ where
     let result = state
         .admin_services()
         .proxies()
-        .probe(None, true)
+        .probe(gateway_admin::ports::proxy::ProbeRoute::Direct, true)
         .await
         .map_err(map_service_error)?;
     Ok(AdminResponse::new(
@@ -740,8 +751,11 @@ impl RuntimeSettingsFields {
         self,
     ) -> Result<gateway_admin::model::settings::RuntimeSettingsValues, WireValidationError> {
         let values = gateway_admin::model::settings::RuntimeSettingsValues {
+            prompt_guard: self.prompt_guard.0,
+            claude_public_url: self.claude_public_url,
             codex_privacy_policy: self.codex_privacy_policy,
             request_location_enabled: self.request_location_enabled,
+            anthropic_model_mappings: self.anthropic_model_mappings,
             request_location: self
                 .request_location
                 .normalized()
@@ -759,22 +773,26 @@ impl RuntimeSettingsFields {
             max_retry_after_seconds: self.max_retry_after_seconds,
             openai_guardian_reserved_concurrency: self.openai_guardian_reserved_concurrency,
             openai_account_affinity: self.openai_account_affinity,
+            anthropic_account_affinity: self.anthropic_account_affinity,
             max_account_rotations: self.max_account_rotations,
             openai_session_affinity_ttl_hours: self.openai_session_affinity_ttl_hours,
+            anthropic_session_affinity_ttl_hours: self.anthropic_session_affinity_ttl_hours,
             responses_max_decompressed_body_bytes: self.responses_max_decompressed_body_bytes,
             smart_scheduling: self.smart_scheduling,
+            quota_reset_window_weights: self.quota_reset_window_weights,
             min_codex_desktop_version: self.min_codex_desktop_version,
             min_codex_cli_version: self.min_codex_cli_version,
+            min_claude_code_version: self.min_claude_code_version,
             usage_retention_days: u32::try_from(self.usage_retention_days)
                 .map_err(|_| WireValidationError::new("settingsUsageRetentionOverflow"))?,
             ops_event_retention_days: u32::try_from(self.ops_event_retention_days)
                 .map_err(|_| WireValidationError::new("settingsOpsRetentionOverflow"))?,
             audit_retention_days: u32::try_from(self.audit_retention_days)
                 .map_err(|_| WireValidationError::new("settingsAuditRetentionOverflow"))?,
-            account_error_protection: self.account_error_protection,
             account_warmup_enabled: self.account_warmup_enabled,
             account_warmup_cron: self.account_warmup_cron,
             account_warmup_model: self.account_warmup_model,
+            reset_credit_on_low_weekly_quota: self.reset_credit_on_low_weekly_quota,
             reset_credit_lead_minutes: self.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: self
                 .reset_credit_max_weekly_remaining_percent,
@@ -787,9 +805,12 @@ impl RuntimeSettingsFields {
 impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSettingsFields {
     fn from(settings: gateway_admin::model::settings::RuntimeSettingsValues) -> Self {
         crate::admin::settings::RuntimeSettingsFields {
+            prompt_guard: super::prompt_guard::PromptGuardWire(settings.prompt_guard),
+            claude_public_url: settings.claude_public_url,
             codex_privacy_policy: settings.codex_privacy_policy,
             request_location_enabled: settings.request_location_enabled,
             request_location: settings.request_location,
+            anthropic_model_mappings: settings.anthropic_model_mappings,
             refresh_margin_seconds: settings.refresh_margin_seconds,
             refresh_concurrency: u64::from(settings.refresh_concurrency),
             max_concurrent_per_account: u64::from(settings.max_concurrent_per_account),
@@ -801,19 +822,23 @@ impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSett
             max_retry_after_seconds: settings.max_retry_after_seconds,
             openai_guardian_reserved_concurrency: settings.openai_guardian_reserved_concurrency,
             openai_account_affinity: settings.openai_account_affinity,
+            anthropic_account_affinity: settings.anthropic_account_affinity,
             max_account_rotations: settings.max_account_rotations,
             openai_session_affinity_ttl_hours: settings.openai_session_affinity_ttl_hours,
+            anthropic_session_affinity_ttl_hours: settings.anthropic_session_affinity_ttl_hours,
             responses_max_decompressed_body_bytes: settings.responses_max_decompressed_body_bytes,
             smart_scheduling: settings.smart_scheduling,
+            quota_reset_window_weights: settings.quota_reset_window_weights,
             min_codex_desktop_version: settings.min_codex_desktop_version,
             min_codex_cli_version: settings.min_codex_cli_version,
+            min_claude_code_version: settings.min_claude_code_version,
             usage_retention_days: u64::from(settings.usage_retention_days),
             ops_event_retention_days: u64::from(settings.ops_event_retention_days),
             audit_retention_days: u64::from(settings.audit_retention_days),
-            account_error_protection: settings.account_error_protection,
             account_warmup_enabled: settings.account_warmup_enabled,
             account_warmup_cron: settings.account_warmup_cron,
             account_warmup_model: settings.account_warmup_model,
+            reset_credit_on_low_weekly_quota: settings.reset_credit_on_low_weekly_quota,
             reset_credit_lead_minutes: settings.reset_credit_lead_minutes,
             reset_credit_max_weekly_remaining_percent: settings
                 .reset_credit_max_weekly_remaining_percent,
@@ -823,7 +848,6 @@ impl From<gateway_admin::model::settings::RuntimeSettingsValues> for RuntimeSett
 
 fn settings_validation_error(field: &'static str) -> WireValidationError {
     WireValidationError::new(match field {
-        "account_error_protection" => "accountErrorProtection",
         "account_warmup_enabled" => "accountWarmupEnabled",
         "account_warmup_model" => "accountWarmupModel",
         "reset_credit_lead_minutes" => "resetCreditLeadMinutes",
@@ -837,8 +861,11 @@ fn settings_validation_error(field: &'static str) -> WireValidationError {
         "max_waiting_per_account" => "maxWaitingPerAccount",
         "max_waiting_per_key" => "maxWaitingPerKey",
         "min_codex_cli_version" => "minCodexCliVersion",
+        "min_claude_code_version" => "minClaudeCodeVersion",
         "min_codex_desktop_version" => "minCodexDesktopVersion",
         "openai_account_affinity" => "openaiAccountAffinity",
+        "anthropic_account_affinity" => "anthropicAccountAffinity",
+        "anthropic_session_affinity_ttl_hours" => "anthropicSessionAffinityTtlHours",
         "openai_guardian_reserved_concurrency" => "openaiGuardianReservedConcurrency",
         "openai_session_affinity_ttl_hours" => "openaiSessionAffinityTtlHours",
         "ops_event_retention_days" => "opsEventRetentionDays",

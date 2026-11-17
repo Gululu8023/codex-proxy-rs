@@ -6,7 +6,6 @@ mod auth;
 mod diagnostics;
 mod health;
 mod key_usage;
-mod middleware;
 mod openai;
 mod provider;
 mod support;
@@ -68,7 +67,7 @@ async fn api_should_serve_resolved_assets_with_relative_environment_override() {
     for (uri, expected_body) in [
         ("/favicon.svg", "<svg/>"),
         ("/assets/missing.svg", "resolved-web-assets"),
-        ("/plugins/one/main", "resolved-web-assets"),
+        ("/accounts/one/main", "resolved-web-assets"),
     ] {
         let response = router
             .clone()
