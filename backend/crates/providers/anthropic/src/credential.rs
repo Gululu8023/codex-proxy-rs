@@ -142,18 +142,26 @@ impl Profile {
                 .as_str()
                 .or_else(|| value["account"]["email_address"].as_str())
                 .map(str::to_owned),
-            plan: if value["account"]["has_claude_max"].as_bool() == Some(true) {
-                Some("max".into())
-            } else if value["account"]["has_claude_pro"].as_bool() == Some(true) {
-                Some("pro".into())
-            } else {
-                None
+            // 与官方客户端一致，优先读取当前组织的套餐；旧布尔字段仅作兼容，不把缺失推断为免费套餐。
+            plan: match value["organization"]["organization_type"].as_str() {
+                Some("claude_max") => Some("max".into()),
+                Some("claude_pro") => Some("pro".into()),
+                Some("claude_team") => Some("team".into()),
+                Some("claude_enterprise") => Some("enterprise".into()),
+                _ if value["account"]["has_claude_max"].as_bool() == Some(true) => {
+                    Some("max".into())
+                }
+                _ if value["account"]["has_claude_pro"].as_bool() == Some(true) => {
+                    Some("pro".into())
+                }
+                _ => None,
             },
         })
     }
     pub fn id(&self) -> ProviderAccountId {
         let digest = Sha256::digest(format!("{}\0{}", self.user, self.organization).as_bytes());
-        ProviderAccountId::new(format!("anthropic_{}", hex::encode(digest)))
+        // 账号 ID 必须带核心要求的 acct_ 前缀；保留用户与组织的确定性映射。
+        ProviderAccountId::new(format!("acct_anthropic_{}", hex::encode(digest)))
             .expect("valid account id")
     }
 }
@@ -204,6 +212,7 @@ pub(crate) struct Credentials {
     pub veil: std::sync::Arc<gateway_veil::Runtime>,
     pub transport: crate::transport::Transport,
     pub profiles: std::sync::Arc<crate::profile::Profiles>,
+    pub catalog_changed: tokio::sync::Notify,
 }
 
 impl Credentials {
@@ -213,6 +222,7 @@ impl Credentials {
             ports,
             transport: crate::transport::Transport::new(veil.clone()),
             veil,
+            catalog_changed: tokio::sync::Notify::new(),
         }
     }
 
@@ -567,6 +577,8 @@ impl Credentials {
             CredentialCasOutcome::Updated(_) => {}
             CredentialCasOutcome::Conflict => return Err(CredentialError::Busy),
         }
+        // 新代次已提交后立即唤醒采集；不能复用旧 revision 的目录，也不把采集失败当成令牌轮换失败。
+        self.catalog_changed.notify_one();
         self.ports
             .credential_state()
             .clear_refresh_backoff(id)

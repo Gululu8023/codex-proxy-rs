@@ -1,4 +1,4 @@
 # CPRS 从 4.0.0 起独立编号，不再随上游版本递增。
-version: 4.0.0
+version: 4.0.1
 # 只记录本仓库成功发布的 Release；main/latest 构建不属于正式发行。
 published: {}

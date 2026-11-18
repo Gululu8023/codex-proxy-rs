@@ -10,8 +10,9 @@ use futures::future::BoxFuture;
 use gateway_core::{
     account::ProviderRefreshQuery,
     task::{
-        ScheduledTask, WorkerContribution, WorkerCycleContext, WorkerDefinitionError, WorkerId,
-        WorkerKind, WorkerRegistration, WorkerRunnable, WorkerSchedule, WorkerTaskError,
+        DaemonRestartPolicy, DaemonTask, ScheduledTask, WorkerContribution, WorkerCycleContext,
+        WorkerDaemonContext, WorkerDefinitionError, WorkerId, WorkerKind, WorkerRegistration,
+        WorkerRunnable, WorkerSchedule, WorkerTaskError,
     },
 };
 
@@ -32,6 +33,7 @@ pub(crate) fn contributions(
         Duration::from_secs(30),
     )?;
     let quota_credentials = credentials.clone();
+    let catalog_credentials = credentials.clone();
     let releases = credentials.profiles.clone();
     let release_id = WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "anthropic-client-release")?;
     Ok(vec![
@@ -55,8 +57,21 @@ pub(crate) fn contributions(
                 )?,
                 lease: None,
                 task: Box::new(CatalogTask {
-                    provider,
+                    provider: provider.clone(),
                     credentials: quota_credentials,
+                }),
+            },
+        )?),
+        WorkerContribution::Registration(WorkerRegistration::try_new(
+            WorkerId::try_new(WorkerKind::QuotaCatalogHealth, "anthropic-model-catalog")?,
+            WorkerRunnable::Daemon {
+                restart: DaemonRestartPolicy::try_new(
+                    Duration::from_secs(5),
+                    Duration::from_secs(60),
+                )?,
+                task: Box::new(CatalogChangeTask {
+                    provider,
+                    credentials: catalog_credentials,
                 }),
             },
         )?),
@@ -155,6 +170,39 @@ impl ScheduledTask for CatalogTask {
                     let (quota, catalog) = tokio::join!(crate::quota::synchronize(&self.credentials), self.provider.refresh_catalog());
                     if quota.is_err() || catalog.is_err() {Err(WorkerTaskError::safe("Anthropic quota or catalog refresh failed"))} else {Ok(())}
                 } => result,
+            }
+        })
+    }
+}
+
+struct CatalogChangeTask {
+    provider: Arc<AnthropicProvider>,
+    credentials: Arc<Credentials>,
+}
+
+impl DaemonTask for CatalogChangeTask {
+    fn run(&self, context: WorkerDaemonContext) -> BoxFuture<'_, Result<(), WorkerTaskError>> {
+        Box::pin(async move {
+            loop {
+                tokio::select! {
+                    biased;
+                    _ = context.cancellation().cancelled() => return Ok(()),
+                    _ = self.credentials.catalog_changed.notified() => {},
+                }
+                // 与周期任务共用采集锁、版本围栏和并发预算；等待锁也计入期限，停机可随时取消。
+                let result = tokio::select! {
+                    biased;
+                    _ = context.cancellation().cancelled() => return Ok(()),
+                    result = tokio::time::timeout(Duration::from_secs(120), self.provider.refresh_catalog()) => result,
+                };
+                if !matches!(result, Ok(Ok(()))) {
+                    // 保留一次待办，由宿主退避后重试；多次账号变更合并，避免逐个创建脱管任务。
+                    self.credentials.catalog_changed.notify_one();
+                    return Err(WorkerTaskError::safe(
+                        "Anthropic changed-account catalog refresh failed",
+                    ));
+                }
+                context.succeeded();
             }
         })
     }

@@ -297,6 +297,12 @@ const quotaWindowPeriods = [
   },
 ]
 
+export function isGeneralQuotaWindow(window: AccountQuotaWindow) {
+  // Claude 的 account 是账号共享额度的内部标识，分组标题和窗口文案统一按通用额度展示。
+  return window.limitId === 'codex'
+    || (window.group === 'claude_subscription' && window.limitId === 'account')
+}
+
 export function quotaWindowLabel(window: AccountQuotaWindow, includeLimitName = true) {
   const seconds = window.windowSeconds
   // 沿用 Codex 官方的显示时长容差；仅决定文案，不改变后端窗口归属或额度判定。
@@ -339,7 +345,7 @@ export function quotaWindowLabel(window: AccountQuotaWindow, includeLimitName = 
     label = window.windowLabelDisplay
   }
 
-  return includeLimitName && window.limitName && window.limitId !== 'codex'
+  return includeLimitName && window.limitName && !isGeneralQuotaWindow(window)
     ? `${window.limitName} · ${label}`
     : label
 }

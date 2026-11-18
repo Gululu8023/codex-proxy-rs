@@ -122,7 +122,7 @@ impl AnthropicProvider {
                         .store((start + offset + 1) as u64, Ordering::Relaxed);
                 }
                 let mode = if refresh {
-                    CatalogRead::RefreshIfMissing
+                    CatalogRead::RefreshIfStale
                 } else {
                     CatalogRead::Snapshot
                 };
@@ -1186,6 +1186,7 @@ impl Provider for AnthropicProvider {
 pub(crate) enum CatalogRead {
     Snapshot,
     RefreshIfMissing,
+    RefreshIfStale,
     Refresh,
 }
 
@@ -1230,8 +1231,15 @@ pub(crate) async fn account_models(
             .await
             .map_err(|_| CredentialError::Unavailable)?
     {
-        return serde_json::from_value(Value::Object(cached.expose_to_provider().clone()))
-            .map_err(|_| CredentialError::Invalid);
+        let catalog: AccountCatalog =
+            serde_json::from_value(Value::Object(cached.expose_to_provider().clone()))
+                .map_err(|_| CredentialError::Invalid)?;
+        // 300 秒硬过期前提前采集，给 60 秒周期及有界采集留出余量；失败不续期旧缓存。
+        if !matches!(mode, CatalogRead::RefreshIfStale)
+            || chrono::Utc::now() - catalog.observed_at < chrono::Duration::seconds(120)
+        {
+            return Ok(catalog);
+        }
     }
     // 原生目录和管理快照读取不会发起上游 HTTP，后台任务与显式刷新负责填充。
     if matches!(mode, CatalogRead::Snapshot) {

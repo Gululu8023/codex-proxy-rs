@@ -220,14 +220,18 @@ service_user_ids() {
   local user="$2"
   local uid
   local gid
+  local image_policy
+
+  # 旧版 Compose run 不支持 --pull；临时覆盖拉取策略，避免读取 UID/GID 时更新 latest。
+  image_policy="$(printf 'services:\n  %s:\n    pull_policy: never\n' "$service")"
 
   uid="$(
     cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml run --rm --no-deps -T --pull never --entrypoint id "$service" -u "$user"
+    docker compose -f deploy/compose.yaml -f - run --rm --no-deps -T --entrypoint id "$service" -u "$user" <<< "$image_policy"
   )"
   gid="$(
     cd "$INSTALL_DIR"
-    docker compose -f deploy/compose.yaml run --rm --no-deps -T --pull never --entrypoint id "$service" -g "$user"
+    docker compose -f deploy/compose.yaml -f - run --rm --no-deps -T --entrypoint id "$service" -g "$user" <<< "$image_policy"
   )"
 
   [[ "$uid" =~ ^[0-9]+$ ]] || die "无法读取 ${service} 容器用户 ${user} 的 UID。"

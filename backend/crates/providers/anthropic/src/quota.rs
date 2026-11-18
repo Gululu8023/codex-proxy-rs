@@ -40,6 +40,7 @@ pub(crate) async fn read(
         .control(gateway_veil::ControlPurpose::Quota)
         .map_err(|_| CredentialError::Unavailable)?;
     let (loaded, tokens) = credentials.load(&request.account_id).await?;
+    let mut plan_type = loaded.account.plan_type().map(str::to_owned);
     if request.refresh
         && (loaded.account.credential_state() != gateway_core::account::CredentialState::Ready
             || tokens
@@ -109,6 +110,25 @@ pub(crate) async fn read(
                 value["queryFailedAt"] = json!(attempted_at);
             }
         }
+        // 旧账号缺失套餐时随额度刷新补全；只接受同一身份，资料查询最多额外等待 5 秒。
+        let profile = if plan_type.is_none() && value["queryFailed"] == false {
+            Some(
+                tokio::time::timeout(
+                    Duration::from_secs(5),
+                    credentials.profile(&tokens, loaded.account.outbound_proxy()),
+                )
+                .await
+                .unwrap_or(Err(CredentialError::Unavailable)),
+            )
+        } else {
+            None
+        };
+        if let Some(Ok(profile)) = &profile {
+            if profile.id() != *loaded.account.id() {
+                return Err(CredentialError::Invalid);
+            }
+            plan_type.clone_from(&profile.plan);
+        }
         // 原始观测与额度访问状态共用既有存储；查询失败不解除旧耗尽，迟到结果受 revision 与时间双重围栏保护
         let state = if value["queryFailed"] == true {
             loaded.account.quota()
@@ -122,7 +142,7 @@ pub(crate) async fn read(
                 account_id: loaded.account.id().clone(),
                 expected_revision: loaded.account.revision(),
                 quota: OpaqueProviderData::new(value.as_object().expect("quota object").clone()),
-                plan_type: None,
+                plan_type: plan_type.clone(),
                 observed_at: attempted_at.into(),
                 state,
             })
@@ -131,6 +151,10 @@ pub(crate) async fn read(
             == QuotaWriteOutcome::Conflict
         {
             return Err(CredentialError::Busy);
+        }
+        // 资料失败仍保存已取得的额度，但向调用方报告失败，后台下轮继续补全套餐。
+        if let Some(result) = profile {
+            result?;
         }
     }
     let headers_key = cache_key(credentials, &loaded.account, "quota_headers")?;
@@ -201,7 +225,7 @@ pub(crate) async fn read(
     Ok(ProviderQuota {
         paused_windows: Vec::new(),
         upstream: None,
-        plan_type: loaded.account.plan_type().map(str::to_owned),
+        plan_type,
         observed_at,
         refresh_token_expires_at: None,
         limit_reached: reached,

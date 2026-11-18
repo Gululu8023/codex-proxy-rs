@@ -50,9 +50,10 @@ impl AnthropicAdmin {
         name: Option<String>,
         proxy: Option<gateway_core::account::OutboundProxy>,
     ) -> Result<PreparedCredentialCreate, ProviderAdminError> {
+        // 换令牌响应可能只有身份、没有套餐；不能因此跳过官方 profile 的补全。
         let profile = match exchanged.profile {
-            Some(profile) => profile,
-            None => self
+            Some(profile) if profile.plan.is_some() => profile,
+            _ => self
                 .credentials
                 .profile(&exchanged.tokens, proxy.as_ref())
                 .await
@@ -247,6 +248,12 @@ impl ProviderAdmin for AnthropicAdmin {
         crate::usage::pricing_catalog()
     }
     async fn account_unavailable(&self, _account_id: &ProviderAccountId) {}
+    async fn account_facts_changed(&self, account_ids: &[ProviderAccountId]) {
+        // 导入、OAuth 和手工轮换已提交；后台补齐当前代次目录，不阻塞或回滚账号事务。
+        if !account_ids.is_empty() {
+            self.credentials.catalog_changed.notify_one();
+        }
+    }
     fn dashboard_wire_profile(&self) -> Option<DashboardWireProfile> {
         Some(
             self.credentials
