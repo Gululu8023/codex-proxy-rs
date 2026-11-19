@@ -23,7 +23,7 @@ use gateway_core::{
         },
     },
     error::{GatewayError, GatewayErrorKind},
-    event::{ProviderEvent, ProviderResponseHeader},
+    event::{GatewayEvent, ProviderEvent, ProviderResponseHeader},
     operation::{
         CapabilityRequirements, Feature, GenerateRequest, Operation, OperationKind,
         ProtocolPayload, RawJsonPayload, TokenCountRequest,
@@ -834,6 +834,7 @@ async fn deliver(
                         Box::new(NativeStreamBody {
                             execution,
                             first: Some(bytes),
+                            pending_terminal: None,
                             ended: true,
                             status: 200,
                         }),
@@ -864,6 +865,7 @@ async fn deliver(
         Box::new(NativeStreamBody {
             execution,
             first: Some(first),
+            pending_terminal: None,
             ended: false,
             status,
         }),
@@ -873,6 +875,7 @@ async fn deliver(
 struct NativeStreamBody {
     execution: PendingExecution,
     first: Option<Bytes>,
+    pending_terminal: Option<Bytes>,
     ended: bool,
     status: u16,
 }
@@ -898,6 +901,9 @@ impl MiddlewareBody for NativeStreamBody {
                     .await
                 {
                     Ok(Some(event)) => {
+                        if self.pending_terminal.is_some() {
+                            return Err(MiddlewareError::InvalidState);
+                        }
                         if event.commit_requirement()
                             == gateway_core::engine::CommitRequirement::CommitBeforeDelivery
                         {
@@ -907,9 +913,20 @@ impl MiddlewareBody for NativeStreamBody {
                                 .commit_downstream(Some(self.status))
                                 .await?;
                         }
-                        let bytes = wire(event.into_provider_events(), true)
-                            .map_err(|_| MiddlewareError::InvalidState)?;
+                        let events = event.into_provider_events();
+                        let completed = events
+                            .iter()
+                            .flat_map(ProviderEvent::canonical_facts)
+                            .any(|fact| matches!(fact, GatewayEvent::Completed(_)));
+                        let bytes =
+                            wire(events, true).map_err(|_| MiddlewareError::InvalidState)?;
                         if let Some(bytes) = bytes {
+                            if completed {
+                                // message_stop 必须等 Core 确认 EOF、结算和释放后再作为终帧交付。
+                                // 保存在正文状态内，取消一次读取等待也不能丢失终帧。
+                                self.pending_terminal = Some(bytes);
+                                continue;
+                            }
                             let terminal = self.execution.is_finalized();
                             if terminal {
                                 self.ended = true;
@@ -924,15 +941,25 @@ impl MiddlewareBody for NativeStreamBody {
                     }
                     Ok(None) => {
                         return if self.execution.is_finalized() {
+                            let bytes = self
+                                .pending_terminal
+                                .take()
+                                .ok_or(MiddlewareError::InvalidState)?;
                             self.ended = true;
                             self.execution.disarm();
-                            Ok(None)
+                            Ok(Some(MiddlewareFrame::new(
+                                bytes,
+                                MiddlewareFraming::SseEvent,
+                                true,
+                            )))
                         } else {
                             Err(MiddlewareError::InvalidState)
                         };
                     }
                     Err(mut failure) => {
                         let raw = atomic_wire(&mut failure);
+                        // 终结确认失败时只交付失败，不能把尚未发出的成功终帧混入响应。
+                        self.pending_terminal = None;
                         self.ended = true;
                         let bytes = raw.unwrap_or_else(|| {
                             let gateway =

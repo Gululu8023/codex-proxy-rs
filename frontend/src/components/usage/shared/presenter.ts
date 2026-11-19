@@ -1,6 +1,10 @@
+import type { UsageReasoningRecord } from './reasoning'
 import type { UsageListRecord, UsageRecordDetail, UsageTokenDetails } from '@/api'
 import { t } from '@/i18n'
 import { formatCompactNumber, formatDuration, formatInteger } from '@/utils/format'
+import { formatReasoning } from './reasoning'
+
+export type { UsageReasoningRecord } from './reasoning'
 
 // 列表与详情使用独立读模型，展示函数只依赖两者的公共字段。
 type UsageCommonRecord = UsageListRecord | UsageRecordDetail
@@ -11,7 +15,6 @@ export type UsagePerformanceRecord = Pick<UsageCommonRecord, 'latencyDetails' | 
 }
 
 export type UsageModelRecord = Pick<UsageCommonRecord, 'model'> & Partial<Pick<UsageCommonRecord, 'requestedModel' | 'upstreamModel'>>
-export type UsageReasoningRecord = Pick<UsageCommonRecord, 'reasoningEffort'> & Partial<Pick<UsageCommonRecord, 'reasoningPreset' | 'subagentKind'>>
 
 interface UsageTimingItem {
   label: string
@@ -77,10 +80,18 @@ export function usageUserAgent(record: { userAgent?: string | null }) {
 }
 
 export function usageReasoningEffort(record: UsageReasoningRecord) {
-  const reasoningEffort = record.reasoningEffort || '—'
-  if (record.subagentKind)
-    return reasoningEffort
-  return record.reasoningPreset || reasoningEffort
+  return formatReasoning(record, {
+    unspecified: t('usage.reasoning.unspecified'),
+    modes: {
+      adaptive: t('usage.reasoning.adaptive'),
+      enabled: t('usage.reasoning.enabled'),
+      disabled: t('usage.reasoning.disabled'),
+      between_tools: t('usage.reasoning.betweenTools'),
+    },
+    budget: tokens => t('usage.reasoning.budget', {
+      tokens: formatInteger(tokens),
+    }),
+  })
 }
 
 export function usageModelDisplay(record: UsageModelRecord) {

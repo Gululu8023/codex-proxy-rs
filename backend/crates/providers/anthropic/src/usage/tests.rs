@@ -10,6 +10,46 @@ fn facts(events: &[ProviderEvent]) -> Vec<&GatewayEvent> {
 }
 
 #[test]
+fn thinking_usage_is_explicit_partial_and_never_double_billed() {
+    let mut capture = UsageCapture::default();
+    capture.observe(&json!({"input_tokens":100,"output_tokens":0}));
+    capture.observe(&json!({"output_tokens":20,"output_tokens_details":{"thinking_tokens":12,"private_text":"never persist"}}));
+    capture.observe(&json!({"output_tokens":30}));
+    assert_eq!(
+        capture.fields["output_tokens_details"],
+        json!({"thinking_tokens":12})
+    );
+    let events = capture.finish("claude-sonnet-4-5", &Default::default(), &json!({}), true);
+    let observed = facts(&events);
+    let usage = observed
+        .iter()
+        .find_map(|event| match event {
+            GatewayEvent::Usage(usage) => Some(usage),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(
+        (
+            usage.output_tokens,
+            usage.reasoning_output_tokens,
+            usage.total_tokens
+        ),
+        (Some(30), Some(12), Some(130))
+    );
+    let cost = observed
+        .iter()
+        .find_map(|event| match event {
+            GatewayEvent::CalculatedCost(cost) => Some(cost.total().amount().canonical()),
+            _ => None,
+        })
+        .unwrap();
+    assert_eq!(cost, "0.00075");
+    capture.observe(&json!({"output_tokens_details":{"thinking_tokens":31}}));
+    let events = capture.finish("claude-sonnet-4-5", &Default::default(), &json!({}), true);
+    assert!(facts(&events).iter().any(|event| matches!(event, GatewayEvent::Usage(usage) if usage.reasoning_output_tokens.is_none())));
+}
+
+#[test]
 fn cache_buckets_merge_across_frames_and_are_priced_separately() {
     let mut capture = UsageCapture::default();
     capture.observe(&json!({"input_tokens":100,"cache_read_input_tokens":30,

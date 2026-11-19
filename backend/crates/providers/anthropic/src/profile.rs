@@ -20,6 +20,9 @@ const SDK_VERSION: &str = "0.128.0";
 const RUNTIME_VERSION: &str = "v26.12.1";
 const CHANNELS: [&str; 2] = ["latest", "stable"];
 
+#[cfg(test)]
+mod tests;
+
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(default, rename_all = "camelCase", deny_unknown_fields)]
 pub(crate) struct Selection {

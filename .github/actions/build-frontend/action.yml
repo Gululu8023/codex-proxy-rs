@@ -28,6 +28,10 @@ runs:
       shell: bash
       run: pnpm --dir frontend install --frozen-lockfile
 
+    - name: Frontend unit tests
+      shell: bash
+      run: pnpm --dir frontend test:unit
+
     - name: Frontend format
       shell: bash
       run: pnpm --dir frontend format:check

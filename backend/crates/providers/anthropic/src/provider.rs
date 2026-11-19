@@ -21,12 +21,15 @@ use gateway_core::{
     concurrency::{CapacityWait, ConcurrencyWaitQueue},
     engine::{
         AttemptContext,
-        provider::{Provider, ProviderCallMetadata, ProviderRequest, ProviderStream},
+        provider::{
+            Provider, ProviderCallMetadata, ProviderRequest, ProviderRequestObservation,
+            ProviderStream,
+        },
     },
     error::{ClientVisibleUpstreamResponse, ProviderError, ProviderErrorKind},
     event::{
-        GatewayEvent, ProtocolWireEvent, ProviderEvent, ProviderResponseHeader,
-        ProviderResponseObservation, ProviderResponseTimings, ResponseMeta,
+        ContentItem, ContentKind, GatewayEvent, ProtocolWireEvent, ProviderEvent,
+        ProviderResponseHeader, ProviderResponseObservation, ProviderResponseTimings, ResponseMeta,
     },
     operation::{Operation, OperationKind, RawJsonPayload},
     provider_ports::{
@@ -516,6 +519,13 @@ impl Provider for AnthropicProvider {
     fn name(&self) -> &str {
         NAME
     }
+    fn request_observation(
+        &self,
+        operation: &Operation,
+        _client_api_key_id: &gateway_core::policy::ClientApiKeyId,
+    ) -> ProviderRequestObservation {
+        request_observation(operation)
+    }
     fn catalog_generation(&self) -> ProviderCatalogGeneration {
         ProviderCatalogGeneration::new(self.catalog_generation.load(Ordering::Acquire))
     }
@@ -906,16 +916,27 @@ impl Provider for AnthropicProvider {
             } else {
                 gateway_veil::Scope::ClientKey(execution_context.client_api_key_ref().as_str())
             })
+            .and_then(gateway_veil::Session::reserve)
             .map_err(|error| veil_error(error, UpstreamSendState::NotSent))?;
         let redaction_started = std::time::Instant::now();
-        let redacted = privacy.redact(body).await;
+        let redacted = await_privacy(
+            privacy.redact_observed(body),
+            &execution_context,
+            UpstreamSendState::NotSent,
+        )
+        .await;
         phase(
             &execution_context,
             "anthropic.redaction",
             milliseconds(redaction_started),
             redacted.is_ok(),
         );
-        let mut body = redacted.map_err(|error| veil_error(error, UpstreamSendState::NotSent))?;
+        let redacted = redacted?;
+        execution_context.trace().record_evidence(
+            "anthropic.redaction_details",
+            serde_json::json!(redacted.statistics),
+        );
+        let mut body = redacted.value;
         // Guard 已检查这些管理员配置值；脱敏后恢复同一快照，避免位置被当作用户文本替换。
         // 不恢复任何客户端提供的原始字段。
         apply_location(&mut body);
@@ -975,7 +996,7 @@ impl Provider for AnthropicProvider {
                 let policy_rejection = gateway_core::engine::prompt_guard::upstream_policy_code_from_fields(&raw_fields).is_some();
                 // 明确的内容拒绝不参与账号冷却或 OAuth 恢复。
                 let rejection = (!policy_rejection && status == 429 && scope != crate::quota::ErrorScope::Request).then(|| crate::quota::rejection(response.headers())).flatten();
-                let bytes = restore_error_body(&privacy, bytes).await?;
+                let bytes = restore_error_body(&privacy, bytes, &execution_context).await?;
                 if !execution_context.is_diagnostic_required_account() && let Some(rejection) = &rejection {
                     let port = provider.ports.cooldowns();
                     let result = if scope == crate::quota::ErrorScope::Model {
@@ -1041,9 +1062,9 @@ impl Provider for AnthropicProvider {
                 }
                 usage.observe(&value["usage"]);
                 let restoration_started = std::time::Instant::now();
-                let restored = privacy.restore(value).await;
+                let restored = await_privacy(privacy.restore(value), &execution_context, UpstreamSendState::Sent).await;
                 phase(&execution_context, "anthropic.restoration", milliseconds(restoration_started), restored.is_ok());
-                let value = restored.map_err(|error| veil_error(error, UpstreamSendState::Sent)
+                let value = restored.map_err(|error| error
                     .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false)))?;
                 if endpoint == "/v1/messages" {
                     let id = value["id"].as_str().filter(|id| crate::thread::message_id(id)).ok_or_else(|| sent(ProviderErrorKind::Protocol))?;
@@ -1056,13 +1077,7 @@ impl Provider for AnthropicProvider {
                     canonical.extend_from_slice(event.canonical_facts());
                     if let Some(observation) = event.response_observation() { yield ProviderEvent::observation(observation.clone()); }
                 }
-                if let Some(content) = value["content"].as_array() {
-                    for (index, block) in content.iter().enumerate() {
-                        if block["type"] == "text" && let Some(text) = block["text"].as_str() {
-                            canonical.push(GatewayEvent::TextDelta(gateway_core::event::TextDelta { content_index: index as u32, text: text.to_owned() }));
-                        }
-                    }
-                }
+                canonical.extend(restored_json_text_events(&value));
                 canonical.push(GatewayEvent::Completed(meta.clone()));
                 let mut event = ProviderEvent::canonical_with_wire(canonical, ProtocolWireEvent::raw_json(NAME, bytes).expect("valid protocol"));
                 if let Some(checkpoint) = &checkpoint && crate::thread::eligible(&value) {
@@ -1070,7 +1085,7 @@ impl Provider for AnthropicProvider {
                 }
                 yield event;
             } else {
-                let mut restorer = privacy.stream().map_err(|error| veil_error(error, UpstreamSendState::Sent))?;
+                let mut restorer = privacy.stream();
                 let mut buffer = BytesMut::new();
                 let mut stopped = false;
                 let mut started = false;
@@ -1114,20 +1129,15 @@ impl Provider for AnthropicProvider {
                         }
                         let event = std::str::from_utf8(&raw).map_err(|_| sent(ProviderErrorKind::Protocol))?.to_owned();
                         let restoration_started = std::time::Instant::now();
-                        let restored = restorer.push(event).await;
+                        let restored = await_privacy(restorer.push(event), &execution_context, UpstreamSendState::Sent).await;
                         restoration_ms = restoration_ms.saturating_add(milliseconds(restoration_started));
                         if restored.is_err() { phase(&execution_context, "anthropic.restoration", restoration_ms, false); }
-                        let restored = restored.map_err(|error| veil_error(error, UpstreamSendState::Sent)
+                        let restored = restored.map_err(|error| error
                             .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false)))?;
                         let raw = Bytes::from(restored);
                         if let Some(value) = &value {
                             if value["type"] == "error" {
-                                let (kind, scope) = match value["error"]["type"].as_str() {
-                                    Some("invalid_request_error" | "permission_error" | "not_found_error") => (ProviderErrorKind::InvalidRequest, "request"),
-                                    Some("rate_limit_error") => (ProviderErrorKind::RateLimited, "model"),
-                                    Some("authentication_error") => (ProviderErrorKind::Unauthorized, "account"),
-                                    _ => (ProviderErrorKind::Unavailable, "account"),
-                                };
+                                let (kind, scope) = stream_error_classification(value["error"]["type"].as_str());
                                 Err(sent(kind).with_diagnostic(gateway_core::error::ProviderDiagnostic::new("Anthropic SSE error").with_classification("anthropic_upstream", scope))
                                     .with_upstream_failure_fields(gateway_core::upstream::UpstreamFailureFields {
                                         status: Some(status), code: value["error"]["code"].as_str().map(str::to_owned),
@@ -1139,10 +1149,10 @@ impl Provider for AnthropicProvider {
                             if value["type"] == "message_stop" {
                                 if !started { Err(sent(ProviderErrorKind::Protocol))?; }
                                 let restoration_started = std::time::Instant::now();
-                                let tail = restorer.finish().await;
+                                let tail = await_privacy(restorer.finish(), &execution_context, UpstreamSendState::Sent).await;
                                 restoration_ms = restoration_ms.saturating_add(milliseconds(restoration_started));
                                 phase(&execution_context, "anthropic.restoration", restoration_ms, tail.is_ok());
-                                let tail = tail.map_err(|error| veil_error(error, UpstreamSendState::Sent))?;
+                                let tail = tail?;
                                 if !tail.is_empty() { Err(sent(ProviderErrorKind::Protocol))?; }
                                 for event in usage.finish(model.as_str(), execution_context.pricing(), &body, true) { yield event; }
                                 let mut event = ProviderEvent::canonical_with_wire(vec![GatewayEvent::Completed(meta.clone())], ProtocolWireEvent::raw_sse(NAME, raw).expect("protocol"));
@@ -1180,6 +1190,60 @@ impl Provider for AnthropicProvider {
         };
         Ok(ProviderStream::new(metadata, events, lease)
             .with_filtered_account_feedback(feedback, score_account_failure))
+    }
+}
+
+fn request_observation(operation: &Operation) -> ProviderRequestObservation {
+    let counted;
+    let (body, generation) = match operation {
+        Operation::Generate(request) if request.protocol_payload().protocol() == NAME => {
+            (request.protocol_payload().body(), true)
+        }
+        Operation::CountTokens(request) if request.payload().protocol() == NAME => {
+            let Ok(value) =
+                serde_json::from_slice::<serde_json::Map<String, Value>>(request.payload().body())
+            else {
+                return ProviderRequestObservation::default();
+            };
+            counted = value;
+            (&counted, false)
+        }
+        _ => return ProviderRequestObservation::default(),
+    };
+    let requested_model = body
+        .get("model")
+        .and_then(Value::as_str)
+        .and_then(|model| gateway_core::routing::PublicModelId::new(model).ok());
+    if !generation {
+        return ProviderRequestObservation {
+            requested_model,
+            ..Default::default()
+        };
+    }
+    // 只记录客户端明确指定的协议档位；thinking 模式和 token 预算不等价于强度，也不猜模型默认值。
+    let reasoning_effort = body
+        .get("output_config")
+        .and_then(|config| config.get("effort"))
+        .and_then(Value::as_str)
+        .filter(|effort| matches!(*effort, "low" | "medium" | "high" | "xhigh" | "max"))
+        .map(str::to_owned);
+    ProviderRequestObservation {
+        requested_model,
+        reasoning_effort,
+        // 模式和预算是独立请求事实；不能塞进优先显示的 Codex preset，也不能据此猜强度。
+        thinking_mode: body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("type"))
+            .and_then(Value::as_str)
+            .filter(|mode| matches!(*mode, "adaptive" | "enabled" | "disabled" | "between_tools"))
+            .map(str::to_owned),
+        thinking_budget_tokens: body
+            .get("thinking")
+            .and_then(|thinking| thinking.get("budget_tokens"))
+            .and_then(Value::as_u64)
+            .filter(|budget| *budget <= i64::MAX as u64),
+        reasoning_observed: Some(true),
+        ..Default::default()
     }
 }
 
@@ -1434,27 +1498,35 @@ fn rejected_credential_state(
 }
 
 fn score_account_failure(error: &ProviderError) -> bool {
-    // Closed classification: model/request refusals and local infrastructure never poison account health.
+    // Protocol 也可能来自本地 canonical 校验；没有账号证据时不能把网关缺陷算到账号头上。
     error.send_state() == UpstreamSendState::Sent
         && (error.diagnostic().is_some_and(|diagnostic| {
             diagnostic.stage() == Some("anthropic_upstream") && diagnostic.code() == Some("account")
-        }) || matches!(
-            error.kind(),
-            ProviderErrorKind::Transport | ProviderErrorKind::Protocol
-        ))
+        }) || matches!(error.kind(), ProviderErrorKind::Transport))
+}
+
+fn stream_error_classification(error_type: Option<&str>) -> (ProviderErrorKind, &'static str) {
+    match error_type {
+        Some("invalid_request_error" | "permission_error" | "not_found_error") => {
+            (ProviderErrorKind::InvalidRequest, "request")
+        }
+        Some("rate_limit_error") => (ProviderErrorKind::RateLimited, "model"),
+        Some("authentication_error") => (ProviderErrorKind::Unauthorized, "account"),
+        // 200 响应里的 overloaded_error、api_error 和未知错误没有账号级故障证明。
+        _ => (ProviderErrorKind::Unavailable, "service"),
+    }
 }
 
 async fn restore_error_body(
-    privacy: &gateway_veil::Session,
+    privacy: &gateway_veil::ReservedSession,
     bytes: Bytes,
+    context: &AttemptContext,
 ) -> Result<Bytes, ProviderError> {
     // 上游网关也会返回纯文本或 HTML 错误，保留其状态与类型，同时严格恢复其中的占位符。
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => {
-            let value = privacy
-                .restore(value)
-                .await
-                .map_err(|error| veil_error(error, UpstreamSendState::Sent))?;
+            let value =
+                await_privacy(privacy.restore(value), context, UpstreamSendState::Sent).await?;
             serde_json::to_vec(&value)
                 .map(Bytes::from)
                 .map_err(|_| sent(ProviderErrorKind::Protocol))
@@ -1462,10 +1534,12 @@ async fn restore_error_body(
         Err(_) => {
             let text =
                 std::str::from_utf8(&bytes).map_err(|_| sent(ProviderErrorKind::Protocol))?;
-            let restored = privacy
-                .restore(Value::String(text.to_owned()))
-                .await
-                .map_err(|error| veil_error(error, UpstreamSendState::Sent))?;
+            let restored = await_privacy(
+                privacy.restore(Value::String(text.to_owned())),
+                context,
+                UpstreamSendState::Sent,
+            )
+            .await?;
             Ok(Bytes::from(
                 restored
                     .as_str()
@@ -1477,6 +1551,21 @@ async fn restore_error_body(
 }
 fn not_sent(kind: ProviderErrorKind) -> ProviderError {
     ProviderError::new(kind, UpstreamSendState::NotSent).with_retry_prohibited()
+}
+
+async fn await_privacy<T>(
+    work: impl std::future::Future<Output = Result<T, gateway_veil::Error>>,
+    context: &AttemptContext,
+    send_state: UpstreamSendState,
+) -> Result<T, ProviderError> {
+    // 取消只停止等待；veil worker 仍持有容量许可，不能因为 future 被丢弃而提前放行新请求。
+    check_context(context, send_state)?;
+    tokio::select! {
+        biased;
+        _ = context.cancellation().cancelled() => Err(ProviderError::new(ProviderErrorKind::Cancelled, send_state).with_retry_prohibited()),
+        _ = deadline_elapsed(context) => Err(ProviderError::new(ProviderErrorKind::Timeout, send_state).with_retry_prohibited()),
+        result = work => result.map_err(|error| veil_error(error, send_state)),
+    }
 }
 fn sent(kind: ProviderErrorKind) -> ProviderError {
     ProviderError::new(kind, UpstreamSendState::Sent).with_retry_prohibited()
@@ -1571,21 +1660,53 @@ fn event_end(bytes: &[u8]) -> Option<usize> {
         )
         .min()
 }
+fn restored_json_text_events(value: &Value) -> Vec<GatewayEvent> {
+    let mut events = Vec::new();
+    if let Some(content) = value["content"].as_array() {
+        for (index, block) in content.iter().enumerate() {
+            if block["type"] == "text"
+                && let Some(text) = block["text"].as_str()
+            {
+                events.push(GatewayEvent::ContentAdded(ContentItem::new(
+                    index as u32,
+                    ContentKind::Text,
+                )));
+                events.push(GatewayEvent::TextDelta(gateway_core::event::TextDelta {
+                    content_index: index as u32,
+                    text: text.to_owned(),
+                }));
+            }
+        }
+    }
+    events
+}
+
 fn restored_text_events(mut bytes: &[u8]) -> Result<Vec<GatewayEvent>, ProviderError> {
     let mut events = Vec::new();
     while let Some(end) = event_end(bytes) {
-        if let Some(value) = event_json(&bytes[..end])?
-            && value["type"] == "content_block_delta"
-            && value["delta"]["type"] == "text_delta"
-            && let (Some(index), Some(text)) =
-                (value["index"].as_u64(), value["delta"]["text"].as_str())
-            && !text.is_empty()
-        {
-            events.push(GatewayEvent::TextDelta(gateway_core::event::TextDelta {
-                content_index: u32::try_from(index)
-                    .map_err(|_| sent(ProviderErrorKind::Protocol))?,
-                text: text.to_owned(),
-            }));
+        if let Some(value) = event_json(&bytes[..end])? {
+            if value["type"] == "content_block_start"
+                && value["content_block"]["type"] == "text"
+                && let Some(index) = value["index"].as_u64()
+            {
+                // 文本块声明必须与恢复后的增量一起映射，否则流尾的独立 Usage 会触发序列错误。
+                events.push(GatewayEvent::ContentAdded(ContentItem::new(
+                    u32::try_from(index).map_err(|_| sent(ProviderErrorKind::Protocol))?,
+                    ContentKind::Text,
+                )));
+            }
+            if value["type"] == "content_block_delta"
+                && value["delta"]["type"] == "text_delta"
+                && let (Some(index), Some(text)) =
+                    (value["index"].as_u64(), value["delta"]["text"].as_str())
+                && !text.is_empty()
+            {
+                events.push(GatewayEvent::TextDelta(gateway_core::event::TextDelta {
+                    content_index: u32::try_from(index)
+                        .map_err(|_| sent(ProviderErrorKind::Protocol))?,
+                    text: text.to_owned(),
+                }));
+            }
         }
         bytes = &bytes[end..];
     }

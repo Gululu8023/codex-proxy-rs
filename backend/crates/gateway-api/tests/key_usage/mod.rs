@@ -270,6 +270,9 @@ async fn records_keep_pagination_and_hide_admin_and_upstream_data() {
             let mut records = fixture.usage_records.lock().unwrap();
             records[0].outcome = outcome;
             records[0].client_status_code = (kind != "success").then_some(502);
+            records[0].thinking_mode = (kind != "all").then(|| "enabled".to_owned());
+            records[0].thinking_budget_tokens = (kind != "all").then_some(32000);
+            records[0].reasoning_observed = (kind != "all").then_some(true);
         }
         let response = get(
             &app,
@@ -293,6 +296,9 @@ async fn records_keep_pagination_and_hide_admin_and_upstream_data() {
                 "model",
                 "route",
                 "reasoningEffort",
+                "thinkingMode",
+                "thinkingBudgetTokens",
+                "reasoningObserved",
                 "clientTransport",
                 "upstreamTransport",
                 "tokenDetails",
@@ -312,6 +318,18 @@ async fn records_keep_pagination_and_hide_admin_and_upstream_data() {
         );
         assert_eq!(record["model"], "coding");
         assert_eq!(record["reasoningEffort"], "xhigh");
+        assert_eq!(
+            record["thinkingMode"],
+            serde_json::json!((kind != "all").then_some("enabled"))
+        );
+        assert_eq!(
+            record["thinkingBudgetTokens"],
+            serde_json::json!((kind != "all").then_some(32000))
+        );
+        assert_eq!(
+            record["reasoningObserved"],
+            serde_json::json!((kind != "all").then_some(true))
+        );
         assert_eq!(record["clientTransport"], "http_sse");
         assert_eq!(record["upstreamTransport"], "websocket");
         assert_eq!(record["clientIp"], "192.0.2.42");

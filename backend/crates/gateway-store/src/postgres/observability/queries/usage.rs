@@ -162,7 +162,10 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.upstream_api_overhead_ms, mr.upstream_engine_ms, mr.latency_ms, mr.admission_decision_ms,
             mr.account_selection_wait_ms, mr.capacity_used_slots, mr.capacity_total_slots,
             host(mr.client_ip) as client_ip, mr.user_agent,
-            mr.reasoning_effort, mr.reasoning_preset, mr.subagent_kind, mr.compact,
+            mr.reasoning_effort, mr.reasoning_preset,
+       mr.request_observation_json #>> '{request,thinkingMode}' as thinking_mode,
+       (mr.request_observation_json #>> '{request,thinkingBudgetTokens}')::bigint as thinking_budget_tokens,
+       (mr.request_observation_json #>> '{request,reasoningObserved}')::boolean as reasoning_observed, mr.subagent_kind, mr.compact,
             mr.started_at
      from model_request_observations mr
      cross join lateral (
@@ -204,7 +207,10 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
             mr.upstream_api_overhead_ms, mr.upstream_engine_ms, mr.latency_ms, mr.admission_decision_ms,
             mr.account_selection_wait_ms, mr.capacity_used_slots, mr.capacity_total_slots,
             host(mr.client_ip) as client_ip,
-            mr.user_agent, mr.reasoning_effort, mr.reasoning_preset, mr.request_kind,
+            mr.user_agent, mr.reasoning_effort, mr.reasoning_preset,
+       mr.request_observation_json #>> '{request,thinkingMode}' as thinking_mode,
+       (mr.request_observation_json #>> '{request,thinkingBudgetTokens}')::bigint as thinking_budget_tokens,
+       (mr.request_observation_json #>> '{request,reasoningObserved}')::boolean as reasoning_observed, mr.request_kind,
             mr.subagent_kind, mr.compact, mr.image_generation_requested,
             mr.image_generation_succeeded, mr.started_at, mr.effective_recovery_lease_expires_at as deadline_at, mr.completed_at
      from model_request_observations mr";

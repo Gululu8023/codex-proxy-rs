@@ -41,6 +41,12 @@ struct RequestContext {
     #[serde(skip_serializing_if = "Option::is_none")]
     reasoning_preset: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_mode: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    thinking_budget_tokens: Option<u64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    reasoning_observed: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     subagent_kind: Option<String>,
     compact: bool,
 }
@@ -157,7 +163,11 @@ impl RequestObservation {
     pub(super) fn initial(
         request: &NewModelRequest,
     ) -> StoreResult<sqlx::types::Json<Box<RawValue>>> {
-        validate_integers([Some(request.config_revision), request.admission_decision_ms])?;
+        validate_integers([
+            Some(request.config_revision),
+            request.admission_decision_ms,
+            request.thinking_budget_tokens,
+        ])?;
         let observation = Self {
             request: Some(RequestContext {
                 config_revision: request.config_revision,
@@ -168,6 +178,9 @@ impl RequestObservation {
                 user_agent: request.user_agent.clone(),
                 reasoning_effort: request.reasoning_effort.clone(),
                 reasoning_preset: request.reasoning_preset.clone(),
+                thinking_mode: request.thinking_mode.clone(),
+                thinking_budget_tokens: request.thinking_budget_tokens,
+                reasoning_observed: request.reasoning_observed,
                 subagent_kind: request.subagent_kind.clone(),
                 compact: request.compact,
             }),

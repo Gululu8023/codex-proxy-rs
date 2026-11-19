@@ -139,6 +139,9 @@ function previewUsageRecord(options: PreviewUsageRecordOptions): UsageListRecord
     upstreamTransport: options.upstreamTransport,
     reasoningEffort: options.reasoningEffort,
     reasoningPreset: options.reasoningEffort,
+    thinkingMode: null,
+    thinkingBudgetTokens: null,
+    reasoningObserved: null,
     compact: options.compact ?? false,
     subagentKind: null,
     tokenDetails: {

@@ -28,6 +28,17 @@ impl UsageCapture {
                 self.fields.insert(name.into(), json!(number));
             }
         }
+        // 只使用上游明确给出的思考计数；它已包含在 output_tokens 中，不能再次累加费用。
+        if let Some(thinking) = value
+            .get("output_tokens_details")
+            .and_then(|details| details.get("thinking_tokens"))
+            .and_then(Value::as_u64)
+        {
+            self.fields.insert(
+                "output_tokens_details".into(),
+                json!({"thinking_tokens": thinking}),
+            );
+        }
         if value
             .get("server_tool_use")
             .and_then(Value::as_object)
@@ -85,6 +96,12 @@ impl UsageCapture {
                 .zip(output)
                 .and_then(|(input, output)| input.checked_add(output)),
             output_tokens: output,
+            reasoning_output_tokens: self
+                .fields
+                .get("output_tokens_details")
+                .and_then(|details| details.get("thinking_tokens"))
+                .and_then(Value::as_u64)
+                .filter(|thinking| output.is_some_and(|total| *thinking <= total)),
             cached_input_tokens: read,
             cache_write_input_tokens: write,
             ..Usage::new()

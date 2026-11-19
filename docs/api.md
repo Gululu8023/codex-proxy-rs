@@ -2743,6 +2743,15 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 
 管理端请求列表与详情保留 `requestedModel`（客户端请求）与 `upstreamModel`（网关发送）
 
+Claude Messages 的推理配置按请求原文分别记录：`reasoningEffort` 为显式的 `output_config.effort`，
+`thinkingMode` 为 `thinking.type`，`thinkingBudgetTokens` 为显式 token 预算；
+不从模式、预算或模型名称推断强度，也不填入 Codex 的 `reasoningPreset`。
+`reasoningObserved: true` 表示已采集该请求的推理配置，全部缺省时界面显示“未指定”；
+旧记录或未采集的请求保持 `null`，界面显示“—”。这些可选字段同时用于管理端和 Key 自助用量接口。
+count_tokens 只采集请求模型，不将计数请求记为推理配置。
+思考 Token 仅使用上游明确给出的 `usage.output_tokens_details.thinking_tokens`，缺失或大于输出总数时保持未知；
+该计数已包含在 `output_tokens` 中，不重复累加 Token 或费用。
+
 请求明细的 `clientApiKeyName` 搜索历史 Key 名称，`accountSearch` 搜索请求发生时的账号名称或邮箱快照，同时适用于 Codex 和 Claude。
 输入去除首尾空白后按字面量包含匹配，区分大小写；`%`、`_` 和 `\` 按普通字符处理。缺少邮箱的记录仍可按名称匹配，账号后来改名或删除不改变历史结果。
 明细、分页总数及其内部聚合计数使用相同条件；时间、平台、状态及授权范围仍同时生效。前端修改筛选会清空旧结果并回到第一页，顶部统计卡片仍只按时间和平台查询。
@@ -2812,7 +2821,7 @@ OpenAI 推理强度优先取 `input` 中最后一条 `type: "configuration_updat
 `firstTokenLatencyMs` 与它使用同一计时起点，首字边界由 Provider 协议定义。
 OpenAI Responses 在 HTTP SSE 收到首个非空且非 `[DONE]` 的 `data` 载荷、
 或 WebSocket 收到首个非空响应消息时记录首字，不要求实际输出内容；
-Anthropic 采用首个文本或工具参数输出。对应事件缺失时保留未知，不用其他事件补齐首字。
+Anthropic 采用首个非空文本、思考或工具参数增量。对应事件缺失时保留未知，不用其他事件补齐首字。
 请求级首字统一通过 `firstTokenLatencyMs` 返回，由前端格式化。
 `latencyDetails` 的首事件、首推理和首正文时间也使用请求级起点，首推理与首正文仍要求实际内容，
 连接、响应头等传输阶段耗时独立计量，不能直接相加作为总耗时

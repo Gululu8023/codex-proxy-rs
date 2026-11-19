@@ -295,6 +295,7 @@ pub(crate) enum ErrorScope {
     Account,
     Model,
     Request,
+    Service,
 }
 impl ErrorScope {
     pub fn code(self) -> &'static str {
@@ -302,6 +303,7 @@ impl ErrorScope {
             Self::Account => "account",
             Self::Model => "model",
             Self::Request => "request",
+            Self::Service => "service",
         }
     }
 }
@@ -312,7 +314,10 @@ pub(crate) fn error_scope(
     body: &[u8],
 ) -> ErrorScope {
     if status != 429 {
-        return if status == 401 || status >= 500 {
+        // 服务端过载或内部故障不是账号失效的证据，不能污染池内账号健康度。
+        return if status >= 500 {
+            ErrorScope::Service
+        } else if status == 401 {
             ErrorScope::Account
         } else {
             ErrorScope::Request

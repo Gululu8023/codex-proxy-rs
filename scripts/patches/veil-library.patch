@@ -116,7 +116,7 @@ index 2b8fb2c..d0d45e2 100644
              }
          }
 diff --git a/crates/veil-engine/src/walk.rs b/crates/veil-engine/src/walk.rs
-index bd6f2c5..8cdf1e1 100644
+index bd6f2c5..73fd050 100644
 --- a/crates/veil-engine/src/walk.rs
 +++ b/crates/veil-engine/src/walk.rs
 @@ -5,14 +5,24 @@ use crate::binary::should_skip_desensitize;
@@ -175,7 +175,7 @@ index bd6f2c5..8cdf1e1 100644
 +
 +/// 原生入口的普通文本属于客户端字面量，不应被当成可信的映射引用。
 +/// 与规则命中的重叠区间合并，避免字面量保护破坏跨区间的敏感文本匹配。
-+pub(crate) fn desensitize_literal_safe_string(
++pub fn desensitize_literal_safe_string(
 +    text: &str,
 +    rules: &RuleSet,
 +    store: &(impl MappingStore + ?Sized),
@@ -248,7 +248,7 @@ index bd6f2c5..8cdf1e1 100644
              }
          }
 diff --git a/crates/veil-store/src/sqlite.rs b/crates/veil-store/src/sqlite.rs
-index bd73ac5..c1108cd 100644
+index bd73ac5..b3a6394 100644
 --- a/crates/veil-store/src/sqlite.rs
 +++ b/crates/veil-store/src/sqlite.rs
 @@ -35,6 +35,7 @@ pub struct SqliteStore {
@@ -279,7 +279,7 @@ index bd73ac5..c1108cd 100644
          })
      }
  
-@@ -60,6 +69,18 @@ impl SqliteStore {
+@@ -60,6 +69,40 @@ impl SqliteStore {
          self
      }
  
@@ -295,10 +295,32 @@ index bd73ac5..c1108cd 100644
 +        self.lock()?.query_row("SELECT COUNT(*) FROM mappings", [], |row| row.get::<_, i64>(0).map(|count| count as u64)).map_err(db_err)
 +    }
 +
++    /// 缓存只能复用仍完整存在的映射；一次只读事务校验所有引用，不更新 TTL/LRU 时间。
++    /// 宿主必须保证这些映射不使用自动淘汰，且缓存与映射库代次绑定。
++    pub fn verify_placeholders(&self, creator: &Creator, placeholders: &[Placeholder]) -> Result<bool, StoreError> {
++        if placeholders.is_empty() { return Ok(true); }
++        let mut conn = self.lock()?;
++        let tx = conn.transaction().map_err(db_err)?;
++        {
++            let mut query = tx.prepare("SELECT creator_hex, type_prefix, plaintext_ct FROM mappings WHERE placeholder_id = ?1").map_err(db_err)?;
++            let owner = creator.hex();
++            for placeholder in placeholders {
++                let row: Option<(String, String, Vec<u8>)> = query.query_row([placeholder.id.to_string()], |row| {
++                    Ok((row.get(0)?, row.get(1)?, row.get(2)?))
++                }).optional().map_err(db_err)?;
++                let Some((creator_hex, prefix, ciphertext)) = row else { return Ok(false); };
++                if creator_hex != owner || prefix != placeholder.type_prefix { return Ok(false); }
++                decrypt(&self.keys.enc, &ciphertext).map_err(|_| StoreError::Unavailable)?;
++            }
++        }
++        tx.commit().map_err(db_err)?;
++        Ok(true)
++    }
++
      /// Delete rows whose last access is older than TTL, then evict LRU extras
      /// for any creator over the cap.
      pub fn purge(&self) -> Result<(), StoreError> {
-@@ -125,20 +146,32 @@ impl MappingStore for SqliteStore {
+@@ -125,20 +168,32 @@ impl MappingStore for SqliteStore {
      ) -> Result<Placeholder, StoreError> {
          let hmac = lookup_hmac(&self.keys.mac, creator, plaintext.as_bytes());
          let creator_hex = creator.hex();
@@ -335,7 +357,7 @@ index bd73ac5..c1108cd 100644
                  "INSERT INTO mappings (
                      placeholder_id, type_prefix, creator_hex,
                      plaintext_hmac, plaintext_ct, last_access_unix
-@@ -152,7 +185,10 @@ impl MappingStore for SqliteStore {
+@@ -152,7 +207,10 @@ impl MappingStore for SqliteStore {
                      now
                  ],
              ) {
@@ -522,7 +544,7 @@ diff --git a/crates/veil-engine/src/anthropic.rs b/crates/veil-engine/src/anthro
 new file mode 100644
 --- /dev/null
 +++ b/crates/veil-engine/src/anthropic.rs
-@@ -0,0 +1,127 @@
+@@ -0,0 +1,131 @@
 +//! Anthropic 原生 JSON 的协议边界；文本算法与映射存储继续复用引擎。
 +
 +use serde_json::Value;
@@ -530,7 +552,11 @@ new file mode 100644
 +    walk::{desensitize_literal_safe_string, restore_string, WalkError}};
 +
 +pub fn desensitize_json(value: &Value, rules: &RuleSet, store: &(impl MappingStore + ?Sized), creator: &Creator) -> Result<Value, WalkError> {
-+    visit(value, Location::Root, &mut |text| desensitize_literal_safe_string(text, rules, store, creator))
++    transform_text(value, &mut |text| desensitize_literal_safe_string(text, rules, store, creator))
++}
++/// 在协议判定之后处理普通文本；缓存宿主不能绕过签名、思考块和身份字段的边界。
++pub fn transform_text(value: &Value, transform: &mut impl FnMut(&str) -> Result<String, WalkError>) -> Result<Value, WalkError> {
++    visit(value, Location::Root, transform)
 +}
 +pub fn restore_json(value: &Value, store: &(impl MappingStore + ?Sized), creator: &Creator) -> Result<Value, WalkError> {
 +    visit(value, Location::Root, &mut |text| restore_string(text, store, creator, true))

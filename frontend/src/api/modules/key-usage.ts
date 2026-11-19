@@ -65,6 +65,9 @@ export interface KeyUsageRecord {
   model: string | null
   route: string | null
   reasoningEffort: string | null
+  thinkingMode: string | null
+  thinkingBudgetTokens: number | null
+  reasoningObserved: boolean | null
   clientTransport: string | null
   upstreamTransport: string | null
   tokenDetails: UsageTokenDetails | null

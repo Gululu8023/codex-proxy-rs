@@ -82,6 +82,12 @@
       "noLoad": "No load data in this range"
     },
     "reasoning": {
+      "unspecified": "Not specified",
+      "adaptive": "Adaptive",
+      "enabled": "Enabled",
+      "disabled": "Disabled",
+      "betweenTools": "Between tools",
+      "budget": "Budget {tokens}",
       "subagentRequest": "Subagent request",
       "reviewSubagentRequest": "Review subagent request"
     },

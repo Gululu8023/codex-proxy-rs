@@ -116,6 +116,9 @@ export interface UsageListRecord extends UsageErrorFacts {
   clientTransport: string
   upstreamTransport: string | null
   reasoningEffort: string | null
+  thinkingMode: string | null
+  thinkingBudgetTokens: number | null
+  reasoningObserved: boolean | null
   reasoningPreset: string | null
   subagentKind: string | null
   compact: boolean
@@ -184,6 +187,9 @@ export interface UsageRecord extends UsageErrorFacts {
   clientIp: string | null
   userAgent: string | null
   reasoningEffort: string | null
+  thinkingMode: string | null
+  thinkingBudgetTokens: number | null
+  reasoningObserved: boolean | null
   reasoningPreset: string | null
   compact: boolean | null
   requestKind: string | null

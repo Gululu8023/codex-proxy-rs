@@ -17,6 +17,9 @@ use veil_engine::{creator::Creator, rules::RuleSet, walk::WalkError};
 use veil_store::SqliteStore;
 use zeroize::Zeroizing;
 
+mod redaction;
+pub use redaction::{RedactionResult, RedactionStatistics};
+
 pub const REVISION: &str = "82f9290022144c82609aaad149d81693c4a563ec+cprs-library-3";
 
 #[derive(Clone, Debug, Deserialize)]
@@ -122,6 +125,7 @@ pub enum ControlPurpose {
 
 struct State {
     store: SqliteStore,
+    redaction_cache: Mutex<redaction::Cache>,
     checkpoint_cipher: veil_store::CheckpointCipher,
     rules: RuleSet,
     rules_revision: String,
@@ -444,6 +448,7 @@ fn initialize(config: Config) -> Result<State, Error> {
     // 不启动 purge：自动 TTL/LRU 淘汰会使仍有效的工具调用和会话历史无法恢复。
     Ok(State {
         store,
+        redaction_cache: Mutex::default(),
         checkpoint_cipher: veil_store::CheckpointCipher::new(&key),
         rules,
         rules_revision,
@@ -672,19 +677,36 @@ pub struct Session {
 }
 
 impl Session {
-    pub async fn redact(&self, value: Value) -> Result<Value, Error> {
-        self.transform(value, false).await
-    }
-    pub async fn restore(&self, value: Value) -> Result<Value, Error> {
-        self.transform(value, true).await
+    /// 在发送上游前预留整个请求的隐私处理容量；后续阶段不能再次申请同一个槽位。
+    pub fn reserve(self) -> Result<ReservedSession, Error> {
+        let slot = self.acquire_slot()?;
+        Ok(ReservedSession {
+            session: self,
+            slot,
+        })
     }
 
-    async fn transform(&self, value: Value, restore: bool) -> Result<Value, Error> {
-        let slot = self
-            .slots
+    fn acquire_slot(&self) -> Result<Arc<tokio::sync::OwnedSemaphorePermit>, Error> {
+        self.slots
             .clone()
             .try_acquire_owned()
-            .map_err(|_| Error::Busy)?;
+            .map(Arc::new)
+            .map_err(|_| Error::Busy)
+    }
+
+    pub async fn redact(&self, value: Value) -> Result<Value, Error> {
+        self.transform(value, false, self.acquire_slot()?).await
+    }
+    pub async fn restore(&self, value: Value) -> Result<Value, Error> {
+        self.transform(value, true, self.acquire_slot()?).await
+    }
+
+    async fn transform(
+        &self,
+        value: Value,
+        restore: bool,
+        slot: Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Value, Error> {
         let state = self.state.clone();
         let creator = self.creator;
         let errors = self.last_error.clone();
@@ -710,11 +732,10 @@ impl Session {
     }
 
     pub fn stream(&self) -> Result<Stream, Error> {
-        let slot = self
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| Error::Busy)?;
+        Ok(self.start_stream(self.acquire_slot()?))
+    }
+
+    fn start_stream(&self, slot: Arc<tokio::sync::OwnedSemaphorePermit>) -> Stream {
         let (sender, mut receiver) = mpsc::channel::<StreamJob>(1);
         let state = self.state.clone();
         let creator = self.creator;
@@ -739,7 +760,49 @@ impl Session {
                 }
             }
         });
-        Ok(Stream { sender })
+        Stream { sender }
+    }
+}
+
+/// 一次请求共用一份许可，不能 Clone；阻塞任务持有共享许可直到真实退出。
+pub struct ReservedSession {
+    session: Session,
+    slot: Arc<tokio::sync::OwnedSemaphorePermit>,
+}
+
+impl ReservedSession {
+    pub async fn redact(&self, value: Value) -> Result<Value, Error> {
+        self.redact_observed(value).await.map(|result| result.value)
+    }
+
+    pub async fn redact_observed(&self, value: Value) -> Result<RedactionResult, Error> {
+        let slot = self.slot.clone();
+        let state = self.session.state.clone();
+        let creator = self.session.creator;
+        let errors = self.session.last_error.clone();
+        let metrics = self.session.metrics.clone();
+        let queued = Instant::now();
+        tokio::task::spawn_blocking(move || {
+            let _slot = slot;
+            let started = Instant::now();
+            let worker_wait_us = u64::try_from(queued.elapsed().as_micros()).unwrap_or(u64::MAX);
+            let result = redaction::redact(&state, creator, &value).map(|mut result| {
+                result.statistics.worker_wait_us = worker_wait_us;
+                result
+            });
+            metrics.observe(false, result.is_err(), started);
+            remember(result, &errors)
+        })
+        .await
+        .map_err(|_| Error::WorkerUnavailable)?
+    }
+
+    pub async fn restore(&self, value: Value) -> Result<Value, Error> {
+        self.session.transform(value, true, self.slot.clone()).await
+    }
+
+    pub fn stream(&self) -> Stream {
+        self.session.start_stream(self.slot.clone())
     }
 }
 

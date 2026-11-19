@@ -574,6 +574,11 @@ pub struct ProviderRequestObservation {
     /// Provider 从客户端请求与续接配置中解析的推理强度
     pub reasoning_effort: Option<String>,
     pub reasoning_preset: Option<String>,
+    /// 思考模式与预算是独立请求事实，不用于推断 reasoning_effort 或 reasoning_preset。
+    pub thinking_mode: Option<String>,
+    pub thinking_budget_tokens: Option<u64>,
+    /// 已采集配置为 Some(true)，即使全部缺省；None 保留历史或其他协议未采集的语义。
+    pub reasoning_observed: Option<bool>,
     pub request_kind: Option<String>,
     pub subagent_kind: Option<String>,
     pub compact: bool,

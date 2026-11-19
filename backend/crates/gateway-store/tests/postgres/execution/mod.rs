@@ -32,6 +32,103 @@ use sqlx::PgPool;
 
 use super::{TestDatabase, admin_observability_store, observability_repository};
 
+#[tokio::test]
+async fn claude_observation_upgrade_preserves_old_records_and_accepts_new_fields() {
+    let Some(database) = TestDatabase::create("claude_observation_upgrade").await else {
+        return;
+    };
+    let baseline = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0001_cprs_initial.sql"
+    ));
+    let start = baseline
+        .find("CREATE FUNCTION model_request_observation_valid(document jsonb)")
+        .unwrap();
+    let end = start + baseline[start..].find("$_$;").unwrap() + "$_$;".len();
+    // 本次迁移只扩展校验函数，先恢复旧定义，验证真实的旧记录和升级边界。
+    let previous =
+        baseline[start..end].replacen("CREATE FUNCTION", "CREATE OR REPLACE FUNCTION", 1);
+    sqlx::raw_sql(sqlx::AssertSqlSafe(previous))
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    let store = PgExecutionStore::new(database.pool.clone());
+    let old = accepted_request("req_old_claude_observation");
+    store.create_model_request(old.clone()).await.unwrap();
+    let original: Value =
+        sqlx::query_scalar("select request_observation_json from model_requests where id=$1")
+            .bind(old.id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    let mut extended = original.clone();
+    extended["request"]["thinkingMode"] = json!("enabled");
+    extended["request"]["thinkingBudgetTokens"] = json!(32000);
+    extended["request"]["reasoningObserved"] = json!(true);
+    let valid: bool = sqlx::query_scalar("select model_request_observation_valid($1)")
+        .bind(&extended)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(!valid);
+    sqlx::raw_sql(include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../migrations/0002_claude_request_observation.sql"
+    )))
+    .execute(&database.pool)
+    .await
+    .unwrap();
+    let unchanged: Value =
+        sqlx::query_scalar("select request_observation_json from model_requests where id=$1")
+            .bind(old.id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(unchanged, original);
+    let mut new = accepted_request("req_new_claude_observation");
+    new.protocol = "anthropic".into();
+    new.requested_model = Some(PublicModelId::new("claude-sonnet-4-5").unwrap());
+    new.reasoning_effort = Some("high".into());
+    new.thinking_mode = Some("enabled".into());
+    new.thinking_budget_tokens = Some(32000);
+    new.reasoning_observed = Some(true);
+    store.create_model_request(new.clone()).await.unwrap();
+    let stored: Value =
+        sqlx::query_scalar("select request_observation_json from model_requests where id=$1")
+            .bind(new.id.as_str())
+            .fetch_one(&database.pool)
+            .await
+            .unwrap();
+    assert_eq!(stored["request"]["reasoningEffort"], "high");
+    assert_eq!(stored["request"]["thinkingMode"], "enabled");
+    assert_eq!(stored["request"]["thinkingBudgetTokens"], 32000);
+    assert_eq!(stored["request"]["reasoningObserved"], true);
+    let repository = observability_repository(&database.pool);
+    let detail = repository
+        .usage_record_detail(new.id.as_str())
+        .await
+        .unwrap();
+    assert_eq!(detail.request.reasoning_effort.as_deref(), Some("high"));
+    assert_eq!(detail.request.thinking_mode.as_deref(), Some("enabled"));
+    assert_eq!(detail.request.thinking_budget_tokens, Some(32000));
+    assert_eq!(detail.request.reasoning_observed, Some(true));
+    let historical = repository
+        .usage_record_detail(old.id.as_str())
+        .await
+        .unwrap();
+    assert!(historical.request.thinking_mode.is_none());
+    assert!(historical.request.thinking_budget_tokens.is_none());
+    assert!(historical.request.reasoning_observed.is_none());
+    extended["request"]["thinkingBudgetTokens"] = json!(-1);
+    let invalid_budget: bool = sqlx::query_scalar("select model_request_observation_valid($1)")
+        .bind(&extended)
+        .fetch_one(&database.pool)
+        .await
+        .unwrap();
+    assert!(!invalid_budget);
+    database.close().await;
+}
+
 #[test]
 fn model_request_rejects_empty_historical_client_key_ref() {
     let started_at = Utc::now();
@@ -53,6 +150,9 @@ fn model_request_rejects_empty_historical_client_key_ref() {
         user_agent: None,
         reasoning_effort: None,
         reasoning_preset: None,
+        thinking_mode: None,
+        thinking_budget_tokens: None,
+        reasoning_observed: None,
         request_kind: None,
         subagent_kind: None,
         compact: false,
@@ -157,6 +257,9 @@ async fn merged_model_less_first_attempt_should_match_sequential_semantics() {
         user_agent: None,
         reasoning_effort: None,
         reasoning_preset: None,
+        thinking_mode: None,
+        thinking_budget_tokens: None,
+        reasoning_observed: None,
         request_kind: None,
         subagent_kind: None,
         compact: false,
@@ -275,6 +378,9 @@ async fn model_request_persists_group_routing_snapshot_without_live_group_foreig
             user_agent: None,
             reasoning_effort: None,
             reasoning_preset: None,
+            thinking_mode: None,
+            thinking_budget_tokens: None,
+            reasoning_observed: None,
             request_kind: None,
             subagent_kind: None,
             compact: false,
@@ -1537,6 +1643,9 @@ pub(super) fn accepted_request(id: &str) -> CoreNewModelRequest {
         user_agent: None,
         reasoning_effort: None,
         reasoning_preset: None,
+        thinking_mode: None,
+        thinking_budget_tokens: None,
+        reasoning_observed: None,
         request_kind: None,
         subagent_kind: None,
         compact: false,

@@ -985,6 +985,7 @@ fn new_request_bytes(request: &NewModelRequest) -> usize {
         request.user_agent.as_deref(),
         request.reasoning_effort.as_deref(),
         request.reasoning_preset.as_deref(),
+        request.thinking_mode.as_deref(),
         request.request_kind.as_deref(),
         request.subagent_kind.as_deref(),
     ]))

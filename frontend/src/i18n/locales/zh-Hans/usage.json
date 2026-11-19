@@ -82,6 +82,12 @@
       "noLoad": "当前范围暂无负载数据"
     },
     "reasoning": {
+      "unspecified": "未指定",
+      "adaptive": "自适应",
+      "enabled": "已启用",
+      "disabled": "已关闭",
+      "betweenTools": "工具间思考",
+      "budget": "预算 {tokens}",
       "subagentRequest": "子代理请求",
       "reviewSubagentRequest": "Review 子代理请求"
     },
