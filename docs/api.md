@@ -1,8 +1,17 @@
 # Codex Proxy RS 接口
 
-本文描述当前源码的公开 HTTP 合同，路由以 `backend/crates/gateway-api/src` 中的 router 为准
+本文是 CPRS 的 HTTP 接口参考，路由以 `backend/crates/gateway-api/src` 中的 router 为准。按读者分两部分：
 
-配置客户端见[部署文档](../deploy/README.md#客户端配置)，内部职责见[系统架构](architecture.md)，部署实例的功能以实际运行版本和 revision 为准
+- **客户端与第三方集成**：用管理端创建的 Client Key 调用 `/v1/*`（Responses、Chat Completions、Images、模型列表、额度查询）、`/claude/v1/*`（Anthropic Messages）和 CPR 互联协议。看 [§1 数据面鉴权](#openai-数据面客户端接口)、[§2 健康检查](#2-健康检查)和 [§3 数据面接口](#3-openai-数据面与模型目录)。只想把 Codex 或 Claude Code 接上网关，直接看[部署文档：客户端配置](../deploy/README.md#客户端配置)即可
+- **管理端接口**（§4 起）：`/api/admin/*`、`/api/auth/*` 等，供管理端前端和自动化脚本使用，按字段逐条描述行为合同，适合修改代码时核对
+
+快速验证一个 Key 能用哪些模型：
+
+```bash
+curl https://gateway.example.com/v1/models -H 'Authorization: Bearer <client-api-key>'
+```
+
+内部职责见[系统架构](architecture.md)；部署实例的实际功能以其运行版本为准
 
 | 查找内容 | 入口 |
 | --- | --- |
@@ -180,7 +189,10 @@ Dashboard 的 `lastUsedRelative` 和账号额度的 `refreshedAtRelative` 由后
 `period=today|7d|30d` 表达自然日范围，`asOf` 是 Unix 毫秒查询锚点，省略时取服务端当前时刻。
 近 7 天包含锚点所在日期及前 6 个自然日，近 30 天同理包含前 29 日；结束点为锚点。
 同一组汇总、趋势与列表共享 `asOf`，分页保持锚点，刷新再更新。显式 `startTime` / `endTime`
-使用带偏移的 RFC3339，不能与 `period` 或 `asOf` 混用；对应接口仍执行范围上限校验。
+支持带偏移的 RFC3339 时间点或 `YYYY-MM-DD` 日期，不能与 `period` 或 `asOf` 混用；
+日期由服务端按 `host.timezone` 换算日界，范围始终为左闭右开 `[startTime, endTime)`，对应接口仍执行范围上限校验。
+管理端日期选择器按版本接口返回的 `timezone` 显示业务日期；历史结束日传次日日期，当天结束点截到查询时刻，
+不依赖浏览器或容器系统时区，也不以固定 24 小时推算夏令时日界。
 自然日刚开始时允许空的今日快照，显式起止范围仍要求开始早于结束
 
 图表的 `label`、日期提示和空桶由后端提供；日粒度按本地日界，小时及 15 分钟桶以 UTC 时间点定位。
@@ -580,7 +592,7 @@ API Key 上游返回完整 Codex `models` 目录时沿用该合同；仅返回�
 “与某个官方账号的整个目录完全一致”，也不会固定后续推理账号。
 读取失败返回 `503 model_catalog_unavailable`，不以简化模板或空成功响应覆盖客户端缓存。
 成功获取的 API Key 目录被账号模型政策全部过滤时返回空列表，区别于读取失败。
-目录保留完整的原生 Codex 模型对象；OpenAI API Key 普通模型列表和 xAI 目录使用通用画像。
+目录保留完整的原生 Codex 模型对象；OpenAI API Key 普通模型列表使用通用画像。
 
 原生目录可能返回缓存结果，成功缓存有效期为 5 分钟。每次查询都检查账号资格和 Client Key 范围。
 成功目录响应带 `Cache-Control: private, no-store`，不借用上游 ETag 标识经过选择/别名/聚合后的正文
@@ -1301,9 +1313,9 @@ Pro 使用 `all` 时也能参与 luna 调度。套餐名称不自动生成或修
 
 原生 Responses 默认排除有效目录未列出目标模型的账号。OpenAI OAuth 或 API Key 账号的白名单精确包含映射后的上游 ID 时，
 允许通过该账号请求目录外模型，由上游确认是否可用。此设置只对配置它的账号生效，已有白名单同样适用。
-账号禁用、Key 分组、认证类型、黑名单和模型冷却仍参与选号。xAI 账号使用有效套餐目录与账号模型政策的交集。
-OAuth 和 xAI 按已知套餐匹配目录，API Key 按账号与凭据版本隔离目录，不借用其他账号的模型集合。
-OpenAI 使用最近 30 分钟内同步的目录，xAI 使用未过期的套餐目录缓存；未知套餐或无有效目录时交由上游验证，仍执行 `modelAccess`
+账号禁用、Key 分组、认证类型、黑名单和模型冷却仍参与选号。
+OAuth 按已知套餐匹配目录，API Key 按账号与凭据版本隔离目录，不借用其他账号的模型集合。
+OpenAI 使用最近 30 分钟内同步的目录；未知套餐或无有效目录时交由上游验证，仍执行 `modelAccess`
 
 原生 OpenAI Responses 上游返回 `error.code=model_not_found`，且状态为 400／403／404 或流内错误未提供状态时，
 该账号与模型组合冷却 30 分钟；其他模型仍可使用该账号。仅消息提及模型不支持不触发冷却；
@@ -1538,7 +1550,7 @@ API Key 账号与 OAuth 共用现有 Responses、Images 和 standalone Search �
 互联账号按上游 Key 已提供的最长消费窗口统计本机 Token、费用和模型用量。
 日、周周期的 `usage.windowKind` 分别为 `daily`、`weekly`，其他周期为 `quota`。查询边界同账号额度窗口，为 `[resetAt - windowSeconds, resetAt)`；
 未开启或缺少重置边界时显示无数据，不回退到历史累计，也不采用池内其他账号的周期。
-OAuth 账号优先按实际周/月额度窗口统计。xAI 缺少可展示的上游额度时，使用过去 24 小时的本地请求统计，
+OAuth 账号优先按实际周/月额度窗口统计。账号缺少可展示的上游额度窗口时，使用过去 24 小时的本地请求统计，
 `usage.windowKind` 为 `daily`，请求图和用量统计共用该滚动范围。该统计可在上游额度快照缺失时展示
 
 批量导入 AT / RT 使用 `accounts` JSON 数组，最多 200 项，不接受纯文本 token 列表。例如：
@@ -1693,7 +1705,7 @@ Anthropic 账号的 `quota.providerData` 返回 `state`、`source`、`scope`、`
 
 主动查询的动态窗口与账号额度访问事实保存在既有 Provider quota 存储中，提交受 credential revision 和观测时间约束。账号级窗口的明确耗尽参与调度，模型专属窗口不扩大为整个账号耗尽；额外付费用量已启用或状态未知时，不仅凭订阅窗口触顶断定整个账号耗尽。后台每分钟检查是否需要复核，查询间隔至少五分钟，已知 reset 未到时继续保留耗尽；时间到期本身不解除限制，查询失败与令牌刷新也不解除旧额度事实
 
-响应头只保存有界的 `anthropic-ratelimit-*` 原始事实及其时间，不反推订阅余额；API 等价估算费用与订阅额度分别展示。Claude 未提供周/月 Token 预测
+响应头只保存有界的 `anthropic-ratelimit-*` 原始事实及其时间，不反推订阅余额；API 等价估算费用与订阅额度分别展示。OAuth 账号的周/月预测使用通用 `5h`、`7d` 窗口的响应头观测，见[周/月额度预测](#周月额度预测)
 
 ### 周/月额度预测
 
@@ -1738,17 +1750,18 @@ OAuth 账号的额度、个人资料、订阅与重置卡请求先使用 `openai
 
 ### 账号个人信息
 
-`GET /api/admin/accounts/personal-info?accountId=...` 需要管理员会话，提供 Codex OAuth 账号的个人信息。后端并发读取资料统计与订阅，
+`GET /api/admin/accounts/personal-info?accountId=...` 需要管理员会话，提供 Codex、Claude OAuth 账号的个人信息。后端并发读取资料统计与订阅，
 一次返回；每次请求均重新查询，不刷新 credential，不读取本地 usage/billing 记录，也不缓存或估算统计结果。
-查询沿用上述 OpenAI 404 路由回退
+OpenAI 查询沿用上述 404 路由回退；Claude 只读取官方订阅元数据和已保存的基础身份，不接入官方个人统计。
 
 响应 `data` 包含：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
+| `basicProfile` | object 或 null | 支持基础资料的账号返回已保存的名称、邮箱、用户 ID、账号或组织 ID 和套餐 |
 | `profile` | object 或 null | 官方个人资料、累计统计与活动洞察；查询失败为 null |
 | `profileError` | string 或 null | 资料查询失败时的安全错误提示；成功为 null |
-| `subscription` | object 或 null | 当前绑定账号的订阅周期；无可用周期或查询失败为 null |
+| `subscription` | object 或 null | 当前绑定账号的官方订阅信息；无可用信息或查询失败为 null |
 
 两部分的查询结果独立：资料失败时仍返回可用订阅，订阅失败时仍返回资料。账号不存在、查询参数不合法或
 无管理员会话时，仍返回标准错误；请求期间账号身份或 credential revision 改变时拒绝整份结果
@@ -1769,21 +1782,25 @@ OAuth 账号的额度、个人资料、订阅与重置卡请求先使用 `openai
 #### 订阅信息
 
 OpenAI 使用当前凭据、绑定的上游账号 ID 和账号出站代理访问 `/backend-api/subscriptions?account_id=...`，
-不枚举其他账号，不返回上游订阅 ID 或原始响应
+不枚举其他账号，不返回上游订阅 ID 或原始响应。Claude 使用现有 OAuth 访问 `https://api.anthropic.com/api/oauth/profile`，
+核对返回的用户和组织与当前账号绑定一致，读取真实响应中的 `subscription_created_at`、`subscription_status` 和 `billing_type`。
 
-`subscription` 为 `null`（未获得可用订阅周期），或包含以下字段：
+`subscription` 为 `null`（未获得可用订阅信息），或包含以下字段：
 
 | 字段 | 类型 | 含义 |
 | --- | --- | --- |
+| `createdAt` | RFC 3339 字符串或 null | 上游订阅开通时间，与本期开始时间不同 |
 | `startsAt` | RFC 3339 字符串或 null | 上游本期开始时间 |
-| `expiresAt` | RFC 3339 字符串 | 上游本期结束时间，不代表自动续费账号最终失效 |
+| `expiresAt` | RFC 3339 字符串或 null | 上游本期结束时间，不代表自动续费账号最终失效；未提供时为 null |
+| `status` | string 或 null | 上游订阅状态，例如 Claude 实测的 `active` |
+| `billingType` | string 或 null | 上游计费类型，例如 `stripe_subscription`；不代表计费周期 |
 | `willRenew` | boolean 或 null | 自动续费状态；未知不推断为 false |
 | `billingPeriod` | string 或 null | 上游计费周期标识 |
 | `billingCurrency` | string 或 null | 上游计费币种 |
 | `observedAt` | RFC 3339 字符串 | 本次查询时间 |
 
 订阅不写入额度快照或数据库，不参与账号状态或调度；OpenAI 查询含 404 回退共用最多 5 秒预算，响应最多 64 KiB。
-上游失败或未提供有效周期时返回未知，不据此标记免费、过期或禁用；请求期间账号身份或 credential
+上游失败或未提供字段时保持未知，不从 Token 到期时间或额度重置时间推算账期，也不据此标记免费、过期或禁用；请求期间账号身份或 credential
 revision 变化时丢弃结果
 
 ### 主动额度重置卡
@@ -2061,7 +2078,7 @@ HTTP 返回 `429`，`error.code` 为 `key_daily_budget_exceeded` 或 `key_weekly
 | [请求解压](#请求解压上限) | `responsesMaxDecompressedBodyBytes` |
 | [客户端门禁](#1-鉴权与公共约定) | `minCodexDesktopVersion`、`minCodexCliVersion`、`minClaudeCodeVersion` |
 | [历史保留](#历史保留) | `usageRetentionDays`、`opsEventRetentionDays`、`auditRetentionDays` |
-| [Prompt 审查](#prompt-审查) | 独立领域接口管理 `promptGuard`；`accountErrorProtection` 已退役，见[账号错误保护](#账号错误保护) |
+| [Prompt 审查](#prompt-审查) | 独立领域接口管理 `promptGuard` |
 | [账号预热](#账号预热) | `accountWarmupEnabled`、`accountWarmupCron`、`accountWarmupModel` |
 | [主动额度重置卡](#主动额度重置卡) | `resetCreditLeadMinutes`、`resetCreditMaxWeeklyRemainingPercent` |
 
@@ -2109,7 +2126,7 @@ Claude 与审查配置从通用设置更新中迁出，使用以下管理员接�
 | --- | --- |
 | `GET /api/admin/claude/settings` | 返回 `{configRevision, publicUrl}` |
 | `POST /api/admin/claude/settings` | 仅保存 `{configRevision, publicUrl}`；URL 为空或无认证、查询参数及 fragment 的 HTTPS 根地址 |
-| `GET /api/admin/claude/privacy` | 运行时、规则版本/包/类别、映射容量、库调用计数、受控错误和部署时区时间；`keyFingerprint` 为主密钥的域分离 SHA-256 指纹，用于与备份清单核对；不暴露规则模式、主密钥或映射内容 |
+| `GET /api/admin/claude/privacy` | 运行时、规则版本/包/类别、映射容量、库调用计数、受控错误和部署时区时间；`keyFingerprint` 为主密钥的域分离 SHA-256 指纹，用于与备份清单核对；`packs` 仅在内置规则包生效时返回，自定义规则会整体替换内置包；`rules` 为生效规则的只读视图（`source`、`allowlist`、`items`），正则规则返回 `pattern`，词典规则只返回 `wordCount`；不暴露词典原文、主密钥或映射内容 |
 | `GET /api/admin/claude/models?keyId=…` | 指定 Key 的有效原生模型集合；不存在 404、禁用 403、依赖不可用 503 |
 | `GET /api/admin/prompt-guard/settings` | `{configRevision, config, retentionDays}`，密钥只返回配置状态 |
 | `POST /api/admin/prompt-guard/settings/update` | `{configRevision, config}`，revision 冲突 409；密钥省略保留、空字符串清除 |
@@ -2360,6 +2377,18 @@ Anthropic 不接受 `flex`、`long_flex`、`ultrafast`、`long_ultrafast`、`ima
 `multiplierBps` 为 0～1000000 的整数，10000 表示 1 倍、0 表示本地估算为零，最大 100 倍。
 它作用于本地费用及对应明细，独立于服务档位；缺少计价依据的请求即使倍率为零仍然是费用未知
 
+Anthropic 请求费用仍是公开 API 等价估算，不代表订阅扣费或 Priority 容量合约账单。
+实际服务档位与速度分别来自响应 `usage.service_tier`、`usage.speed`；Priority 不等于 Fast，
+请求 `service_tier=auto` 也不代表实际档位。响应速度优先于请求速度；普通请求缺少速度时按标准价估算，
+请求 Fast 却没有响应速度、缺少对应价格档位、Batch 或包含未计价服务端工具时保持费用未知。
+内置 Fast 价覆盖 `claude-opus-5-5`、`claude-opus-5`、`claude-opus-4-8`，全上下文同价；
+五分钟与一小时缓存写入分别按当前模式输入单价的 1.25 倍、2 倍估算，人工缓存写入单价覆盖此规则。
+
+费用观测的 `pricing.serviceTier`、`pricing.speed` 保存实际响应枚举；`pricing.speedMultiplierBps`
+保存应用自定义倍率前当前模式与标准模式总费用的比值（基点），不表示 Priority 的合同倍率。
+`costBreakdown.standard` 是同一请求按标准模式计算的 USD 金额，与 `total` 应用相同的自定义倍率。
+列表及详情只展示请求当时保存的费用与价格；历史记录缺少新增字段时显示未知，不按最新目录重算。
+
 `provider` 为内置 `openai` 或 `anthropic`，对应价目由 `GET` 返回的 `defaults` 提供。
 `models` 为 1～500 个模型 ID，每个 ID 为
 1～128 字节且不含空白、控制字符。`change` 为以下形式之一：
@@ -2479,10 +2508,6 @@ Responses 的自动 Desktop Git 上下文与请求头使用同一画像快照：
 
 配置在请求开始时冻结，Provider 首次解析的版本用于该请求的全部重试与换号。
 WebSocket 精确续写沿用所属连接；安装身份配置与变更限制见 [Key 客户端身份](#key-客户端身份)
-
-### 账号错误保护
-
-此功能已移除：没有错误匹配规则、账号冻结或恢复探测。Prompt 内容判断、上游策略反馈和会话解锁统一进入 [Prompt 审查](#prompt-审查)；429、额度、认证和网络故障继续由 Provider 处理。
 
 ### Windows 客户端下载
 
@@ -2936,7 +2961,7 @@ Provider metadata 分别保留 `requestedServiceTier` 与 `upstreamServiceTier` 
 `billing.image` 返回 `inputAmountDisplay`、`cacheReadAmountDisplay`、`inputPriceDisplay` 和
 `cacheReadPriceDisplay`；存在该字段时，普通输入与缓存字段仅表示文本输入，输出字段表示图像输出
 
-Anthropic 请求的 `metadata.billingKind` 为 `api_equivalent_estimate`，`rawUsage` 保存原始计数与缓存 TTL 细分，
+Anthropic 请求的 `metadata.billingKind` 为 `api_equivalent_estimate`，`rawUsage` 保存原始计数、缓存 TTL 细分及已知服务档位、速度枚举，
 `pricing` 保存当次计价依据，`costBreakdown` 保存同精度费用项。输入总量包含普通输入及缓存读写；独立 total_tokens 未报告时保持未知。
 5 分钟／1 小时混合写入不投影为单一官方单价，附加工具费或未知速度价目无法确认时不生成完整总费用；订阅剩余额度另从真实窗口观测
 
@@ -2951,6 +2976,8 @@ Anthropic 请求的 `metadata.billingKind` 为 `api_equivalent_estimate`，`rawU
 | `GET` | `/api/admin/system/update/status` | 无 | 查询当前更新或回滚状态 |
 | `POST` | `/api/admin/system/rollback` | 无 | 回滚到保留的上一版本 |
 | `POST` | `/api/admin/system/restart` | 无 | 受理重启 |
+
+版本响应的 `timezone` 为部署配置 `host.timezone` 的 IANA 时区名，供管理端日历筛选使用。
 
 在线更新遵循[版本命名与升级规则](../deploy/README.md#版本命名与升级规则)。版本接口的
 `updateChannel` 由当前版本推导，取值为 `stable`、`alpha`、`beta`、`rc`、`exp`，无法识别时为 `unknown`。

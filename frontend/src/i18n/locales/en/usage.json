@@ -27,6 +27,8 @@
     },
     "billing": {
       "serviceLevel": "Service tier",
+      "speedMode": "Speed mode",
+      "speedMultiplier": "Speed multiplier",
       "totalCost": "Total cost",
       "standardFee": "Standard cost",
       "textInputCost": "Text input cost",
@@ -82,11 +84,8 @@
       "noLoad": "No load data in this range"
     },
     "reasoning": {
-      "unspecified": "Not specified",
       "adaptive": "Adaptive",
       "enabled": "Enabled",
-      "disabled": "Disabled",
-      "betweenTools": "Between tools",
       "budget": "Budget {tokens}",
       "subagentRequest": "Subagent request",
       "reviewSubagentRequest": "Review subagent request"

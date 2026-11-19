@@ -8,6 +8,7 @@ import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import BaseChart from '@/components/charts/BaseChart.vue'
 import { chartTooltipStyle } from '@/components/charts/tooltip'
+import { recordedBillingItems } from '@/components/usage/shared/billing'
 import { usageDisplayOutcome } from '@/components/usage/shared/errors'
 import {
   usageAccountText,
@@ -319,52 +320,12 @@ const claudeUsage = computed(() => props.record?.provider === 'anthropic'
   ? metadataObject(props.record.metadata.rawUsage)
   : {})
 const billingItems = computed(() => {
-  if (props.record?.provider === 'anthropic') {
-    const costs = metadataObject(props.record.metadata.costBreakdown)
-    const amount = (field: string) => typeof costs[field] === 'string'
-      ? `USD ${costs[field]}`
-      : '—'
+  const recorded = recordedBillingItems(billing.value, t)
+  if (recorded) {
     return [
-      {
-        label: t('usage.billing.basis'),
-        value: t('usage.billing.apiEquivalent'),
-      },
-      {
-        label: t('usage.billing.totalCost'),
-        value: amount('total'),
-        mono: true,
-      },
-      {
-        label: t('usage.request.input'),
-        value: amount('input'),
-        mono: true,
-      },
-      {
-        label: t('usage.metrics.output'),
-        value: amount('output'),
-        mono: true,
-      },
-      {
-        label: t('usage.request.cacheRead'),
-        value: amount('cacheRead'),
-        mono: true,
-      },
-      {
-        label: t('usage.request.cacheWrites'),
-        value: amount('cacheWrite'),
-        mono: true,
-      },
-      {
-        label: t('usage.billing.cacheWrite5m'),
-        value: amount('cacheWrite5m'),
-        mono: true,
-      },
-      {
-        label: t('usage.billing.cacheWrite1h'),
-        value: amount('cacheWrite1h'),
-        mono: true,
-      },
-    ]
+      ...recorded.summary,
+      ...recorded.amounts,
+    ].map(item => ({ ...item, mono: true }))
   }
   const value = billing.value
   if (!value) {

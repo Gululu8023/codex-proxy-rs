@@ -6,6 +6,7 @@ declare module 'vue-router' {
     role?: AuthSession['role']
     defaultEntry?: boolean
     guestOnly?: boolean
+    timezone?: string
   }
 }
 
@@ -93,6 +94,7 @@ export const routes: RouteRecordRaw[] = [
         path: 'usage',
         name: 'usage',
         component: () => import('@/views/usage/index.vue'),
+        props: route => ({ timezone: route.meta.timezone }),
       },
       {
         path: 'theme',

@@ -47,17 +47,16 @@ module ReleaseMetadata
         raise "Invalid platform #{key}" unless entry[key].is_a?(String) && !entry[key].strip.empty?
       end
       key = "#{entry['os']}-#{entry['arch']}"
+      unless entry['os'] == 'linux' && %w[amd64 arm64].include?(entry['arch']) && entry['docker'] == true
+        raise "Unsupported release platform: #{key}; expected Linux amd64/arm64 with Docker"
+      end
       raise "Duplicate release platform: #{key}" if seen[key]
       seen[key] = true
       raise "Unsupported archive: #{entry['archive']}" unless entry['archive'] == 'tar.gz'
-      if entry['docker'] == true
-        platform = entry['dockerPlatform']
-        raise "Missing Docker platform: #{key}" unless platform.is_a?(String) && !platform.strip.empty?
-        entry['dockerPlatform'] = platform.strip
-      end
+      raise "Invalid Docker platform: #{key}" unless entry['dockerPlatform'] == "linux/#{entry['arch']}"
       entry['artifact'] = "#{APP_NAME}-#{key}"
     end
-    raise 'At least one Docker platform is required' unless entries.any? { |entry| entry['docker'] == true }
+    raise 'Both Linux amd64 and arm64 are required' unless seen.keys.sort == %w[linux-amd64 linux-arm64]
     entries
   end
 
@@ -69,8 +68,9 @@ module ReleaseMetadata
     value = version(YAML.load_file('release/version.yaml').fetch('version'))
     raise "Release tag #{tag} does not match v#{value}" unless tag == "v#{value}"
     validate_notes(value)
+    # 手动入口和 tag 触发都只接受 main 已包含的提交；重试可以使用旧版本的精确提交。
+    git('merge-base', '--is-ancestor', 'HEAD', 'refs/remotes/origin/main')
     entries = platforms
-    docker, native = entries.partition { |entry| entry['docker'] == true }
     previous = git('tag', '--list', 'v*', '--merged', 'HEAD').lines.map(&:strip).filter_map do |candidate|
       next unless candidate.delete_prefix('v').match?(SEMVER)
       key = sort_key(candidate)
@@ -83,10 +83,8 @@ module ReleaseMetadata
       'build_time' => Time.now.utc.iso8601,
       'git_sha' => git('rev-parse', 'HEAD'),
       'platform_matrix' => JSON.generate('include' => entries),
-      'docker_matrix' => JSON.generate('include' => docker),
-      'non_docker_matrix' => JSON.generate('include' => native),
-      'windows_matrix' => JSON.generate('include' => entries.select { |entry| entry['os'] == 'windows' }),
-      'docker_platforms' => docker.map { |entry| entry['dockerPlatform'] }.join(','),
+      'docker_matrix' => JSON.generate('include' => entries),
+      'docker_platforms' => entries.map { |entry| entry['dockerPlatform'] }.join(','),
       'previous_tag' => previous,
       'prerelease' => prerelease?(value),
       'build_type' => value.split('+', 2).first.include?('-exp.') ? 'experimental' : 'release'

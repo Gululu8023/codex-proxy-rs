@@ -27,6 +27,8 @@
     },
     "billing": {
       "serviceLevel": "服務檔位",
+      "speedMode": "速度模式",
+      "speedMultiplier": "速度倍率",
       "totalCost": "總費用",
       "standardFee": "標準費用",
       "textInputCost": "文本輸入費用",
@@ -82,11 +84,8 @@
       "noLoad": "當前範圍暫無負載資料"
     },
     "reasoning": {
-      "unspecified": "未指定",
       "adaptive": "自適應",
       "enabled": "已啟用",
-      "disabled": "已關閉",
-      "betweenTools": "工具間思考",
       "budget": "預算 {tokens}",
       "subagentRequest": "子代理請求",
       "reviewSubagentRequest": "Review 子代理請求"

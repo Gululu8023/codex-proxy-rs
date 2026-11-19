@@ -95,6 +95,7 @@ impl AnalyticsSnapshot<'_> {
         &mut self,
         account: &str,
         range: ObservabilityRange,
+        observation_time_path: Option<&[String]>,
     ) -> StoreResult<QuotaForecastHistory> {
         let documents = sqlx::query(DOCUMENTS)
             .bind(account)
@@ -104,10 +105,26 @@ impl AnalyticsSnapshot<'_> {
             .fetch_all(&mut *self.tx)
             .await
             .map_err(|error| postgres_unavailable("sample forecast documents", error))?;
-        let mut cutoffs = documents
+        let mut timed_documents = Vec::with_capacity(documents.len());
+        for row in documents {
+            let document: serde_json::Value = get(&row, "document")?;
+            let Some(observed_at) = observation_time(
+                &document,
+                observation_time_path,
+                get(&row, "started_at")?,
+                get(&row, "completed_at")?,
+            )
+            .filter(|time| *time >= range.start && *time <= range.end) else {
+                continue;
+            };
+            timed_documents.push((row, observed_at));
+        }
+        // 并发请求的完成顺序不等于响应头到达顺序；用真实观测时间计算累计量。
+        timed_documents.sort_by_key(|(_, observed_at)| *observed_at);
+        let mut cutoffs = timed_documents
             .iter()
-            .map(|row| get(row, "completed_at"))
-            .collect::<StoreResult<Vec<DateTime<Utc>>>>()?;
+            .map(|(_, time)| *time)
+            .collect::<Vec<_>>();
         // 最后一个状态专门代表整个窗口，文档恰好完成于窗口末端时复用同一截止值
         if cutoffs.last() != Some(&range.end) {
             cutoffs.push(range.end);
@@ -196,13 +213,13 @@ impl AnalyticsSnapshot<'_> {
             cumulative.merge(state)?;
             usages.push(usage(&cumulative)?);
         }
-        let mut points = Vec::with_capacity(documents.len());
-        for (row, usage) in documents.into_iter().zip(&usages) {
+        let mut points = Vec::with_capacity(timed_documents.len());
+        for ((row, observed_at), usage) in timed_documents.into_iter().zip(&usages) {
             let document: sqlx::types::Json<serde_json::Map<String, serde_json::Value>> =
                 get(&row, "document")?;
             points.push(QuotaForecastHistoryPoint {
                 started_at: get(&row, "started_at")?,
-                completed_at: get(&row, "completed_at")?,
+                observed_at,
                 usage: usage.clone(),
                 provider_observation: ProviderDocument::new(OpaqueProviderData::new(document.0)),
             });
@@ -277,6 +294,28 @@ impl AnalyticsSnapshot<'_> {
             .map_err(|error| postgres_unavailable("read exact forecast boundaries", error))
     }
 }
+
+fn observation_time(
+    document: &serde_json::Value,
+    path: Option<&[String]>,
+    started_at: DateTime<Utc>,
+    completed_at: DateTime<Utc>,
+) -> Option<DateTime<Utc>> {
+    let Some(path) = path else {
+        return Some(completed_at);
+    };
+    let value = path
+        .iter()
+        .try_fold(document, |value, key| value.get(key))?;
+    let observed_at = DateTime::parse_from_rfc3339(value.as_str()?)
+        .ok()?
+        .with_timezone(&Utc);
+    // 缺失或越界的头观测不能回退到完成时间，否则会配入尚未发生的用量。
+    (started_at <= observed_at && observed_at <= completed_at).then_some(observed_at)
+}
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Clone, Copy)]
 enum FactSelection<'a> {

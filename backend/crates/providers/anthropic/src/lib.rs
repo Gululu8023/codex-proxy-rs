@@ -6,6 +6,7 @@ mod credential;
 mod profile;
 mod provider;
 mod quota;
+mod reset_credits;
 mod signing;
 mod thread;
 mod transport;

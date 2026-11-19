@@ -8,6 +8,7 @@ pub(super) async fn load_history(
     pool: &PgPool,
     budget: &super::super::ObservabilityQueryBudget,
     window: &AccountUsageWindowQuery,
+    observation_time_path: Option<&[String]>,
 ) -> AdminStoreResult<QuotaForecastHistory> {
     validate_admin_account_ids(std::slice::from_ref(&window.account_id))
         .map_err(|error| admin_store_error(ENTITY, error))?;
@@ -30,7 +31,9 @@ pub(super) async fn load_history(
                         &mut connection,
                     )
                     .await?;
-                let history = snapshot.forecast_history(&window.account_id, range).await?;
+                let history = snapshot
+                    .forecast_history(&window.account_id, range, observation_time_path)
+                    .await?;
                 snapshot.finish().await?;
                 Ok(history)
             },

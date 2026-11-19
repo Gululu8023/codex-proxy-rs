@@ -19,6 +19,7 @@ export interface SystemVersion {
   hasUpdate: boolean
   updateCached: boolean
   updateWarning: string | null
+  timezone: string
 }
 
 export interface SystemUpdateDetail {

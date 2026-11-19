@@ -2,6 +2,7 @@
 
 use std::time::{Duration, SystemTime};
 
+use chrono::{DateTime, Utc};
 use gateway_core::{
     account::{
         AccountErrorReason, AccountStateChange, CredentialCasOutcome, CredentialCasUpdate,
@@ -124,6 +125,9 @@ pub(crate) struct Profile {
     pub organization: String,
     pub email: Option<String>,
     pub plan: Option<String>,
+    pub subscription_created_at: Option<DateTime<Utc>>,
+    pub subscription_status: Option<String>,
+    pub billing_type: Option<String>,
 }
 
 impl Profile {
@@ -156,6 +160,19 @@ impl Profile {
                 }
                 _ => None,
             },
+            // 官方 OAuth profile 的开通时间不是本期账单起止时间。
+            subscription_created_at: value["organization"]["subscription_created_at"]
+                .as_str()
+                .and_then(|value| DateTime::parse_from_rfc3339(value).ok())
+                .map(|value| value.with_timezone(&Utc)),
+            subscription_status: value["organization"]["subscription_status"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
+            billing_type: value["organization"]["billing_type"]
+                .as_str()
+                .filter(|value| !value.is_empty())
+                .map(str::to_owned),
         })
     }
     pub fn id(&self) -> ProviderAccountId {

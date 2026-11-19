@@ -3,6 +3,7 @@ import { createRouter, createWebHistory, START_LOCATION } from 'vue-router'
 import { t } from '@/i18n'
 
 import { useAuthStore } from '@/stores/modules/auth'
+import { useSystemUpdateStore } from '@/stores/modules/system-update'
 import { routes } from './routes'
 
 export const router = createRouter({
@@ -55,4 +56,11 @@ router.beforeEach(async (to, from) => {
   // 两种身份各自进入独立页面，Key 不挂载会请求管理接口的布局。
   if (authStore.session.role !== requiredRole)
     return resolveRoleEntry(authStore.session.role)
+
+  if (to.name === 'usage') {
+    // 页面初始化前取得业务时区，避免首轮查询先按浏览器日期取数。
+    const systemStore = useSystemUpdateStore()
+    const version = systemStore.version ?? await systemStore.loadVersion()
+    to.meta.timezone = version.timezone
+  }
 })

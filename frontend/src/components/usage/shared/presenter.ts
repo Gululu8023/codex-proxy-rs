@@ -2,7 +2,7 @@ import type { UsageReasoningRecord } from './reasoning'
 import type { UsageListRecord, UsageRecordDetail, UsageTokenDetails } from '@/api'
 import { t } from '@/i18n'
 import { formatCompactNumber, formatDuration, formatInteger } from '@/utils/format'
-import { formatReasoning } from './reasoning'
+import { formatReasoning, formatThinking } from './reasoning'
 
 export type { UsageReasoningRecord } from './reasoning'
 
@@ -80,13 +80,14 @@ export function usageUserAgent(record: { userAgent?: string | null }) {
 }
 
 export function usageReasoningEffort(record: UsageReasoningRecord) {
-  return formatReasoning(record, {
-    unspecified: t('usage.reasoning.unspecified'),
+  return formatReasoning(record)
+}
+
+export function usageThinkingDescription(record: UsageReasoningRecord) {
+  return formatThinking(record, {
     modes: {
       adaptive: t('usage.reasoning.adaptive'),
       enabled: t('usage.reasoning.enabled'),
-      disabled: t('usage.reasoning.disabled'),
-      between_tools: t('usage.reasoning.betweenTools'),
     },
     budget: tokens => t('usage.reasoning.budget', {
       tokens: formatInteger(tokens),

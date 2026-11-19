@@ -35,7 +35,9 @@ const { now, pause, resume } = useNow({
 const options = computed(() => report.value?.forecasts.map(item => ({
   label: item.period === 'weekly'
     ? t('accounts.quotaForecast.weeklyQuota')
-    : t('accounts.quotaForecast.monthlyQuota'),
+    : item.extrapolated
+      ? t('accounts.quotaForecast.monthlyExtrapolated')
+      : t('accounts.quotaForecast.monthlyQuota'),
   value: item.period,
 })) ?? [
   {

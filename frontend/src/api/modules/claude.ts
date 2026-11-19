@@ -18,12 +18,31 @@ export interface VeilHealth {
   lastErrorAt: string | null
   observedAt: string
   automaticEviction: boolean
+  /** 仅内置规则包生效时返回；自定义规则会整体替换内置包 */
   packs: { secrets: boolean, region: boolean } | null
   categories: Record<string, number>
   redactionOperations: number
   restorationOperations: number
   failedOperations: number
   processingMs: number
+  /** 运行时未就绪时为 null */
+  rules: VeilRules | null
+}
+export interface VeilRules {
+  source: 'builtin' | 'custom'
+  allowlist: string[]
+  items: VeilRule[]
+}
+export interface VeilRule {
+  id: string
+  typePrefix: string
+  enabled: boolean
+  priority: number
+  matcher: 'regex' | 'dictionary' | 'ip'
+  /** 仅正则规则 */
+  pattern: string | null
+  /** 仅词典规则；不返回词条原文 */
+  wordCount: number | null
 }
 export type GuardAction = 'disabled' | 'allow' | 'warn' | 'block' | 'coverage_error' | 'unavailable' | 'cancelled'
 export interface GuardHit {

@@ -25,11 +25,14 @@ pub struct ProviderAccountCapabilities {
     pub quota_credits: bool,
     pub quota: bool,
     pub quota_refresh: bool,
+    pub basic_profile: bool,
+    pub quota_forecast: bool,
     pub profile: bool,
     pub subscription: bool,
     pub avatar: bool,
     pub reset_credits: bool,
     pub consume_reset_credit: bool,
+    pub reset_credit_automation: bool,
 }
 
 /// 导入时应用的账号设置；名称只覆盖单账号导入，其余设置统一应用

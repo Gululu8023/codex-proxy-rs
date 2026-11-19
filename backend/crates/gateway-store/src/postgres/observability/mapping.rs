@@ -757,5 +757,45 @@ fn billing_from_row(
         }
     };
     let snapshot: Option<serde_json::Value> = get(row, "billing_snapshot_json")?;
-    Ok(restore_billing_snapshot(billing, snapshot.as_ref()))
+    let billing = restore_billing_snapshot(billing, snapshot.as_ref());
+    let recorded: Option<serde_json::Value> = get(row, "recorded_billing_json")?;
+    Ok(restore_recorded_billing(billing, recorded))
 }
+
+fn restore_recorded_billing(
+    billing: Option<admin_observability::UsageBilling>,
+    recorded: Option<serde_json::Value>,
+) -> Option<admin_observability::UsageBilling> {
+    let Some(admin_observability::UsageBilling::Total { source, total }) = &billing else {
+        return billing;
+    };
+    // 原生分项来自请求时的快照，只有币种、总额及分项之和与账本一致才展示。
+    // 查询时不使用当前价目重算历史请求，也不传递与计费无关的 Provider 观测。
+    if source == "calculated"
+        && let Some(metadata) = recorded
+        && metadata["costBreakdown"]["currency"].as_str() == Some(total.currency.as_str())
+        && metadata["costBreakdown"]["total"]
+            .as_str()
+            .and_then(|value| value.parse::<DecimalAmount>().ok())
+            .as_ref()
+            == Some(&total.amount)
+        && ["input", "output", "cacheRead", "cacheWrite"]
+            .into_iter()
+            .try_fold(
+                "0".parse::<DecimalAmount>().expect("zero amount"),
+                |sum, key| sum.checked_add(&metadata["costBreakdown"][key].as_str()?.parse().ok()?),
+            )
+            .as_ref()
+            == Some(&total.amount)
+    {
+        return Some(admin_observability::UsageBilling::Recorded {
+            source: source.clone(),
+            total: total.clone(),
+            metadata,
+        });
+    }
+    billing
+}
+
+#[cfg(test)]
+mod tests;

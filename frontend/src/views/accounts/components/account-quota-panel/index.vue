@@ -45,11 +45,17 @@ const quotaEntries = computed(() => groupedAccountQuotaWindows(
 const profileOpen = shallowRef(false)
 const forecastOpen = shallowRef(false)
 const hasPlanBadge = computed(() => Boolean(props.account.planType) || props.account.authenticationKind === 'api_key')
-const hasForecast = computed(() => props.account.provider === 'openai' && props.account.authenticationKind !== 'api_key')
-const quotaState = computed(() => props.account.provider === 'anthropic'
-  ? props.account.quota.providerData?.state
-  : undefined)
-const hasPersonalInfo = computed(() => props.account.capabilities.profile || props.account.capabilities.subscription)
+const hasForecast = computed(() => props.account.capabilities.quotaForecast)
+const quotaState = computed(() => {
+  const state = props.account.provider === 'anthropic'
+    ? props.account.quota.providerData?.state
+    : undefined
+  // 正常采样只是来源说明；未采样、过期和失败等状态仍需提示。
+  return state === 'sampled'
+    ? undefined
+    : state
+})
+const hasPersonalInfo = computed(() => props.account.capabilities.basicProfile || props.account.capabilities.profile || props.account.capabilities.subscription)
 const canRefresh = computed(() => props.account.capabilities.quotaRefresh || props.account.upstream != null)
 const hasActions = computed(() => hasPersonalInfo.value || hasForecast.value || canRefresh.value || props.account.capabilities.resetCredits)
 const lastRefreshed = computed(() => {
@@ -131,9 +137,6 @@ watch(hasPersonalInfo, (available) => {
       </div>
     </div>
 
-    <p v-if="account.quota.providerData?.responseHeaders?.observedAt" class="m-0 mb-3 text-z-xs text-z-text-tertiary">
-      {{ t('accounts.quota.headerObserved') }} · {{ account.quota.providerData.responseHeaders.observedAt }}
-    </p>
     <div v-if="quotaEntries.length === 0 && !hasUpstreamPool" class="grid flex-1 place-items-center">
       <ZEmpty
         :title="!account.capabilities.quota && !account.upstream?.discovered ? t('accounts.quota.queryUnsupported') : t('accounts.quota.unobserved')"

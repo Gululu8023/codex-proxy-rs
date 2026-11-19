@@ -10,6 +10,77 @@ use gateway_store::postgres::{
 };
 
 #[tokio::test]
+async fn quota_forecast_pairs_headers_with_as_of_usage_in_observation_order() {
+    let Some(database) = TestDatabase::create("forecast_header_times").await else {
+        return;
+    };
+    PgProviderAccountRepository::new(database.pool.clone())
+        .insert_provider_account(account("acct_headers", "user-headers"))
+        .await
+        .unwrap();
+    let start = Utc::now() - TimeDelta::hours(1);
+    for (id, started, observed, completed) in [
+        ("slow", 0, Some(1), 8),
+        ("fast", 2, Some(3), 4),
+        ("usage_only", 0, None, 2),
+    ] {
+        seed_model_request(
+            &database.pool,
+            ModelRequestSeed {
+                request_id: id,
+                account_id: "acct_headers",
+                provider_kind: "anthropic",
+                model: "claude-sonnet-4-5",
+                total_tokens: 100,
+                cost_amount: "0.01",
+                started_at: start + TimeDelta::minutes(started),
+            },
+        )
+        .await
+        .unwrap();
+        let document = observed
+            .map(|minutes| {
+                serde_json::json!({"claudeQuota":{"windows":{"seven_day":{
+                    "observedAt":start + TimeDelta::minutes(minutes)
+                }}}})
+            })
+            .unwrap_or_else(|| serde_json::json!({}));
+        sqlx::query(
+            "update model_requests set completed_at=$2,provider_observation_json=$3 where id=$1",
+        )
+        .bind(id)
+        .bind(start + TimeDelta::minutes(completed))
+        .bind(document)
+        .execute(&database.pool)
+        .await
+        .unwrap();
+    }
+    let path = ["claudeQuota", "windows", "seven_day", "observedAt"].map(String::from);
+    let history = admin_account_store(&database.pool)
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_headers".into(),
+                key: "seven_day".into(),
+                range: TimeRange {
+                    start,
+                    end: start + TimeDelta::minutes(10),
+                },
+            },
+            Some(&path),
+        )
+        .await
+        .unwrap();
+    assert_eq!(history.points.len(), 2);
+    assert_eq!(history.points[0].observed_at, start + TimeDelta::minutes(1));
+    assert_eq!(history.points[0].usage.tokens, 0);
+    assert_eq!(history.points[1].observed_at, start + TimeDelta::minutes(3));
+    assert_eq!(history.points[1].usage.tokens, 100);
+    assert_eq!(history.usage.tokens, 300);
+    assert_eq!(history.pending_request_count, 0);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn quota_forecast_fractional_slots_keep_microsecond_edges_and_as_of_ties() {
     let Some(database) = TestDatabase::create("forecast_fractional_slots").await else {
         return;
@@ -48,11 +119,14 @@ async fn quota_forecast_fractional_slots_keep_microsecond_edges_and_as_of_ties()
             .bind(id).bind(start+TimeDelta::microseconds(completed)).execute(&database.pool).await.unwrap();
     }
     let history = admin_account_store(&database.pool)
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_fraction".to_owned(),
-            key: "fraction".to_owned(),
-            range: TimeRange { start, end },
-        })
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_fraction".to_owned(),
+                key: "fraction".to_owned(),
+                range: TimeRange { start, end },
+            },
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(
@@ -117,7 +191,10 @@ async fn quota_forecast_excludes_openai_prewarm_but_preserves_inference_and_audi
         key: "week".to_owned(),
         range: TimeRange { start, end },
     };
-    let history = store.load_quota_forecast_history(&query).await.unwrap();
+    let history = store
+        .load_quota_forecast_history(&query, None)
+        .await
+        .unwrap();
     assert_eq!(history.usage.request_count, 2);
     assert_eq!(history.usage.tokens, 300);
     assert_eq!(history.usage.missing_token_count, 0);
@@ -182,7 +259,10 @@ async fn quota_forecast_excludes_openai_prewarm_but_preserves_inference_and_audi
     .execute(&database.pool)
     .await
     .unwrap();
-    let history = store.load_quota_forecast_history(&query).await.unwrap();
+    let history = store
+        .load_quota_forecast_history(&query, None)
+        .await
+        .unwrap();
     assert_eq!(history.usage.request_count, 2);
     assert_eq!(history.usage.known_cost_count, 1);
     assert_eq!(history.usage.unavailable_cost_count, 1);
@@ -222,14 +302,17 @@ async fn quota_forecast_does_not_apply_openai_prewarm_semantics_to_other_provide
         .await
         .unwrap();
     let history = admin_account_store(&database.pool)
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_xai_kind".to_owned(),
-            key: "week".to_owned(),
-            range: TimeRange {
-                start,
-                end: start + TimeDelta::minutes(10),
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_xai_kind".to_owned(),
+                key: "week".to_owned(),
+                range: TimeRange {
+                    start,
+                    end: start + TimeDelta::minutes(10),
+                },
             },
-        })
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(history.usage.request_count, 1);
@@ -319,11 +402,14 @@ async fn quota_forecast_pairs_completed_usage_and_preserves_missing_pending_and_
     .unwrap();
     let store = admin_account_store(&database.pool);
     let history = store
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_forecast".to_owned(),
-            key: "week".to_owned(),
-            range: TimeRange { start, end },
-        })
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_forecast".to_owned(),
+                key: "week".to_owned(),
+                range: TimeRange { start, end },
+            },
+            None,
+        )
         .await
         .expect("forecast history");
     assert_eq!(history.usage.request_count, 6);
@@ -334,24 +420,27 @@ async fn quota_forecast_pairs_completed_usage_and_preserves_missing_pending_and_
     assert_eq!(history.usage.usd, 4.0);
     assert_eq!(history.usage.excluded_request_count, 2);
     assert_eq!(history.pending_request_count, 1);
-    assert!(history.points.iter().all(|point| point.completed_at <= end));
+    assert!(history.points.iter().all(|point| point.observed_at <= end));
     let tie = history
         .points
         .iter()
-        .find(|point| point.completed_at == start + TimeDelta::minutes(5) + TimeDelta::seconds(1))
+        .find(|point| point.observed_at == start + TimeDelta::minutes(5) + TimeDelta::seconds(1))
         .unwrap();
     assert_eq!(tie.usage.tokens, 600);
     assert_eq!(tie.usage.request_count, 3);
     assert!(!format!("{history:?}").contains("never-debug-this"));
     let empty = store
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_forecast".to_owned(),
-            key: "empty".to_owned(),
-            range: TimeRange {
-                start: end + TimeDelta::hours(1),
-                end: end + TimeDelta::hours(2),
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_forecast".to_owned(),
+                key: "empty".to_owned(),
+                range: TimeRange {
+                    start: end + TimeDelta::hours(1),
+                    end: end + TimeDelta::hours(2),
+                },
             },
-        })
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(empty.usage.request_count, 0);
@@ -390,14 +479,17 @@ async fn quota_forecast_bounds_documents_without_sampling_away_token_totals() {
         .await
         .unwrap();
     let history = admin_account_store(&database.pool)
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_forecast_bound".to_owned(),
-            key: "week".to_owned(),
-            range: TimeRange {
-                start,
-                end: start + TimeDelta::minutes(256),
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_forecast_bound".to_owned(),
+                key: "week".to_owned(),
+                range: TimeRange {
+                    start,
+                    end: start + TimeDelta::minutes(256),
+                },
             },
-        })
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(history.usage.request_count, 256);
@@ -458,11 +550,14 @@ async fn quota_forecast_carries_unsampled_usage_between_document_points() {
         .await
         .unwrap();
     let history = admin_account_store(&database.pool)
-        .load_quota_forecast_history(&AccountUsageWindowQuery {
-            account_id: "acct_prefix".to_owned(),
-            key: "week".to_owned(),
-            range: TimeRange { start, end },
-        })
+        .load_quota_forecast_history(
+            &AccountUsageWindowQuery {
+                account_id: "acct_prefix".to_owned(),
+                key: "week".to_owned(),
+                range: TimeRange { start, end },
+            },
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(history.points.len(), 2);
@@ -487,7 +582,7 @@ async fn quota_forecast_summaries_match_source_during_moves_deletes_and_rebuilds
         assert_eq!(actual.points.len(), expected.points.len());
         for (actual, expected) in actual.points.iter().zip(&expected.points) {
             assert_eq!(actual.started_at, expected.started_at);
-            assert_eq!(actual.completed_at, expected.completed_at);
+            assert_eq!(actual.observed_at, expected.observed_at);
             assert_eq!(actual.usage, expected.usage);
         }
     }
@@ -571,12 +666,20 @@ async fn quota_forecast_summaries_match_source_during_moves_deletes_and_rebuilds
     ];
     let mut source = Vec::new();
     for query in &queries {
-        source.push(store.load_quota_forecast_history(query).await.unwrap());
+        source.push(
+            store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
+        );
     }
     drain_analytics(&database.pool).await;
     for (query, expected) in queries.iter().zip(&source) {
         assert_same(
-            &store.load_quota_forecast_history(query).await.unwrap(),
+            &store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
             expected,
         );
     }
@@ -593,14 +696,22 @@ async fn quota_forecast_summaries_match_source_during_moves_deletes_and_rebuilds
         .unwrap();
     let mut pending = Vec::new();
     for query in &queries {
-        pending.push(store.load_quota_forecast_history(query).await.unwrap());
+        pending.push(
+            store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
+        );
     }
     assert_eq!(pending[2].usage.request_count, 1);
     assert_eq!(pending[2].usage.tokens, 1234);
     drain_analytics(&database.pool).await;
     for (query, expected) in queries.iter().zip(&pending) {
         assert_same(
-            &store.load_quota_forecast_history(query).await.unwrap(),
+            &store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
             expected,
         );
     }
@@ -609,14 +720,20 @@ async fn quota_forecast_summaries_match_source_during_moves_deletes_and_rebuilds
         .execute(&database.pool).await.unwrap();
     for (query, expected) in queries.iter().zip(&pending) {
         assert_same(
-            &store.load_quota_forecast_history(query).await.unwrap(),
+            &store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
             expected,
         );
     }
     drain_analytics(&database.pool).await;
     for (query, expected) in queries.iter().zip(&pending) {
         assert_same(
-            &store.load_quota_forecast_history(query).await.unwrap(),
+            &store
+                .load_quota_forecast_history(query, None)
+                .await
+                .unwrap(),
             expected,
         );
     }

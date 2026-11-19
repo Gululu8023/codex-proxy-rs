@@ -6,6 +6,7 @@ import { Zap } from '@lucide/vue'
 import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
 import UsageDetailPopover from '@/components/usage/UsageDetailPopover.vue'
+import { recordedBillingItems } from './shared/billing'
 import { usageBillingText } from './shared/presenter'
 
 const props = defineProps<{
@@ -15,7 +16,11 @@ const props = defineProps<{
 const { t } = useI18n({ useScope: 'global' })
 
 const billing = computed(() => props.record.billing)
+const recordedItems = computed(() => recordedBillingItems(billing.value, t))
+const longContextBillingApplied = computed(() => recordedItems.value?.longContextBillingApplied ?? billing.value?.longContextBillingApplied)
 const billingItems = computed(() => {
+  if (recordedItems.value)
+    return recordedItems.value.summary
   const value = billing.value
   if (!value)
     return []
@@ -45,6 +50,8 @@ const billingItems = computed(() => {
 })
 
 const amountItems = computed(() => {
+  if (recordedItems.value)
+    return recordedItems.value.amounts
   const value = billing.value
   if (!value)
     return []
@@ -139,7 +146,7 @@ function itemValueClass(tone?: string, accent?: boolean) {
 
     <div v-if="billing" class="flex items-center gap-1">
       <span
-        v-if="billing.serviceTierDisplay === 'Fast'"
+        v-if="recordedItems ? recordedItems.fastMode : billing.serviceTierDisplay === 'Fast'"
         class="inline-flex size-4 items-center justify-center rounded-full bg-z-warning-container text-z-warning-on-container"
         :title="t('usage.billing.fastMode')"
         role="img"
@@ -148,9 +155,9 @@ function itemValueClass(tone?: string, accent?: boolean) {
         <Zap class="size-3" stroke-width="2.2" aria-hidden="true" />
       </span>
       <UsageDetailPopover
-        :title="billing.longContextBillingApplied ? t('usage.billing.longContextBillingDetails') : t('usage.billing.billingDetails')"
-        :trigger-label="billing.longContextBillingApplied ? t('usage.billing.viewLongContextBillingDetails') : t('usage.billing.viewCostDetails')"
-        :tone="billing.longContextBillingApplied ? 'warning' : 'primary'"
+        :title="longContextBillingApplied ? t('usage.billing.longContextBillingDetails') : t('usage.billing.billingDetails')"
+        :trigger-label="longContextBillingApplied ? t('usage.billing.viewLongContextBillingDetails') : t('usage.billing.viewCostDetails')"
+        :tone="longContextBillingApplied ? 'warning' : 'primary'"
       >
         <div class="grid gap-1.5 text-z-text-secondary">
           <div v-for="item in amountItems" :key="item.label" class="grid grid-cols-[auto_minmax(0,1fr)] items-center gap-4">

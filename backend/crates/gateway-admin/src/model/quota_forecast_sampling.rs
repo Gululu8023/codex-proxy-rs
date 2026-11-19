@@ -58,7 +58,8 @@ impl QuotaForecastUsage {
 #[derive(Debug, Clone)]
 pub struct QuotaForecastHistoryPoint {
     pub started_at: DateTime<Utc>,
-    pub completed_at: DateTime<Utc>,
+    /// 累计用量与额度使用同一截止时间；响应头观测早于请求完成。
+    pub observed_at: DateTime<Utc>,
     pub usage: QuotaForecastUsage,
     pub provider_observation: ProviderDocument,
 }

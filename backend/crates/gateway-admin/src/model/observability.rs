@@ -451,7 +451,16 @@ pub struct ImageBillingBreakdown {
 /// Provider 上报费用或无法恢复逐项价格时保留总额；Provider 验证成功后升级为完整分解
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum UsageBilling {
-    Total { source: String, total: CurrencyCost },
+    Total {
+        source: String,
+        total: CurrencyCost,
+    },
+    /// 已保存且与账本总额核对的 Provider 分项；不补造标准费用或统一缓存写入单价。
+    Recorded {
+        source: String,
+        total: CurrencyCost,
+        metadata: serde_json::Value,
+    },
     Calculated(Box<CalculatedBillingBreakdown>),
 }
 

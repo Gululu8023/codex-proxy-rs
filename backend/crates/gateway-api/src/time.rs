@@ -1,6 +1,6 @@
 //! 管理与自助页面共用的时间查询解析与展示投影
 
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, NaiveDate, Utc};
 use gateway_core::time::DeploymentTimeZone;
 
 use crate::WireValidationError;
@@ -13,6 +13,24 @@ pub fn parse_datetime(value: Option<&str>) -> Result<Option<DateTime<Utc>>, Wire
     DateTime::parse_from_rfc3339(value)
         .map(|value| Some(value.with_timezone(&Utc)))
         .map_err(|_| WireValidationError::new("timeRange"))
+}
+
+// 日期边界由部署时区解释，区间终点保持排他；不能按固定 UTC 偏移换算夏令时。
+fn parse_range_boundary(
+    value: Option<&str>,
+    timezone: DeploymentTimeZone,
+) -> Result<Option<DateTime<Utc>>, WireValidationError> {
+    let Some(value) = value.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(None);
+    };
+    if value.len() == 10 {
+        return NaiveDate::parse_from_str(value, "%Y-%m-%d")
+            .ok()
+            .and_then(|date| timezone.date_start(date))
+            .map(Some)
+            .ok_or_else(|| WireValidationError::new("timeRange"));
+    }
+    parse_datetime(Some(value))
 }
 
 pub(crate) fn query_range(
@@ -28,8 +46,8 @@ pub(crate) fn query_range(
         if period.is_some() || as_of.is_some() {
             return Err(WireValidationError::new("timeRange"));
         }
-        let end = parse_datetime(end)?.unwrap_or_else(Utc::now);
-        let start = match parse_datetime(start)? {
+        let end = parse_range_boundary(end, timezone)?.unwrap_or_else(Utc::now);
+        let start = match parse_range_boundary(start, timezone)? {
             Some(start) => start,
             None => {
                 let period = CalendarPeriod::parse(default_period)

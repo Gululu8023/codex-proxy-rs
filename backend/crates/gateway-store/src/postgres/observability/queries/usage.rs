@@ -156,6 +156,11 @@ pub(crate) const USAGE_LIST_RECORD_SELECT: &str =
             mr.input_tokens, mr.output_tokens, mr.cached_input_tokens, mr.cache_write_input_tokens,
             mr.reasoning_output_tokens, mr.image_input_tokens, mr.image_output_tokens,
             mr.total_tokens, mr.billing_snapshot_json, mr.cost_source, mr.cost_amount::text, mr.cost_currency,
+            jsonb_build_object(
+              'kind', mr.provider_observation_json -> 'billingKind',
+              'costBreakdown', mr.provider_observation_json -> 'costBreakdown',
+              'pricing', mr.provider_observation_json -> 'pricing'
+            ) as recorded_billing_json,
             mr.transport_decision_wait_ms, mr.connect_ms, mr.headers_ms,
             mr.first_event_ms, mr.first_reasoning_ms, mr.first_text_ms, mr.first_token_ms,
             mr.provider_processing_ms, mr.upstream_response_ms,
@@ -192,6 +197,11 @@ pub(crate) const USAGE_RECORD_DETAIL_SELECT: &str =
               as provider_account_authentication_kind,
             mr.upstream_model_id, mr.upstream_transport, mr.http_version, mr.websocket_pool,
             mr.service_tier, mr.provider_observation_json, mr.diagnostic_trace_json,
+            jsonb_build_object(
+              'kind', mr.provider_observation_json -> 'billingKind',
+              'costBreakdown', mr.provider_observation_json -> 'costBreakdown',
+              'pricing', mr.provider_observation_json -> 'pricing'
+            ) as recorded_billing_json,
             mr.attempt_count, mr.upstream_send_state, mr.downstream_committed_at,
             mr.outcome, mr.client_status_code, mr.upstream_status_code,
             mr.client_response_id, mr.upstream_request_id, mr.upstream_response_id,

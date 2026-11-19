@@ -131,9 +131,8 @@ export default antfu(
           extensions: ['.ts', '.vue'],
           // 动态键无法被静态扫描识别；仅豁免已有调用对应的范围。
           ignores: [
-            // 账号额度状态和证据来源由服务端返回，额度面板按字段拼接键。
+            // 账号额度状态由服务端返回，额度面板按字段拼接键。
             '/^accounts\\.quota\\.states\\.(unsampled|stale|query_failed|exhausted|sampled)$/',
-            'accounts.quota.sources.oauth_usage',
             // 审查页的页签、动作、覆盖范围和统计项按枚举或列表拼接键。
             '/^guard\\.tabs\\.(overview|records|profiles|policy|learning|help)$/',
             '/^guard\\.mode\\.(enforce|observe)$/',

@@ -73,12 +73,7 @@
         "query_failed": "Query failed",
         "exhausted": "Subscription exhausted",
         "sampled": "Official subscription observation"
-      },
-      "sources": {
-        "oauth_usage": "Subscription query"
-      },
-      "accountScope": "Account-wide",
-      "headerObserved": "Response headers (scope reported by upstream)"
+      }
     },
     "account": "Account",
     "connectionTest": {
@@ -449,6 +444,16 @@
       "stopHelp": "Stopping lets the current entry finish"
     },
     "profile": {
+      "basic": {
+        "title": "Basic profile",
+        "name": "Account name",
+        "email": "Email",
+        "userId": "User ID",
+        "organizationId": "Organization ID",
+        "accountId": "Upstream account ID",
+        "plan": "Plan",
+        "loading": "Loading account information"
+      },
       "activity": {
         "quickMode": "Quick mode",
         "reasoningEffort": "Top reasoning effort",
@@ -493,8 +498,13 @@
         "noAutomaticRenewal": "No automatic renewal",
         "byMonth": "By month",
         "byYear": "By year",
-        "subscriptionStarts": "Subscription starts",
-        "subscriptionEnds": "Subscription ends",
+        "subscriptionCreated": "Subscription created",
+        "subscriptionStarts": "Current period starts",
+        "subscriptionEnds": "Current period ends",
+        "status": "Subscription status",
+        "active": "Active",
+        "billingType": "Billing type",
+        "stripeSubscription": "Stripe subscription",
         "label": "Plan",
         "renewalMethod": "Renewal method"
       },
@@ -506,6 +516,7 @@
       "refreshInformation": "Refresh"
     },
     "quotaForecast": {
+      "monthlyExtrapolated": "Monthly quota (extrapolated)",
       "tokenCapacity": "Token capacity",
       "equivalentFeeUsd": "Equivalent cost · USD",
       "capacityForecast": "Capacity forecast",
@@ -537,6 +548,15 @@
       "refreshQuota": "Refresh"
     },
     "quotaReset": {
+      "queryOnlyHelp": "Inventory is read-only. Use reset credits manually on the official Claude page.",
+      "scope": "Scope: {value}",
+      "status": {
+        "available": "Available inventory",
+        "expired": "Expired",
+        "depleted": "Depleted",
+        "scheduled": "Not started",
+        "paused": "Paused"
+      },
       "automation": {
         "confirming": "The last automatic reset is unconfirmed, verification will continue",
         "unconfirmed": "The last automatic reset is unconfirmed",

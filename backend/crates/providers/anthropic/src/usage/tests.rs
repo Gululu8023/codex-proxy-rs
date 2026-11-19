@@ -1,12 +1,106 @@
 //! 缓存桶、未知价格与中断后的已观测用量不能在计费时丢失。
 
 use super::*;
+use gateway_core::upstream::UpstreamTransport;
 
 fn facts(events: &[ProviderEvent]) -> Vec<&GatewayEvent> {
     events
         .iter()
         .flat_map(ProviderEvent::canonical_facts)
         .collect()
+}
+
+#[test]
+fn usage_updates_keep_quota_headers_status_and_stream_timings() {
+    use gateway_core::event::{ProviderResponseHeader, ProviderResponseTimings};
+    let quota = json!({"claudeQuota":{"planType":"max","windows":{
+        "seven_day":{"utilization":25,"resets_at":"2026-11-20T00:00:00Z"}
+    }}});
+    let observation = ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap())
+        .with_status_code(200)
+        .with_client_headers(vec![ProviderResponseHeader::new(
+            "request-id",
+            bytes::Bytes::from_static(b"redacted"),
+        )])
+        .with_timings(ProviderResponseTimings {
+            headers_ms: Some(10),
+            first_token_ms: Some(30),
+            ..Default::default()
+        })
+        .with_provider_metadata(ProviderResponseMetadata::new(quota.to_string()).unwrap());
+    let mut capture = UsageCapture::default();
+    capture.observe(&json!({"input_tokens":10,"output_tokens":2}));
+    for finalized in [false, true] {
+        let events = capture.finish(
+            "claude-sonnet-4-5",
+            &Default::default(),
+            &json!({}),
+            finalized,
+            &observation,
+        );
+        let snapshot = events
+            .iter()
+            .find_map(ProviderEvent::response_observation)
+            .unwrap();
+        assert_eq!(snapshot.status_code(), observation.status_code());
+        assert_eq!(snapshot.client_headers(), observation.client_headers());
+        assert_eq!(snapshot.timings(), observation.timings());
+        let metadata: Value =
+            serde_json::from_str(snapshot.provider_metadata().unwrap().as_json()).unwrap();
+        assert_eq!(metadata["claudeQuota"], quota["claudeQuota"]);
+        assert_eq!(metadata["rawUsage"]["output_tokens"], 2);
+        assert_eq!(metadata["usageComplete"], finalized);
+    }
+}
+
+#[test]
+fn later_unpriced_usage_discards_previous_breakdown_but_keeps_quota() {
+    let observation = ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap())
+        .with_provider_metadata(
+            ProviderResponseMetadata::new(json!({"claudeQuota":{"planType":"max"}}).to_string())
+                .unwrap(),
+        );
+    let mut capture = UsageCapture::default();
+    capture.observe(&json!({"input_tokens":100,"output_tokens":0}));
+    let first = capture.finish(
+        "claude-sonnet-4-5",
+        &Default::default(),
+        &json!({}),
+        false,
+        &observation,
+    );
+    let previous = first
+        .iter()
+        .find_map(ProviderEvent::response_observation)
+        .unwrap();
+    let metadata: Value =
+        serde_json::from_str(previous.provider_metadata().unwrap().as_json()).unwrap();
+    assert!(metadata["costBreakdown"].is_object());
+
+    capture.observe(&json!({"output_tokens":10,"cache_creation_input_tokens":20}));
+    let last = capture.finish(
+        "claude-sonnet-4-5",
+        &Default::default(),
+        &json!({}),
+        true,
+        previous,
+    );
+    assert!(
+        !facts(&last)
+            .iter()
+            .any(|event| matches!(event, GatewayEvent::CalculatedCost(_)))
+    );
+    let snapshot = last
+        .iter()
+        .find_map(ProviderEvent::response_observation)
+        .unwrap();
+    let metadata: Value =
+        serde_json::from_str(snapshot.provider_metadata().unwrap().as_json()).unwrap();
+    assert!(metadata.get("costBreakdown").is_none());
+    assert!(metadata.get("pricing").is_none());
+    assert_eq!(metadata["claudeQuota"]["planType"], "max");
+    assert_eq!(metadata["rawUsage"]["output_tokens"], 10);
+    assert_eq!(metadata["usageComplete"], true);
 }
 
 #[test]
@@ -19,7 +113,13 @@ fn thinking_usage_is_explicit_partial_and_never_double_billed() {
         capture.fields["output_tokens_details"],
         json!({"thinking_tokens":12})
     );
-    let events = capture.finish("claude-sonnet-4-5", &Default::default(), &json!({}), true);
+    let events = capture.finish(
+        "claude-sonnet-4-5",
+        &Default::default(),
+        &json!({}),
+        true,
+        &ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap()),
+    );
     let observed = facts(&events);
     let usage = observed
         .iter()
@@ -45,7 +145,13 @@ fn thinking_usage_is_explicit_partial_and_never_double_billed() {
         .unwrap();
     assert_eq!(cost, "0.00075");
     capture.observe(&json!({"output_tokens_details":{"thinking_tokens":31}}));
-    let events = capture.finish("claude-sonnet-4-5", &Default::default(), &json!({}), true);
+    let events = capture.finish(
+        "claude-sonnet-4-5",
+        &Default::default(),
+        &json!({}),
+        true,
+        &ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap()),
+    );
     assert!(facts(&events).iter().any(|event| matches!(event, GatewayEvent::Usage(usage) if usage.reasoning_output_tokens.is_none())));
 }
 
@@ -69,6 +175,7 @@ fn cache_buckets_merge_across_frames_and_are_priced_separately() {
             &Default::default(),
             &json!({}),
             finalized,
+            &ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap()),
         );
         let facts = facts(&events);
         let usage = facts
@@ -120,7 +227,13 @@ fn unknown_or_incomplete_pricing_does_not_invent_zero_cost() {
     ] {
         let mut capture = UsageCapture::default();
         capture.observe(&usage);
-        let events = capture.finish(model, &Default::default(), &request, true);
+        let events = capture.finish(
+            model,
+            &Default::default(),
+            &request,
+            true,
+            &ProviderResponseObservation::new(UpstreamTransport::new("http_sse").unwrap()),
+        );
         let facts = facts(&events);
         assert!(
             facts

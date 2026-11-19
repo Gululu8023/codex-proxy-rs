@@ -349,6 +349,11 @@ pub trait ProviderAdmin: Send + Sync {
         Ok(None)
     }
 
+    /// 响应头额度使用文档内的观测时间配对用量；None 沿用完成时观测。
+    fn quota_forecast_time_path(&self, _window: &ProviderQuotaWindow) -> Option<Vec<String>> {
+        None
+    }
+
     /// 历史观测的协议字段仅由具体 Provider 解释；不支持时保留累计估算
     fn quota_forecast_observation(
         &self,

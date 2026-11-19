@@ -8,7 +8,7 @@ mod personal_info {
     use chrono::{TimeZone as _, Utc};
     use gateway_admin::model::{
         AdminError,
-        provider_credentials::{AccountPersonalInfo, ProviderSubscription},
+        provider_credentials::{AccountBasicProfile, AccountPersonalInfo, ProviderSubscription},
     };
     use gateway_api::admin::accounts::{AccountPersonalInfoData, AccountSubscriptionData};
     use serde_json::json;
@@ -18,8 +18,11 @@ mod personal_info {
         let observed = Utc.with_ymd_and_hms(2026, 9, 14, 0, 0, 0).unwrap();
         let response = AccountSubscriptionData::from((
             ProviderSubscription {
+                created_at: None,
                 starts_at: None,
-                expires_at: observed,
+                expires_at: Some(observed),
+                status: None,
+                billing_type: None,
                 will_renew: None,
                 billing_period: None,
                 billing_currency: Some("USD".to_owned()),
@@ -30,8 +33,10 @@ mod personal_info {
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({
+                "createdAt": null, "createdAtDisplay": null,
                 "startsAt": null, "startsAtDisplay": null,
                 "expiresAt": "2026-09-14T00:00:00+00:00", "expiresAtDisplay": "2026-09-14 08:00:00",
+                "status": null, "billingType": null,
                 "willRenew": null, "billingPeriod": null, "billingCurrency": "USD",
                 "observedAt": "2026-09-14T00:00:00+00:00", "observedAtDisplay": "2026-09-14 08:00:00"
             })
@@ -43,10 +48,14 @@ mod personal_info {
         let observed = Utc.with_ymd_and_hms(2026, 9, 14, 0, 0, 0).unwrap();
         let response = AccountPersonalInfoData::from((
             AccountPersonalInfo {
+                basic_profile: None,
                 profile: Err(AdminError::bad_gateway("上游服务请求失败")),
                 subscription: Some(ProviderSubscription {
+                    created_at: None,
                     starts_at: None,
-                    expires_at: observed,
+                    expires_at: Some(observed),
+                    status: None,
+                    billing_type: None,
                     will_renew: None,
                     billing_period: None,
                     billing_currency: None,
@@ -62,13 +71,15 @@ mod personal_info {
             value["subscription"]["expiresAt"],
             "2026-09-14T00:00:00+00:00"
         );
-        assert_eq!(value.as_object().unwrap().len(), 3);
+        assert!(value["basicProfile"].is_null());
+        assert_eq!(value.as_object().unwrap().len(), 4);
     }
 
     #[test]
     fn personal_info_response_preserves_unknown_subscription_and_profile_error() {
         let response = AccountPersonalInfoData::from((
             AccountPersonalInfo {
+                basic_profile: None,
                 profile: Err(AdminError::unavailable("服务商暂不可用")),
                 subscription: None,
             },
@@ -77,11 +88,40 @@ mod personal_info {
         assert_eq!(
             serde_json::to_value(response).unwrap(),
             json!({
+                "basicProfile": null,
                 "profile": null,
                 "profileError": "服务商暂不可用",
                 "subscription": null,
             })
         );
+    }
+
+    #[test]
+    fn basic_identity_has_its_own_fields_without_official_profile_or_subscription() {
+        let response = AccountPersonalInfoData::from((
+            AccountPersonalInfo {
+                basic_profile: Some(AccountBasicProfile {
+                    name: "Saved account label".into(),
+                    email: None,
+                    upstream_user_id: Some("redacted-user".into()),
+                    upstream_account_id: Some("redacted-organization".into()),
+                    plan_type: None,
+                }),
+                profile: Err(AdminError::invalid("官方个人统计不支持")),
+                subscription: None,
+            },
+            gateway_api::TimePresenter::new(Default::default()),
+        ));
+        let value = serde_json::to_value(response).unwrap();
+        assert_eq!(
+            value["basicProfile"],
+            json!({
+                "name":"Saved account label","email":null,"upstreamUserId":"redacted-user",
+                "upstreamAccountId":"redacted-organization","planType":null,
+            })
+        );
+        assert!(value["profile"].is_null());
+        assert!(value["subscription"].is_null());
     }
 }
 

@@ -310,7 +310,37 @@
     "saveUrl": "Save public URL",
     "privacyReady": "Claude text redaction is enabled",
     "privacyUnavailable": "Privacy unavailable, Claude requests blocked",
-    "privacyHelp": "Sensitive text is processed before sending and response placeholders are restored automatically. Claude requests are blocked if privacy processing is unavailable.",
-    "privacyKeyFingerprint": "Master key fingerprint (compare with keyFingerprint in the backup manifest):"
+    "privacyKeyFingerprint": "Master key fingerprint",
+    "privacyKeyFingerprintHelp": "Click to copy the full fingerprint; compare it with keyFingerprint in the backup manifest",
+    "privacyRulesFingerprint": "Rules fingerprint",
+    "privacyCopyFingerprint": "Click to copy the full fingerprint",
+    "privacyObservedAt": "Updated {time}",
+    "privacySourceBuiltin": "Built-in packs",
+    "privacySourceCustom": "Custom rules file",
+    "privacyEnabledRules": "Rules {enabled}/{total} enabled",
+    "privacyShowRules": "View rules",
+    "privacyHideRules": "Hide rules",
+    "privacyReadonly": "Rules are enforced by the built-in veil engine and cannot be configured here. To change them, edit veil.rules_file in the deployment config and use a new mapping volume.",
+    "privacyRule": {
+      "source": "Source",
+      "packs": "Packs",
+      "allowlist": "Never replaced",
+      "allowlistHelp": "These literals are never replaced",
+      "customReplacesBuiltin": "Custom rules replace the built-in packs entirely; the secrets / region switches have no effect.",
+      "priority": "Priority",
+      "type": "Type",
+      "id": "Rule ID",
+      "matcher": "Match",
+      "content": "Pattern",
+      "matchers": {
+        "regex": "Regex",
+        "dictionary": "Dictionary",
+        "ip": "IP parse"
+      },
+      "wordCount": "{count} terms (not shown)",
+      "ipParse": "Parsed as IP addresses",
+      "copyPattern": "Copy regex",
+      "empty": "No active rules"
+    }
   }
 }

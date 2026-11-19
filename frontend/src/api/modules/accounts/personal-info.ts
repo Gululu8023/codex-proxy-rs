@@ -35,10 +35,14 @@ export interface AccountProfileActivityInsights {
 }
 
 export interface AccountSubscription {
+  createdAt: string | null
+  createdAtDisplay: string | null
   startsAt: string | null
   startsAtDisplay: string | null
-  expiresAt: string
-  expiresAtDisplay: string
+  expiresAt: string | null
+  expiresAtDisplay: string | null
+  status: string | null
+  billingType: string | null
   willRenew: boolean | null
   billingPeriod: string | null
   billingCurrency: string | null
@@ -62,7 +66,16 @@ export interface AccountProfileStatisticsResponse {
   activityInsights: AccountProfileActivityInsights
 }
 
+export interface AccountBasicProfile {
+  name: string
+  email: string | null
+  upstreamUserId: string | null
+  upstreamAccountId: string | null
+  planType: string | null
+}
+
 export interface AccountPersonalInfoResponse {
+  basicProfile: AccountBasicProfile | null
   profile: AccountProfileStatisticsResponse | null
   profileError: string | null
   subscription: AccountSubscription | null

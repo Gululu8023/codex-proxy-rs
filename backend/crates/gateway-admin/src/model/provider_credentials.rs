@@ -874,20 +874,36 @@ pub(crate) fn explicit_plan_type(value: Option<&str>) -> Option<&str> {
     })
 }
 
-/// 按需查询的订阅周期，不参与额度或账号可用性判断
+/// 按需查询的订阅信息，不参与额度或账号可用性判断；未知账期不能由凭据或额度期限补齐。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ProviderSubscription {
+    /// 订阅开通时间，与当前账期的 starts_at 不同。
+    pub created_at: Option<DateTime<Utc>>,
     pub starts_at: Option<DateTime<Utc>>,
-    pub expires_at: DateTime<Utc>,
+    pub expires_at: Option<DateTime<Utc>>,
+    pub status: Option<String>,
+    /// 上游计费类型，与计费周期、币种分别保存。
+    pub billing_type: Option<String>,
     pub will_renew: Option<bool>,
     pub billing_period: Option<String>,
     pub billing_currency: Option<String>,
     pub observed_at: DateTime<Utc>,
 }
 
-/// 按需汇聚的个人信息；资料查询失败不丢弃可用的订阅结果
+/// 导入或授权时已验证并保存的基础身份，不代表官方个人统计或订阅日期。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AccountBasicProfile {
+    pub name: String,
+    pub email: Option<String>,
+    pub upstream_user_id: Option<String>,
+    pub upstream_account_id: Option<String>,
+    pub plan_type: Option<String>,
+}
+
+/// 按需汇聚的个人信息；资料查询失败不丢弃基础身份和可用的订阅结果
 #[derive(Debug, Clone)]
 pub struct AccountPersonalInfo {
+    pub basic_profile: Option<AccountBasicProfile>,
     pub profile: Result<ProviderProfileStatistics, AdminError>,
     pub subscription: Option<ProviderSubscription>,
 }

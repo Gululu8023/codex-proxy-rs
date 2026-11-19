@@ -186,7 +186,10 @@ impl DefaultAccountsService {
         let (stored, provider) = self.provider_for_account(account_id).await?;
         let capabilities =
             provider.account_capabilities(account_id, &stored.account.authentication_kind);
-        if !capabilities.reset_credits || !capabilities.consume_reset_credit {
+        if !capabilities.reset_credit_automation
+            || !capabilities.reset_credits
+            || !capabilities.consume_reset_credit
+        {
             return Err(AdminError::invalid("当前账号不支持自动重置卡"));
         }
         Ok(stored.account.enabled)
@@ -301,6 +304,13 @@ impl DefaultAccountsService {
         account_id: &ProviderAccountId,
         credits: &ProviderResetCredits,
     ) -> Result<(), AdminError> {
+        let (stored, provider) = self.provider_for_account(account_id).await?;
+        if !provider
+            .account_capabilities(account_id, &stored.account.authentication_kind)
+            .reset_credit_automation
+        {
+            return Ok(());
+        }
         let Some(mut record) = self
             .accounts
             .reset_credit_automation(account_id.as_str())

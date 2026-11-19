@@ -89,10 +89,11 @@ struct SystemVersionView {
     has_update: bool,
     update_cached: bool,
     update_warning: Option<String>,
+    timezone: &'static str,
 }
 
-impl From<SystemVersion> for SystemVersionView {
-    fn from(version: SystemVersion) -> Self {
+impl SystemVersionView {
+    fn new(version: SystemVersion, timezone: gateway_core::time::DeploymentTimeZone) -> Self {
         Self {
             deployment_mode_label: deployment_mode_label(&version.deployment_mode).to_owned(),
             version: version.version,
@@ -104,6 +105,7 @@ impl From<SystemVersion> for SystemVersionView {
             has_update: version.has_update,
             update_cached: version.update_cached,
             update_warning: version.update_warning,
+            timezone: timezone.name(),
         }
     }
 }
@@ -281,7 +283,10 @@ where
         .map_err(map_system_error)?;
     Ok(AdminResponse::new(
         StatusCode::OK,
-        AdminEnvelope::ok(SystemVersionView::from(version)),
+        AdminEnvelope::ok(SystemVersionView::new(
+            version,
+            state.admin_services().timezone(),
+        )),
     ))
 }
 

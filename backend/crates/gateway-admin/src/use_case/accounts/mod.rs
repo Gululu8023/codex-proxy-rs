@@ -27,12 +27,12 @@ use crate::{
         },
         observability::TimeRange,
         provider_credentials::{
-            AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle, AccountPersonalInfo,
-            AccountRefreshResult, AccountUsagePeriod, ConsumeProviderResetCredit,
-            PrepareCredentialRefresh, ProviderModelCatalogDocument, ProviderModels,
-            ProviderProfileAvatar, ProviderQuota, ProviderQuotaReadRequest, ProviderQuotaRequest,
-            ProviderQuotaWindow, ProviderResetCreditResult, ProviderResetCredits,
-            QuotaLocalUsageAttribution,
+            AccountBasicProfile, AccountDirectoryItem, AccountDirectoryPage, AccountExportBundle,
+            AccountPersonalInfo, AccountRefreshResult, AccountUsagePeriod,
+            ConsumeProviderResetCredit, PrepareCredentialRefresh, ProviderModelCatalogDocument,
+            ProviderModels, ProviderProfileAvatar, ProviderQuota, ProviderQuotaReadRequest,
+            ProviderQuotaRequest, ProviderQuotaWindow, ProviderResetCreditResult,
+            ProviderResetCredits, QuotaLocalUsageAttribution,
         },
         quota_forecast::{
             AccountQuotaForecastReport, account_quota_forecasts, quota_forecast_source_window,
@@ -1010,9 +1010,10 @@ impl AccountsService for DefaultAccountsService {
             }
             let reset_at = query.range.end;
             query.range.end = observed;
+            let time_path = provider.quota_forecast_time_path(window);
             let history = self
                 .accounts
-                .load_quota_forecast_history(&query)
+                .load_quota_forecast_history(&query, time_path.as_deref())
                 .await
                 .map_err(|error| map_store_error(error, "forecast paired usage"))?;
             let mut points = Vec::new();
@@ -1036,7 +1037,7 @@ impl AccountsService for DefaultAccountsService {
                     continue;
                 }
                 points.push(QuotaForecastPoint {
-                    observed_at: point.completed_at,
+                    observed_at: point.observed_at,
                     used_percent: fact.used_percent,
                     usage: point.usage,
                 });
@@ -1089,6 +1090,16 @@ impl AccountsService for DefaultAccountsService {
             return Err(AdminError::conflict("账号身份已变化，请刷新信息后重试"));
         }
         Ok(AccountPersonalInfo {
+            basic_profile: provider
+                .account_capabilities(account_id, &current.account.authentication_kind)
+                .basic_profile
+                .then_some(AccountBasicProfile {
+                    name: current.account.name,
+                    email: current.account.email,
+                    upstream_user_id: current.account.upstream_user_id,
+                    upstream_account_id: current.account.upstream_account_id,
+                    plan_type: current.account.plan_type,
+                }),
             profile,
             subscription,
         })
@@ -1156,17 +1167,22 @@ impl AccountsService for DefaultAccountsService {
     ) -> Result<ProviderResetCreditResult, AdminError> {
         let lock = self.reset_credit_lock(&command.account_id).await;
         let _guard = lock.lock().await;
-        if self
-            .accounts
-            .reset_credit_automation(command.account_id.as_str())
-            .await
-            .map_err(|e| map_store_error(e, "reset-credit automation"))?
-            .is_some_and(|record| {
-                record
-                    .state
-                    .pending
-                    .is_some_and(|pending| pending.credit.expires_at > Utc::now())
-            })
+        let (stored, provider) = self.provider_for_account(&command.account_id).await?;
+        let automation_supported = provider
+            .account_capabilities(&command.account_id, &stored.account.authentication_kind)
+            .reset_credit_automation;
+        if automation_supported
+            && self
+                .accounts
+                .reset_credit_automation(command.account_id.as_str())
+                .await
+                .map_err(|e| map_store_error(e, "reset-credit automation"))?
+                .is_some_and(|record| {
+                    record
+                        .state
+                        .pending
+                        .is_some_and(|pending| pending.credit.expires_at > Utc::now())
+                })
         {
             return Err(AdminError::new(
                 crate::model::AdminErrorKind::Conflict,

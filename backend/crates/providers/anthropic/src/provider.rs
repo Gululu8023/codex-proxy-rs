@@ -14,16 +14,16 @@ use bytes::{Bytes, BytesMut};
 use futures::StreamExt;
 use gateway_core::{
     account::{
-        AccountAffinity, AccountCandidate, AccountRuntimeSignals, AccountSelectionContext,
-        AccountSelector, AccountStateChange, CredentialState, PreferredAccountSelection,
-        ProviderAccount, ProviderAccountId, RotationStrategy,
+        AccountAffinity, AccountCandidate, AccountCapacitySnapshot, AccountRuntimeSignals,
+        AccountSelectionContext, AccountSelector, AccountStateChange, CredentialState,
+        PreferredAccountSelection, ProviderAccount, ProviderAccountId, RotationStrategy,
     },
     concurrency::{CapacityWait, ConcurrencyWaitQueue},
     engine::{
         AttemptContext,
         provider::{
             Provider, ProviderCallMetadata, ProviderRequest, ProviderRequestObservation,
-            ProviderStream,
+            ProviderSelectionObservation, ProviderStream,
         },
     },
     error::{ClientVisibleUpstreamResponse, ProviderError, ProviderErrorKind},
@@ -179,7 +179,14 @@ impl AnthropicProvider {
         context: &AttemptContext,
         model: &str,
         session: Option<&str>,
-    ) -> Result<(ProviderAccount, Box<dyn ProviderLeaseGuard>), ProviderError> {
+    ) -> Result<
+        (
+            ProviderAccount,
+            Box<dyn ProviderLeaseGuard>,
+            Option<AccountCapacitySnapshot>,
+        ),
+        ProviderError,
+    > {
         let kind = self.credentials.kind();
         let policy = context.account_selection_policy();
         let affinity_mode = policy.anthropic_account_affinity();
@@ -389,6 +396,8 @@ impl AnthropicProvider {
                     .wait_candidates(&candidates, &selection)
                     .contains(binding.account_id())
             });
+            // 与 Codex 一样在会话亲和缩减候选前统计账号池容量；无限容量保持未知。
+            let capacity = AccountSelector.capacity_snapshot(&candidates, &selection);
             // 严格模式等待可用主账号；优先模式允许繁忙分流。两者均在主账号失效后重绑。
             if affinity_mode == AccountAffinity::Strict && bound_eligible {
                 candidates.retain(|candidate| {
@@ -474,7 +483,7 @@ impl AnthropicProvider {
                         drop(lease);
                         continue;
                     }
-                    return Ok((account, lease));
+                    return Ok((account, lease, capacity));
                 }
             }
             // 共享有界等待负责排队预算和取消后的同步退队。
@@ -697,13 +706,14 @@ impl Provider for AnthropicProvider {
             .ok_or_else(infra)?;
         let selection_started = std::time::Instant::now();
         let selected = self.select(&context, model.as_str(), session).await;
+        let selection_wait_ms = milliseconds(selection_started);
         phase(
             &context,
             "anthropic.selection",
-            milliseconds(selection_started),
+            selection_wait_ms,
             selected.is_ok(),
         );
-        let (account, lease) = selected?;
+        let (account, lease, capacity) = selected?;
         let provider = self.clone();
         let account_id = account.id().clone();
         // 通用错误保护按本次选号的凭据版本建立反馈围栏，账号展示快照不包含该版本。
@@ -714,6 +724,10 @@ impl Provider for AnthropicProvider {
             transport(),
         )
         .with_credential_revision(account.revision())
+        .with_selection_observation(ProviderSelectionObservation::new(
+            selection_wait_ms,
+            capacity,
+        ))
         .with_account_snapshot(Some(
             gateway_core::account::AccountHistorySnapshot::from_account(&account),
         ));
@@ -965,6 +979,7 @@ impl Provider for AnthropicProvider {
             builder = builder.headers(effective.headers(protocol_headers, remaining, endpoint.ends_with("count_tokens"), u32::from(execution_context.credential_recovery_attempted())));
             if let Some(remaining) = remaining { builder = builder.timeout(remaining); }
             let upstream_started = std::time::Instant::now();
+            let upstream_started_at = SystemTime::now();
             let response = tokio::select! {
                 _ = execution_context.cancellation().cancelled() => Err(sent(ProviderErrorKind::Cancelled)),
                 _ = deadline_elapsed(&execution_context) => Err(sent(ProviderErrorKind::Timeout)),
@@ -976,14 +991,19 @@ impl Provider for AnthropicProvider {
             };
             phase(&execution_context, "anthropic.upstream", milliseconds(upstream_started), response.as_ref().is_ok_and(|response| response.status().is_success()));
             let mut response = response?;
+            let mut timings = ProviderResponseTimings { headers_ms:Some(elapsed_ms(&execution_context)), ..ProviderResponseTimings::default() };
+            // 账号快照和逐请求样本共用头到达时刻，存储等待不能推进额度观测时间。
+            let headers_observed_at = chrono::Utc::now();
             // token 计数不是生成流量，其响应头不能覆盖账号页上的生成额度观测
-            if endpoint == "/v1/messages" && crate::quota::observe_headers(&provider.credentials, &loaded.account, response.headers()).await.is_err() {
+            if endpoint == "/v1/messages" && crate::quota::observe_headers(&provider.credentials, &loaded.account, response.headers(), upstream_started_at, headers_observed_at).await.is_err() {
                 execution_context.trace().record("anthropic.quota_header_observation_failed",serde_json::json!({}));
             }
             let status = response.status().as_u16();
             let headers = safe_headers(response.headers());
-            let mut timings = ProviderResponseTimings { headers_ms:Some(elapsed_ms(&execution_context)), ..ProviderResponseTimings::default() };
-            let observation = ProviderResponseObservation::new(transport()).with_status_code(status).with_client_headers(headers.clone()).with_timings(timings);
+            let mut observation = ProviderResponseObservation::new(transport()).with_status_code(status).with_client_headers(headers.clone()).with_timings(timings);
+            if endpoint == "/v1/messages" && let Some(metadata) = crate::quota::response_metadata(response.headers(), loaded.account.plan_type(), headers_observed_at) {
+                observation = observation.with_provider_metadata(metadata);
+            }
             if !response.status().is_success() {
                 let content_type = response.headers().get("content-type").map(|value| value.as_bytes().to_vec());
                 let bytes = read_body(&mut response, &execution_context).await?;
@@ -1051,7 +1071,7 @@ impl Provider for AnthropicProvider {
                 }
                 Err(error)?;
             }
-            yield ProviderEvent::observation(observation);
+            yield ProviderEvent::observation(observation.clone());
             let mut meta = ResponseMeta::new(execution_context.request_id().to_string(), model.as_str());
             let mut usage = UsageCapture::default();
             if !stream_requested {
@@ -1065,7 +1085,7 @@ impl Provider for AnthropicProvider {
                 let restored = await_privacy(privacy.restore(value), &execution_context, UpstreamSendState::Sent).await;
                 phase(&execution_context, "anthropic.restoration", milliseconds(restoration_started), restored.is_ok());
                 let value = restored.map_err(|error| error
-                    .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false)))?;
+                    .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false, &observation)))?;
                 if endpoint == "/v1/messages" {
                     let id = value["id"].as_str().filter(|id| crate::thread::message_id(id)).ok_or_else(|| sent(ProviderErrorKind::Protocol))?;
                     meta = ResponseMeta::new(id, model.as_str());
@@ -1073,9 +1093,12 @@ impl Provider for AnthropicProvider {
                 let bytes = Bytes::from(serde_json::to_vec(&value).map_err(|_| sent(ProviderErrorKind::Protocol))?);
                 // Started、计量和完成与可交付 JSON 同批发布，恢复失败不能提前跨过提交屏障。
                 let mut canonical = vec![GatewayEvent::Started(meta.clone())];
-                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, true) {
+                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, true, &observation) {
                     canonical.extend_from_slice(event.canonical_facts());
-                    if let Some(observation) = event.response_observation() { yield ProviderEvent::observation(observation.clone()); }
+                    if let Some(snapshot) = event.response_observation() {
+                        observation = snapshot.clone();
+                        yield ProviderEvent::observation(observation.clone());
+                    }
                 }
                 canonical.extend(restored_json_text_events(&value));
                 canonical.push(GatewayEvent::Completed(meta.clone()));
@@ -1094,12 +1117,24 @@ impl Provider for AnthropicProvider {
                 loop {
                     let chunk = next_chunk(&mut response, &execution_context).await?;
                     let Some(chunk) = chunk else { break; };
+                    // 首事件与 Codex 一样记录首个非空上游数据块，不能代替 SSE 数据载荷的 TTFT。
+                    if !chunk.is_empty() && timings.first_event_ms.is_none() {
+                        timings.first_event_ms = Some(elapsed_ms(&execution_context));
+                        observation = observation.with_timings(timings);
+                        yield ProviderEvent::observation(observation.clone());
+                    }
                     if buffer.len().saturating_add(chunk.len()) > MAX_BODY { Err(sent(ProviderErrorKind::MessageTooBig))?; }
                     buffer.extend_from_slice(&chunk);
                     while let Some(end) = event_end(&buffer) {
                         let raw = buffer.split_to(end).freeze();
                         let value = event_json(&raw)?;
                         if let Some(value) = &value {
+                            let previous = timings;
+                            observe_event_timings(&mut timings, value, elapsed_ms(&execution_context));
+                            if timings != previous {
+                                observation = observation.with_timings(timings);
+                                yield ProviderEvent::observation(observation.clone());
+                            }
                             if value["type"] == "message_start" {
                                 let id = value["message"]["id"].as_str().filter(|id| crate::thread::message_id(id)).ok_or_else(|| sent(ProviderErrorKind::Protocol))?;
                                 meta = ResponseMeta::new(id, model.as_str());
@@ -1114,18 +1149,11 @@ impl Provider for AnthropicProvider {
                             usage.observe(&value["message"]["usage"]); usage.observe(&value["usage"]);
                             // 已启动后及时记录部分用量；首事件恢复失败则随错误附带事实，不能先发 Usage 后发 Started。
                             if started && (value["message"]["usage"].is_object() || value["usage"].is_object()) {
-                                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, false) { yield event; }
+                                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, false, &observation) {
+                                    if let Some(snapshot) = event.response_observation() { observation = snapshot.clone(); }
+                                    yield event;
+                                }
                             }
-                            let previous = timings;
-                            let elapsed = elapsed_ms(&execution_context);
-                            timings.first_event_ms.get_or_insert(elapsed);
-                            match value["delta"]["type"].as_str() {
-                                Some("text_delta") if value["delta"]["text"].as_str().is_some_and(|text|!text.is_empty()) => { timings.first_text_ms.get_or_insert(elapsed); timings.first_token_ms.get_or_insert(elapsed); },
-                                Some("thinking_delta") if value["delta"]["thinking"].as_str().is_some_and(|text|!text.is_empty()) => { timings.first_reasoning_ms.get_or_insert(elapsed); timings.first_token_ms.get_or_insert(elapsed); },
-                                Some("input_json_delta") if value["delta"]["partial_json"].as_str().is_some_and(|text|!text.is_empty()) => { timings.first_token_ms.get_or_insert(elapsed); },
-                                _ => {},
-                            }
-                            if timings != previous { yield ProviderEvent::observation(ProviderResponseObservation::new(transport()).with_timings(timings)); }
                         }
                         let event = std::str::from_utf8(&raw).map_err(|_| sent(ProviderErrorKind::Protocol))?.to_owned();
                         let restoration_started = std::time::Instant::now();
@@ -1133,7 +1161,7 @@ impl Provider for AnthropicProvider {
                         restoration_ms = restoration_ms.saturating_add(milliseconds(restoration_started));
                         if restored.is_err() { phase(&execution_context, "anthropic.restoration", restoration_ms, false); }
                         let restored = restored.map_err(|error| error
-                            .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false)))?;
+                            .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false, &observation)))?;
                         let raw = Bytes::from(restored);
                         if let Some(value) = &value {
                             if value["type"] == "error" {
@@ -1154,7 +1182,10 @@ impl Provider for AnthropicProvider {
                                 phase(&execution_context, "anthropic.restoration", restoration_ms, tail.is_ok());
                                 let tail = tail?;
                                 if !tail.is_empty() { Err(sent(ProviderErrorKind::Protocol))?; }
-                                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, true) { yield event; }
+                                for event in usage.finish(model.as_str(), execution_context.pricing(), &body, true, &observation) {
+                                    if let Some(snapshot) = event.response_observation() { observation = snapshot.clone(); }
+                                    yield event;
+                                }
                                 let mut event = ProviderEvent::canonical_with_wire(vec![GatewayEvent::Completed(meta.clone())], ProtocolWireEvent::raw_sse(NAME, raw).expect("protocol"));
                                 if let Some(checkpoint) = &checkpoint && crate::thread::eligible(&thread_reply) {
                                     event.attach_session_update(checkpoint.event(meta.response_id()));
@@ -1175,9 +1206,12 @@ impl Provider for AnthropicProvider {
                         if !started {
                             started = true;
                             canonical.insert(0, GatewayEvent::Started(meta.clone()));
-                            for event in usage.finish(model.as_str(), execution_context.pricing(), &body, false) {
+                            for event in usage.finish(model.as_str(), execution_context.pricing(), &body, false, &observation) {
                                 canonical.extend_from_slice(event.canonical_facts());
-                                if let Some(observation) = event.response_observation() { yield ProviderEvent::observation(observation.clone()); }
+                                if let Some(snapshot) = event.response_observation() {
+                                    observation = snapshot.clone();
+                                    yield ProviderEvent::observation(observation.clone());
+                                }
                             }
                         }
                         yield ProviderEvent::canonical_with_wire(canonical, wire);
@@ -1728,6 +1762,29 @@ fn event_json(bytes: &[u8]) -> Result<Option<Value>, ProviderError> {
     serde_json::from_str(&data)
         .map(Some)
         .map_err(|_| sent(ProviderErrorKind::Protocol))
+}
+
+fn observe_event_timings(timings: &mut ProviderResponseTimings, value: &Value, elapsed: u64) {
+    // 对齐 Codex 的首响应载荷边界：message_start 即可计时，思考与正文仍独立观察。
+    // 仅由解析到 data 的路径调用；注释、空帧和响应头不能补造 TTFT。
+    timings.first_token_ms.get_or_insert(elapsed);
+    match value["delta"]["type"].as_str() {
+        Some("text_delta")
+            if value["delta"]["text"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()) =>
+        {
+            timings.first_text_ms.get_or_insert(elapsed);
+        }
+        Some("thinking_delta")
+            if value["delta"]["thinking"]
+                .as_str()
+                .is_some_and(|text| !text.is_empty()) =>
+        {
+            timings.first_reasoning_ms.get_or_insert(elapsed);
+        }
+        _ => {}
+    }
 }
 
 fn elapsed_ms(context: &AttemptContext) -> u64 {

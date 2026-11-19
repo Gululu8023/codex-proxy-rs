@@ -177,6 +177,7 @@ pub trait AccountStore:
     async fn load_quota_forecast_history(
         &self,
         window: &AccountUsageWindowQuery,
+        observation_time_path: Option<&[String]>,
     ) -> AdminStoreResult<QuotaForecastHistory>;
 
     async fn credential_details(

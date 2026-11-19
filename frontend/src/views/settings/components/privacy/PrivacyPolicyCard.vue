@@ -73,7 +73,7 @@ function remove(rule: PrivacyRule) {
 </script>
 
 <template>
-  <ZCard v-if="provider === 'anthropic'" id="privacy-policy" :title="t('settings.privacy.privacyPolicy')" :description="t('settings.privacy.claudeDescription')">
+  <ZCard v-if="provider === 'anthropic'" id="privacy-policy" :title="t('settings.privacy.privacyPolicy')" :description="t('settings.privacy.description')">
     <template #actions>
       <slot name="actions" />
     </template>

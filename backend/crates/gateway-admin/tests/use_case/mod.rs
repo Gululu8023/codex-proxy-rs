@@ -507,6 +507,7 @@ impl AccountStore for UnavailableStore {
     async fn load_quota_forecast_history(
         &self,
         _: &AccountUsageWindowQuery,
+        _: Option<&[String]>,
     ) -> AdminStoreResult<gateway_admin::model::quota_forecast_sampling::QuotaForecastHistory> {
         Err(unavailable("quota forecast history"))
     }

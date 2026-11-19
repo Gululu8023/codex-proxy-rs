@@ -31,7 +31,22 @@ const billingPeriod = computed(() => {
   return labels[period.toLowerCase()] ?? period
 })
 const billing = computed(() => [billingPeriod.value, props.subscription?.billingCurrency].filter(Boolean).join(' · ') || t('common.values.unknown'))
+const status = computed(() => props.subscription.status === 'active'
+  ? t('accounts.profile.subscription.active')
+  : props.subscription.status)
+const billingType = computed(() => props.subscription.billingType === 'stripe_subscription'
+  ? t('accounts.profile.subscription.stripeSubscription')
+  : props.subscription.billingType)
 const dates = computed(() => [
+  ...(props.subscription.createdAt
+    ? [
+        {
+          label: t('accounts.profile.subscription.subscriptionCreated'),
+          value: props.subscription.createdAt,
+          display: props.subscription.createdAtDisplay,
+        },
+      ]
+    : []),
   {
     label: t('accounts.profile.subscription.subscriptionStarts'),
     value: props.subscription?.startsAt,
@@ -55,6 +70,22 @@ const dates = computed(() => [
         <dd class="m-0 mt-1.5 font-mono text-z-sm leading-relaxed tabular-nums text-z-text">
           <time v-if="date.value" :datetime="date.value">{{ date.display ?? t('common.values.unknown') }}</time>
           <span v-else>{{ t('common.values.unknown') }}</span>
+        </dd>
+      </div>
+      <div v-if="status" class="min-w-0">
+        <dt class="text-z-xs text-z-text-secondary">
+          {{ t('accounts.profile.subscription.status') }}
+        </dt>
+        <dd class="m-0 mt-1.5 text-z-sm leading-relaxed wrap-break-word text-z-text">
+          {{ status }}
+        </dd>
+      </div>
+      <div v-if="billingType" class="min-w-0">
+        <dt class="text-z-xs text-z-text-secondary">
+          {{ t('accounts.profile.subscription.billingType') }}
+        </dt>
+        <dd class="m-0 mt-1.5 text-z-sm leading-relaxed wrap-break-word text-z-text">
+          {{ billingType }}
         </dd>
       </div>
       <div class="min-w-0">

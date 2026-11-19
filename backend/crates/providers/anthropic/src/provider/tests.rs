@@ -3,6 +3,60 @@
 use super::*;
 use gateway_core::upstream::UpstreamFailureFields;
 
+#[test]
+fn stream_timings_separate_first_payload_thinking_and_text() {
+    for newline in ["\n", "\r\n"] {
+        let mut timings = ProviderResponseTimings {
+            first_event_ms: Some(10),
+            ..Default::default()
+        };
+        for frame in [
+            format!(": keep-alive{newline}{newline}"),
+            format!("data:{newline}{newline}"),
+        ] {
+            assert!(event_json(frame.as_bytes()).unwrap().is_none());
+        }
+        assert_eq!(timings.first_token_ms, None);
+        // message_start 早于思考和正文，空增量不能提前记录内容到达。
+        for (elapsed, payload) in [
+            (
+                20,
+                serde_json::json!({"type":"message_start","message":{"id":"msg_timing","usage":{"input_tokens":10,"output_tokens":0}}}),
+            ),
+            (
+                30,
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":""}}),
+            ),
+            (
+                50,
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"thinking_delta","thinking":"consider"}}),
+            ),
+            (
+                80,
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":"hello"}}),
+            ),
+            (
+                90,
+                serde_json::json!({"type":"content_block_delta","delta":{"type":"text_delta","text":" again"}}),
+            ),
+        ] {
+            let raw = format!(
+                "event: {}{newline}data: {payload}{newline}{newline}",
+                payload["type"].as_str().unwrap()
+            );
+            observe_event_timings(
+                &mut timings,
+                &event_json(raw.as_bytes()).unwrap().unwrap(),
+                elapsed,
+            );
+        }
+        assert_eq!(timings.first_event_ms, Some(10));
+        assert_eq!(timings.first_token_ms, Some(20));
+        assert_eq!(timings.first_reasoning_ms, Some(50));
+        assert_eq!(timings.first_text_ms, Some(80));
+    }
+}
+
 #[tokio::test]
 async fn restored_text_stream_reaches_completed_after_usage() {
     use serde_json::json;
@@ -44,6 +98,7 @@ async fn restored_text_stream_reaches_completed_after_usage() {
                     &Default::default(),
                     &json!({}),
                     value["type"] == "message_stop",
+                    &ProviderResponseObservation::new(transport()),
                 ));
             }
             if value["type"] == "message_stop" {
@@ -118,7 +173,13 @@ async fn restored_json_text_blocks_pass_canonical_validation_with_usage() {
     let mut usage = UsageCapture::default();
     usage.observe(&value["usage"]);
     let mut facts = vec![GatewayEvent::Started(meta.clone())];
-    for event in usage.finish("claude-sonnet-4-5", &Default::default(), &value, true) {
+    for event in usage.finish(
+        "claude-sonnet-4-5",
+        &Default::default(),
+        &value,
+        true,
+        &ProviderResponseObservation::new(transport()),
+    ) {
         facts.extend_from_slice(event.canonical_facts());
     }
     facts.extend(restored_json_text_events(&value));

@@ -310,7 +310,37 @@
     "saveUrl": "保存入口",
     "privacyReady": "Claude 文本脱敏已启用",
     "privacyUnavailable": "隐私处理不可用，Claude 请求已阻断",
-    "privacyHelp": "发送前处理敏感文本，响应中的占位符会自动还原；隐私处理不可用时会阻断 Claude 请求。",
-    "privacyKeyFingerprint": "主密钥指纹（与备份清单 keyFingerprint 核对）："
+    "privacyKeyFingerprint": "主密钥指纹",
+    "privacyKeyFingerprintHelp": "点击复制完整指纹，与备份清单 keyFingerprint 核对",
+    "privacyRulesFingerprint": "规则指纹",
+    "privacyCopyFingerprint": "点击复制完整指纹",
+    "privacyObservedAt": "更新于 {time}",
+    "privacySourceBuiltin": "内置规则包",
+    "privacySourceCustom": "自定义规则文件",
+    "privacyEnabledRules": "规则 {enabled}/{total} 启用",
+    "privacyShowRules": "查看规则",
+    "privacyHideRules": "收起规则",
+    "privacyReadonly": "规则由内置 veil 引擎执行，无法在页面上配置。调整规则需修改部署配置 veil.rules_file 并使用新映射卷。",
+    "privacyRule": {
+      "source": "来源",
+      "packs": "规则包",
+      "allowlist": "不替换",
+      "allowlistHelp": "这些字面量永不替换",
+      "customReplacesBuiltin": "自定义规则已整体替换内置规则包，secrets / region 开关不生效。",
+      "priority": "优先级",
+      "type": "类型",
+      "id": "规则 ID",
+      "matcher": "匹配方式",
+      "content": "匹配内容",
+      "matchers": {
+        "regex": "正则",
+        "dictionary": "词典",
+        "ip": "IP 解析"
+      },
+      "wordCount": "{count} 个词条（不显示原文）",
+      "ipParse": "按 IP 地址解析",
+      "copyPattern": "复制正则",
+      "empty": "暂无生效规则"
+    }
   }
 }

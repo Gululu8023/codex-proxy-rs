@@ -5,7 +5,7 @@ import { ZButton, ZDialog, ZEmpty, ZSkeleton } from '@codex-proxy/ui'
 
 import { RefreshCw } from '@lucide/vue'
 
-import { toRef } from 'vue'
+import { computed, toRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { useAccountPersonalInfo } from '../../composables/useAccountPersonalInfo'
 import AccountProfileActivityInsights from './ActivityInsights.vue'
@@ -21,10 +21,43 @@ const { t } = useI18n({ useScope: 'global' })
 
 const open = defineModel<boolean>({ required: true })
 const accountId = toRef(() => props.account.id)
-const { profile, subscription, loading, error, load } = useAccountPersonalInfo({
+const { basicProfile, profile, subscription, loading, error, load } = useAccountPersonalInfo({
   accountId,
   open,
   capabilities: toRef(() => props.account.capabilities),
+})
+const identityFields = computed(() => {
+  if (!basicProfile.value)
+    return []
+  const fields: Array<[string, string | null]> = [
+    [
+      t('accounts.profile.basic.name'),
+      basicProfile.value.name,
+    ],
+
+    [
+      t('accounts.profile.basic.email'),
+      basicProfile.value.email,
+    ],
+
+    [
+      t('accounts.profile.basic.userId'),
+      basicProfile.value.upstreamUserId,
+    ],
+
+    [
+      props.account.provider === 'anthropic'
+        ? t('accounts.profile.basic.organizationId')
+        : t('accounts.profile.basic.accountId'),
+      basicProfile.value.upstreamAccountId,
+    ],
+
+    [
+      t('accounts.profile.basic.plan'),
+      basicProfile.value.planType,
+    ],
+  ]
+  return fields.filter(([, value]) => value)
 })
 </script>
 
@@ -36,6 +69,22 @@ const { profile, subscription, loading, error, load } = useAccountPersonalInfo({
         <AccountProfileMetrics v-if="account.capabilities.profile" :profile="profile" :loading="loading" />
       </div>
 
+      <section v-if="basicProfile" aria-labelledby="profile-basic-title">
+        <h3 id="profile-basic-title" class="m-0 text-z font-heavy text-z-text">
+          {{ t('accounts.profile.basic.title') }}
+        </h3>
+        <dl class="mb-0 grid min-w-0 grid-cols-1 gap-4 rounded-z-lg bg-z-fill-alter p-4 sm:grid-cols-2">
+          <div v-for="[label, value] in identityFields" :key="label" class="min-w-0">
+            <dt class="text-z-xs text-z-text-secondary">
+              {{ label }}
+            </dt>
+            <dd class="mx-0 mt-1 break-all text-z-sm text-z-text">
+              {{ value }}
+            </dd>
+          </div>
+        </dl>
+      </section>
+
       <section v-if="subscription" class="grid min-w-0 grid-cols-1 gap-4" aria-labelledby="profile-subscription-title">
         <h3 id="profile-subscription-title" class="m-0 text-z font-heavy text-z-text">
           {{ t('accounts.profile.subscriptionInformation') }}
@@ -46,7 +95,7 @@ const { profile, subscription, loading, error, load } = useAccountPersonalInfo({
       <template v-if="loading && !profile">
         <AccountProfileSkeleton v-if="account.capabilities.profile" />
         <div v-else role="status" aria-busy="true">
-          <span class="sr-only">{{ t('accounts.profile.loadingSubscription') }}</span>
+          <span class="sr-only">{{ account.capabilities.subscription ? t('accounts.profile.loadingSubscription') : t('accounts.profile.basic.loading') }}</span>
           <ZSkeleton class="h-24 w-full rounded-z-lg" />
         </div>
       </template>
@@ -57,10 +106,13 @@ const { profile, subscription, loading, error, load } = useAccountPersonalInfo({
         </template>
       </template>
       <ZEmpty
-        v-else-if="!loading && !error && !account.capabilities.profile && !subscription"
+        v-else-if="!loading && !error && !account.capabilities.profile && !basicProfile && !subscription"
         :title="t('accounts.profile.noSubscriptionInformationYet')"
         surface="none"
       />
+      <p v-if="error && !account.capabilities.profile" role="alert" class="m-0 text-z-sm text-z-danger">
+        {{ error }}
+      </p>
     </div>
     <template #footer>
       <ZButton @click="open = false">

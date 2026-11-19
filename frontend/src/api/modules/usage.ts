@@ -36,6 +36,7 @@ export interface UsageCostCoverage {
 
 export interface UsageBilling {
   longContextBillingApplied: boolean
+  recorded?: UsageRecordMetadata
   image?: {
     inputAmountDisplay: string
     cacheReadAmountDisplay: string

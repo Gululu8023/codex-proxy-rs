@@ -65,7 +65,7 @@
 | 详细规则 | [自动审批并发帮助](../frontend/src/views/settings/components/ConcurrencyPolicyCard.vue) | 标签旁帮助图标打开 Popover，页面保留短提示，浮层补充规则和示例 |
 | 账号与用量展示 | [账号额度窗口](../frontend/src/components/account/account-usage-window/index.vue)、[共用用量表格](../frontend/src/components/usage/UsageRecordsTable.vue) | 复用后端展示字段和共享 presenter，管理端与 Key 页保持同一展示口径 |
 
-页面查询、表单状态与纯展示逻辑的归属见 [前端模块职责](architecture.md#34-前端模块职责)
+页面查询、表单状态与纯展示逻辑的归属见 [前端模块职责](architecture.md#33-前端模块职责)
 
 ## 语言与字体
 
@@ -476,7 +476,7 @@ utility / arbitrary variant；Vue Transition、跨浏览器 Range、动态富文
 
 ## 验证
 
-基础检查与受影响页面的验收按 [贡献与审查](../CONTRIBUTING.md#界面验证) 执行。
+基础检查与受影响页面的验收按 [贡献与审查](../CONTRIBUTING.md#验证) 执行。
 对照前后截图复核是否改变了无关区域、增加重复说明或不必要的空白，帮助内容收进浮层后检查入口可发现性与展开状态。
 修改主题派生、主题编辑器或共用组件的视觉行为时，按影响范围补充以下检查：
 

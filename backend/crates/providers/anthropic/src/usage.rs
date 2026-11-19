@@ -6,7 +6,6 @@ mod tests;
 use gateway_core::{
     event::{GatewayEvent, ProviderEvent, ProviderResponseMetadata, ProviderResponseObservation},
     metering::{CalculatedCost, PricingOverrides, Usage},
-    upstream::UpstreamTransport,
 };
 use serde_json::{Map, Value, json};
 
@@ -17,7 +16,7 @@ pub(crate) struct UsageCapture {
 
 impl UsageCapture {
     pub fn observe(&mut self, value: &Value) {
-        // 只持久化数字计数，不能把未知 usage 扩展中的文本写入观测
+        // 只持久化数字计数和已知计价枚举，不能保存未知 usage 扩展中的文本。
         for name in [
             "input_tokens",
             "output_tokens",
@@ -26,6 +25,18 @@ impl UsageCapture {
         ] {
             if let Some(number) = value.get(name).and_then(Value::as_u64) {
                 self.fields.insert(name.into(), json!(number));
+            }
+        }
+        for (name, allowed) in [
+            ("service_tier", &["standard", "priority", "batch"][..]),
+            ("speed", &["standard", "fast"][..]),
+        ] {
+            if let Some(value) = value
+                .get(name)
+                .and_then(Value::as_str)
+                .filter(|value| allowed.contains(value))
+            {
+                self.fields.insert(name.into(), json!(value));
             }
         }
         // 只使用上游明确给出的思考计数；它已包含在 output_tokens 中，不能再次累加费用。
@@ -76,6 +87,7 @@ impl UsageCapture {
         pricing: &PricingOverrides,
         request: &Value,
         finalized: bool,
+        observation: &ProviderResponseObservation,
     ) -> Vec<ProviderEvent> {
         let ordinary = self.fields.get("input_tokens").and_then(Value::as_u64);
         let read = self
@@ -118,112 +130,141 @@ impl UsageCapture {
         };
         let long_context = usage
             .input_tokens
-            .is_some_and(|input| input > long_threshold)
-            && (defaults.is_some_and(|price| price.bands.contains_key("long_standard"))
-                || override_model.is_some_and(|price| price.bands.contains_key("long_standard")));
+            .is_some_and(|input| input > long_threshold);
+        let select_band = |normal, long| {
+            if long_context
+                && (defaults.is_some_and(|price| price.bands.contains_key(long))
+                    || override_model.is_some_and(|price| price.bands.contains_key(long)))
+            {
+                long
+            } else {
+                normal
+            }
+        };
         let mut events = vec![ProviderEvent::canonical(GatewayEvent::Usage(usage))];
-        let mut metadata = json!({"schemaVersion":1,"rawUsage":self.fields,"billingKind":"api_equivalent_estimate","usageComplete":finalized});
+        // Core 保存最后一份完整观测；计量更新必须保留响应头、计时及先前的额度事实。
+        let mut metadata = observation.provider_metadata().map_or_else(
+            || json!({}),
+            |metadata| {
+                serde_json::from_str::<Value>(metadata.as_json())
+                    .expect("validated provider metadata")
+            },
+        );
+        metadata["schemaVersion"] = json!(1);
+        metadata["rawUsage"] = json!(self.fields);
+        metadata["billingKind"] = json!("api_equivalent_estimate");
+        metadata["usageComplete"] = json!(finalized);
+        // 新增工具费用或不完整缓存桶可能使后续用量不可计价，不能沿用上一帧的费用明细。
+        let saved = metadata.as_object_mut().expect("provider metadata object");
+        saved.remove("costBreakdown");
+        saved.remove("pricing");
         // 与管理目录共用固定价目；未识别模型保持费用未知，不按名称猜价格族。
-        let band = if long_context {
-            "long_standard"
+        let service_tier = self.fields.get("service_tier").and_then(Value::as_str);
+        let observed_speed = self.fields.get("speed").and_then(Value::as_str);
+        // Priority 是容量档位，不是 Fast；速度以响应为准，不能按请求意图收取 Fast 费用。
+        // 普通请求缺少 speed 时沿用标准价估算，Fast 请求未确认速度时保持费用未知。
+        let speed = observed_speed.or_else(|| {
+            request
+                .get("speed")
+                .is_none_or(|speed| speed == "standard")
+                .then_some("standard")
+        });
+        let standard_band = select_band("standard", "long_standard");
+        let band = if speed == Some("fast") {
+            select_band("fast", "long_fast")
         } else {
-            "standard"
+            standard_band
         };
         let override_band = override_model.and_then(|model| model.bands.get(band));
-        let price = override_band
-            .or_else(|| defaults.and_then(|price| price.bands.get(band)))
-            .map(|rate| {
-                (
-                    rate.input.ticks_per_token(),
-                    rate.output.ticks_per_token(),
-                    rate.cache_read.ticks_per_token(),
-                )
-            });
-        if let (Some((input_rate, output_rate, cache_read_rate)), Some(input), Some(output)) =
-            (price, ordinary, output)
-        {
-            let one_hour = self
-                .fields
-                .get("cache_creation")
-                .and_then(|cache| cache.get("ephemeral_1h_input_tokens"))
-                .and_then(Value::as_u64);
-            let five_minutes = self
-                .fields
-                .get("cache_creation")
-                .and_then(|cache| cache.get("ephemeral_5m_input_tokens"))
-                .and_then(Value::as_u64);
-            let write = write.unwrap_or(0);
-            let split = match (five_minutes, one_hour) {
-                (Some(five), Some(hour)) if five.checked_add(hour) == Some(write) => {
-                    Some((five, hour))
-                }
-                (None, None) if write == 0 => Some((0, 0)),
-                _ => None,
+        let one_hour = self
+            .fields
+            .get("cache_creation")
+            .and_then(|cache| cache.get("ephemeral_1h_input_tokens"))
+            .and_then(Value::as_u64);
+        let five_minutes = self
+            .fields
+            .get("cache_creation")
+            .and_then(|cache| cache.get("ephemeral_5m_input_tokens"))
+            .and_then(Value::as_u64);
+        let write = write.unwrap_or(0);
+        let split = match (five_minutes, one_hour) {
+            (Some(five), Some(hour)) if five.checked_add(hour) == Some(write) => Some((five, hour)),
+            (None, None) if write == 0 => Some((0, 0)),
+            _ => None,
+        };
+        let multiplier = override_model.map_or(10_000, |price| price.multiplier_bps);
+        // 标准与实际模式复用同一组用量、缓存 TTL 和定点精度，只切换价格档位。
+        let quote = |band: &str, multiplier: u32| {
+            let custom = override_model.and_then(|model| model.bands.get(band));
+            let rate = custom.or_else(|| defaults.and_then(|price| price.bands.get(band)))?;
+            let (five, hour) = split.or_else(|| custom.map(|_| (0, 0)))?;
+            let input_rate = rate.input.ticks_per_token();
+            let scaled = |tokens: u64, rate: u128| {
+                u128::from(tokens)
+                    .checked_mul(rate)?
+                    .checked_mul(u128::from(multiplier))
+                    .map(|ticks| ticks / 10_000)
             };
-            if let Some((five, hour)) = split.or_else(|| override_band.map(|_| (0, 0))) {
-                let multiplier = override_model.map_or(10_000, |price| price.multiplier_bps);
-                let rates = override_band.map(|rate| {
-                    (
-                        rate.input.ticks_per_token(),
-                        rate.output.ticks_per_token(),
-                        rate.cache_read.ticks_per_token(),
-                        rate.cache_write.ticks_per_token(),
-                    )
-                });
-                // 缓存读取直接取价目；新模型的折扣可能为 2.5% 或 5%，不能统一按输入价的 10% 推导。
-                let (in_rate, out_rate, read_rate, write_rate) =
-                    rates.unwrap_or((input_rate, output_rate, cache_read_rate, 0));
-                let scaled = |tokens: u64, rate: u128| {
-                    u128::from(tokens)
-                        .checked_mul(rate)?
-                        .checked_mul(u128::from(multiplier))
-                        .map(|ticks| ticks / 10_000)
+            let input = scaled(ordinary?, input_rate)?;
+            let output = scaled(output?, rate.output.ticks_per_token())?;
+            // 缓存读取直接取价目，不能统一按输入价的 10% 推导。
+            let read = scaled(read.unwrap_or(0), rate.cache_read.ticks_per_token())?;
+            let five = scaled(five, input_rate * 5 / 4)?;
+            let hour = scaled(hour, input_rate * 2)?;
+            let written = if custom.is_some() {
+                scaled(write, rate.cache_write.ticks_per_token())?
+            } else {
+                five.checked_add(hour)?
+            };
+            let total = input
+                .checked_add(output)?
+                .checked_add(read)?
+                .checked_add(written)?;
+            Some((input, output, read, written, five, hour, total))
+        };
+        if let Some((input, output, read, written, five, hour, ticks)) = quote(band, multiplier) {
+            // 速度倍率独立于自定义倍率；自定义倍率为零时仍保留价差，超出 JSON 整数范围时保持未知。
+            let speed_multiplier = if band == standard_band {
+                Some(10_000)
+            } else {
+                quote(band, 10_000)
+                    .zip(quote(standard_band, 10_000))
+                    .and_then(|(selected, standard)| {
+                        selected.6.checked_mul(10_000)?.checked_div(standard.6)
+                    })
+                    .and_then(|ratio| u64::try_from(ratio).ok())
+            };
+            let rate = override_band
+                .or_else(|| defaults.and_then(|price| price.bands.get(band)))
+                .expect("quoted price band");
+            // 费用项分别定点计价再求和；中断不抹去已观察到的可计价用量。
+            // Priority 合约费用不在此计算；这里始终是当前速度的公开 API 等价估算。
+            if speed.is_some()
+                && service_tier != Some("batch")
+                && !self.fields.contains_key("server_tool_use")
+                && let Ok(cost) = CalculatedCost::from_usd_ticks(ticks)
+            {
+                let amount = |ticks| {
+                    gateway_core::metering::Decimal::from_scaled(ticks)
+                        .expect("component bounded by total")
+                        .canonical()
                 };
-                let components = (|| {
-                    let input = scaled(input, in_rate)?;
-                    let output = scaled(output, out_rate)?;
-                    let read = scaled(read.unwrap_or(0), read_rate)?;
-                    let five = scaled(five, input_rate * 5 / 4)?;
-                    let hour = scaled(hour, input_rate * 2)?;
-                    let written = if override_band.is_some() {
-                        scaled(write, write_rate)?
-                    } else {
-                        five.checked_add(hour)?
-                    };
-                    let total = input
-                        .checked_add(output)?
-                        .checked_add(read)?
-                        .checked_add(written)?;
-                    Some((input, output, read, written, five, hour, total))
-                })();
-                // 费用项分别定点计价再求和，显示明细与账本总额使用同一精度
-                // 中断不抹去已观察到的可计价用量；usageComplete 单独表达是否正常结束。
-                if request.get("speed").is_none_or(|speed| speed == "standard")
-                    && !self.fields.contains_key("server_tool_use")
-                    && let Some((input, output, read, written, five, hour, ticks)) = components
-                    && let Ok(cost) = CalculatedCost::from_usd_ticks(ticks)
-                {
-                    let amount = |ticks| {
-                        gateway_core::metering::Decimal::from_scaled(ticks)
-                            .expect("component bounded by total")
-                            .canonical()
-                    };
-                    metadata["costBreakdown"] = json!({"currency":"USD","input":amount(input),"output":amount(output),"cacheRead":amount(read),
-                        "cacheWrite":amount(written),"cacheWrite5m":if override_band.is_none() {Some(amount(five))} else {None},
-                        "cacheWrite1h":if override_band.is_none() {Some(amount(hour))} else {None},"total":amount(ticks)});
-                    events.push(ProviderEvent::canonical(GatewayEvent::CalculatedCost(cost)));
-                }
-                metadata["pricing"] = json!({"model":model,"inputTicksPerToken":input_rate,"outputTicksPerToken":output_rate,
-                    "band":band,"multiplierBps":multiplier,"override":override_band,
-                    "cacheReadTicksPerToken":read_rate,"cacheWrite5mMultiplier":"1.25","cacheWrite1hMultiplier":"2"});
+                let standard = quote(standard_band, multiplier)
+                    .and_then(|quote| gateway_core::metering::Decimal::from_scaled(quote.6).ok())
+                    .map(|amount| amount.canonical());
+                metadata["costBreakdown"] = json!({"currency":"USD","input":amount(input),"output":amount(output),"cacheRead":amount(read),
+                    "cacheWrite":amount(written),"cacheWrite5m":if override_band.is_none() {Some(amount(five))} else {None},
+                    "cacheWrite1h":if override_band.is_none() {Some(amount(hour))} else {None},"standard":standard,"total":amount(ticks)});
+                events.push(ProviderEvent::canonical(GatewayEvent::CalculatedCost(cost)));
             }
+            metadata["pricing"] = json!({"model":model,"inputTicksPerToken":rate.input.ticks_per_token(),"outputTicksPerToken":rate.output.ticks_per_token(),
+                "band":band,"multiplierBps":multiplier,"override":override_band,
+                "serviceTier":service_tier,"speed":observed_speed,"speedMultiplierBps":speed_multiplier,
+                "cacheReadTicksPerToken":rate.cache_read.ticks_per_token(),"cacheWrite5mMultiplier":"1.25","cacheWrite1hMultiplier":"2"});
         }
         if let Some(metadata) = ProviderResponseMetadata::new(metadata.to_string()) {
             events.push(ProviderEvent::observation(
-                ProviderResponseObservation::new(
-                    UpstreamTransport::new("http_sse").expect("transport"),
-                )
-                .with_provider_metadata(metadata),
+                observation.clone().with_provider_metadata(metadata),
             ));
         }
         events
@@ -299,6 +340,15 @@ fn default_prices() -> &'static gateway_admin::model::pricing::ProviderPricingCa
             let mut bands = std::collections::BTreeMap::from([("standard".into(), standard)]);
             if let Some(long) = long {
                 bands.insert("long_standard".into(), long);
+            }
+            // 2026-11-19 核对官方 Fast 价；全上下文同价，不能把 Priority 当作 Fast。
+            let fast = match model {
+                "claude-opus-5-5" => Some(rates("8", "40", "0.4", "10")),
+                "claude-opus-5" | "claude-opus-4-8" => Some(rates("10", "50", "1", "12.5")),
+                _ => None,
+            };
+            if let Some(fast) = fast {
+                bands.insert("fast".into(), fast);
             }
             (
                 model.into(),

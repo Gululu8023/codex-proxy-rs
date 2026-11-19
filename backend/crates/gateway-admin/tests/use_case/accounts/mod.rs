@@ -823,6 +823,7 @@ impl AccountStore for FakeAccountStore {
     async fn load_quota_forecast_history(
         &self,
         window: &AccountUsageWindowQuery,
+        _: Option<&[String]>,
     ) -> AdminStoreResult<QuotaForecastHistory> {
         self.quota_window_queries
             .lock()
@@ -2398,7 +2399,7 @@ async fn quota_forecast_same_window_reversal_keeps_recorded_usage_in_the_report(
                 .map(
                     |(index, (minutes, percent, tokens))| QuotaForecastHistoryPoint {
                         started_at: now - TimeDelta::minutes(5),
-                        completed_at: now - TimeDelta::minutes(minutes),
+                        observed_at: now - TimeDelta::minutes(minutes),
                         usage: usage(index as u64 + 1, tokens),
                         provider_observation: ProviderDocument::new(OpaqueProviderData::new(
                             serde_json::json!({
@@ -2467,7 +2468,7 @@ async fn quota_forecast_mid_cycle_sampling_accepts_small_reset_jitter_but_not_a_
     let make_point = |hours, percent, tokens, delta| {
         QuotaForecastHistoryPoint {
         started_at: now - TimeDelta::hours(hours) - TimeDelta::seconds(10),
-        completed_at: now - TimeDelta::hours(hours),
+        observed_at: now - TimeDelta::hours(hours),
         usage: QuotaForecastUsage { request_count: tokens / 100, tokens, ..Default::default() },
         provider_observation: ProviderDocument::new(OpaqueProviderData::new(serde_json::json!({
             "percent": percent, "reset": (reset + TimeDelta::seconds(delta)).to_rfc3339(), "plan": "pro",
@@ -2515,11 +2516,11 @@ async fn quota_forecast_mid_cycle_sampling_accepts_small_reset_jitter_but_not_a_
     );
     // 新额度段已有足够观测后恢复预测，但总量不能带回重置前的累计用量
     let mut first = make_point(1, 5.0, 1_750, 0);
-    first.completed_at = now - TimeDelta::minutes(45);
-    first.started_at = first.completed_at - TimeDelta::seconds(10);
+    first.observed_at = now - TimeDelta::minutes(45);
+    first.started_at = first.observed_at - TimeDelta::seconds(10);
     let mut next = make_point(1, 20.0, 1_900, 0);
-    next.completed_at = now - TimeDelta::minutes(20);
-    next.started_at = next.completed_at - TimeDelta::seconds(10);
+    next.observed_at = now - TimeDelta::minutes(20);
+    next.started_at = next.observed_at - TimeDelta::seconds(10);
     store
         .quota_forecast_history
         .lock()
@@ -3359,8 +3360,11 @@ fn empty_profile_statistics() -> ProviderProfileStatistics {
 
 fn personal_info_subscription() -> ProviderSubscription {
     ProviderSubscription {
+        created_at: None,
         starts_at: None,
-        expires_at: Utc::now(),
+        expires_at: Some(Utc::now()),
+        status: None,
+        billing_type: None,
         will_renew: Some(true),
         billing_period: Some("monthly".to_owned()),
         billing_currency: Some("USD".to_owned()),
@@ -3438,6 +3442,30 @@ async fn personal_info_should_keep_subscription_when_profile_fails() {
         gateway_admin::model::AdminErrorKind::BadGateway
     );
     assert_eq!(info.subscription, Some(subscription));
+}
+
+#[tokio::test]
+async fn personal_info_returns_saved_identity_without_inventing_official_statistics() {
+    let provider = FakeProviderAdmin::new("anthropic", events());
+    provider.capabilities.lock().unwrap().basic_profile = true;
+    *provider.profile_result.lock().unwrap() = Err(ProviderAdminErrorKind::Unsupported);
+    let stored = account_record("anthropic");
+    let expected = stored.clone();
+    let services =
+        accounts_service(provider, FakeAccountStore::with_account(stored, events())).await;
+    let info = services
+        .accounts()
+        .personal_info(&ProviderAccountId::new("acct_test").unwrap())
+        .await
+        .unwrap();
+    let basic = info.basic_profile.unwrap();
+    assert_eq!(basic.name, expected.name);
+    assert_eq!(basic.email, expected.email);
+    assert_eq!(basic.upstream_user_id, expected.upstream_user_id);
+    assert_eq!(basic.upstream_account_id, expected.upstream_account_id);
+    assert_eq!(basic.plan_type, expected.plan_type);
+    assert!(info.profile.is_err());
+    assert!(info.subscription.is_none());
 }
 
 #[tokio::test]

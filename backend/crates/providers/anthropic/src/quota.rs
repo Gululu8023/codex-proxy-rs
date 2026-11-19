@@ -1,5 +1,8 @@
 //! Claude 动态订阅窗口与响应头观测，不以 API 等价费用推算订阅余额
 
+#[cfg(test)]
+mod tests;
+
 use crate::{
     API, OAUTH_BETA,
     credential::{CredentialError, Credentials},
@@ -8,11 +11,18 @@ use chrono::{DateTime, Utc};
 use futures::StreamExt;
 use gateway_admin::model::provider_credentials::*;
 use gateway_core::{
-    account::{OpaqueProviderData, QuotaEvidence, QuotaObservation, QuotaState, QuotaWriteOutcome},
+    account::{
+        AccountQuotaLimits, OpaqueProviderData, ProviderAccount, QuotaEvidence, QuotaMergeBase,
+        QuotaObservation, QuotaPauseDecision, QuotaState, QuotaWriteOutcome,
+    },
+    event::ProviderResponseMetadata,
     provider_ports::{ProviderCatalogCacheKey, ProviderCatalogScope},
 };
 use serde_json::{Value, json};
 use std::time::{Duration, SystemTime};
+
+const ACCOUNT_WINDOWS: [(&str, &str, u64); 2] =
+    [("five_hour", "5h", 18_000), ("seven_day", "7d", 604_800)];
 
 fn cache_key(
     credentials: &Credentials,
@@ -34,12 +44,23 @@ fn document(value: Value) -> ProviderDocument {
 pub(crate) async fn read(
     credentials: &Credentials,
     request: ProviderQuotaRequest,
+    snapshot_account: Option<&gateway_admin::model::accounts::AccountRecord>,
 ) -> Result<ProviderQuota, CredentialError> {
     credentials
         .veil
         .control(gateway_veil::ControlPurpose::Quota)
         .map_err(|_| CredentialError::Unavailable)?;
     let (loaded, tokens) = credentials.load(&request.account_id).await?;
+    if snapshot_account.is_some_and(|account| {
+        account.id != loaded.account.id().as_str()
+            || account.credential_revision.get() != loaded.account.revision().get()
+    }) {
+        return Err(CredentialError::Busy);
+    }
+    // 阈值编辑先以拟提交配置投影，写入上游观测始终采用当前已保存的配置。
+    let limits = snapshot_account.map_or(loaded.account.quota_limits(), |account| {
+        &account.quota_limits
+    });
     let mut plan_type = loaded.account.plan_type().map(str::to_owned);
     if request.refresh
         && (loaded.account.credential_state() != gateway_core::account::CredentialState::Ready
@@ -50,14 +71,23 @@ pub(crate) async fn read(
         return Err(CredentialError::Invalid);
     }
     let accounts = credentials.ports.accounts();
-    let mut value = accounts
+    let previous = accounts
         .get_quotas(std::slice::from_ref(loaded.account.id()))
         .await
         .map_err(|_| CredentialError::Unavailable)?
         .into_iter()
-        .next()
-        .map(|observation| Value::Object(observation.quota.into_inner()))
+        .next();
+    let mut value = previous
+        .as_ref()
+        .filter(|observation| observation.expected_revision == loaded.account.revision())
+        .map(|observation| Value::Object(observation.quota.expose_to_provider().clone()))
         .unwrap_or_else(|| json!({"windows":{}}));
+    invalidate_changed_plan(
+        &mut value,
+        plan_type.as_deref(),
+        loaded.account.quota_limits(),
+        Utc::now(),
+    );
     let cache = credentials.ports.catalog_cache();
     if request.refresh {
         let attempted_at = Utc::now();
@@ -100,7 +130,16 @@ pub(crate) async fn read(
                         windows.insert(name.clone(),json!({"utilization":percent,"resets_at":window["resets_at"].as_str(),"source":"oauth_usage","observedAt":attempted_at}));
                     }
                 }
+                let previous_value = value.clone();
+                retain_limit_evidence(
+                    &previous_value,
+                    &mut value,
+                    &windows,
+                    loaded.account.quota_limits(),
+                    attempted_at,
+                );
                 value["windows"] = Value::Object(windows);
+                value["source"] = json!("oauth_usage");
                 value["extraUsageEnabled"] = json!(raw["extra_usage"]["is_enabled"].as_bool());
                 value["observedAt"] = json!(attempted_at);
                 value["queryFailed"] = json!(false);
@@ -129,29 +168,18 @@ pub(crate) async fn read(
             }
             plan_type.clone_from(&profile.plan);
         }
-        // 原始观测与额度访问状态共用既有存储；查询失败不解除旧耗尽，迟到结果受 revision 与时间双重围栏保护
-        let state = if value["queryFailed"] == true {
-            loaded.account.quota()
-        } else {
-            access_state(&value, loaded.account.quota(), attempted_at.into())
-        };
-        if accounts
-            .compare_and_swap_quota(QuotaObservation {
-                quota_pause: None,
-                expected_connection: None,
-                account_id: loaded.account.id().clone(),
-                expected_revision: loaded.account.revision(),
-                quota: OpaqueProviderData::new(value.as_object().expect("quota object").clone()),
-                plan_type: plan_type.clone(),
-                observed_at: attempted_at.into(),
-                state,
-            })
-            .await
-            .map_err(|_| CredentialError::Unavailable)?
-            == QuotaWriteOutcome::Conflict
-        {
-            return Err(CredentialError::Busy);
+        if value["queryFailed"] == false {
+            value["planType"] = json!(plan_type);
         }
+        persist_observation(
+            credentials,
+            &loaded.account,
+            previous.as_ref(),
+            &value,
+            plan_type.clone(),
+            attempted_at,
+        )
+        .await?;
         // 资料失败仍保存已取得的额度，但向调用方报告失败，后台下轮继续补全套餐。
         if let Some(result) = profile {
             result?;
@@ -162,7 +190,7 @@ pub(crate) async fn read(
         .read(&headers_key)
         .await
         .map_err(|_| CredentialError::Unavailable)?;
-    let observed_at = timestamp(&value["observedAt"]);
+    let observed_at = account_observed_at(&value);
     let stale =
         observed_at.is_some_and(|time| Utc::now().signed_duration_since(time).num_seconds() > 300);
     let mut windows = Vec::new();
@@ -196,7 +224,11 @@ pub(crate) async fn read(
                 limit_id: Some(scope.into()),
                 limit_name: Some(scope.into()),
                 role,
-                local_usage_attribution: QuotaLocalUsageAttribution::Unavailable,
+                local_usage_attribution: if scope == "account" {
+                    QuotaLocalUsageAttribution::AccountWide
+                } else {
+                    QuotaLocalUsageAttribution::Unavailable
+                },
                 window_seconds: seconds,
                 used_percent: Some(percent),
                 reset_at: timestamp(&item["resets_at"]),
@@ -223,16 +255,23 @@ pub(crate) async fn read(
         "sampled"
     };
     Ok(ProviderQuota {
-        paused_windows: Vec::new(),
+        paused_windows: paused_windows(&value, limits),
         upstream: None,
         plan_type,
-        observed_at,
+        // 批量阈值提交需要存储版本；窗口 provider_data 中仍保留真实成功观测时间。
+        observed_at: if snapshot_account.is_some() {
+            previous
+                .as_ref()
+                .map(|observation| DateTime::<Utc>::from(observation.observed_at))
+        } else {
+            observed_at
+        },
         refresh_token_expires_at: None,
         limit_reached: reached,
         windows,
         credits: None,
         provider_data: Some(document(
-            json!({"schemaVersion":1,"state":state,"source":"oauth_usage","scope":"account","responseHeaders":header_data.map(|data|Value::Object(data.into_inner())),"queryFailedAt":value["queryFailedAt"]}),
+            json!({"schemaVersion":1,"state":state,"source":value["source"].as_str().unwrap_or("oauth_usage"),"scope":"account","responseHeaders":header_data.map(|data|Value::Object(data.into_inner())),"queryFailedAt":value["queryFailedAt"]}),
         )),
     })
 }
@@ -241,6 +280,190 @@ fn timestamp(value: &Value) -> Option<DateTime<Utc>> {
         .as_str()
         .and_then(|s| DateTime::parse_from_rfc3339(s).ok())
         .map(|t| t.with_timezone(&Utc))
+}
+
+fn account_observed_at(value: &Value) -> Option<DateTime<Utc>> {
+    // 代表性统计与预测以通用周窗口为准，部分响应头不能推进旧周窗口的采样时间。
+    timestamp(&value["windows"]["seven_day"]["observedAt"])
+        .or_else(|| timestamp(&value["observedAt"]))
+}
+
+fn invalidate_changed_plan(
+    value: &mut Value,
+    plan_type: Option<&str>,
+    limits: &AccountQuotaLimits,
+    now: DateTime<Utc>,
+) {
+    if value["planType"]
+        .as_str()
+        .zip(plan_type)
+        .is_some_and(|(previous, current)| !previous.eq_ignore_ascii_case(current))
+    {
+        // 套餐变化后的旧比例不能作为新套餐的预测基线；旧暂停仍等待对应窗口的恢复证据。
+        let previous = value.clone();
+        retain_limit_evidence(&previous, value, &serde_json::Map::new(), limits, now);
+        value["windows"] = json!({});
+        value["observedAt"] = Value::Null;
+    }
+}
+
+fn percent(value: &Value) -> Option<f64> {
+    value
+        .as_f64()
+        .filter(|used| used.is_finite() && *used >= 0.0)
+}
+
+fn limit_usage(value: &Value, key: &str) -> Option<f64> {
+    percent(&value["windows"][key]["utilization"])
+        .into_iter()
+        .chain(percent(&value["unconfirmedLimits"][key]))
+        .reduce(f64::max)
+}
+
+fn paused_windows(value: &Value, limits: &AccountQuotaLimits) -> Vec<String> {
+    ACCOUNT_WINDOWS
+        .iter()
+        .filter(|(key, _, _)| limits.reached(key, limit_usage(value, key)))
+        .map(|(key, _, _)| (*key).to_owned())
+        .collect()
+}
+
+/// 缺失窗口或缺失有效重置时间不能解除已确认的暂停；只有该窗口的新观测可替换证据。
+fn retain_limit_evidence(
+    previous: &Value,
+    value: &mut Value,
+    reported: &serde_json::Map<String, Value>,
+    limits: &AccountQuotaLimits,
+    observed_at: DateTime<Utc>,
+) {
+    let retained: serde_json::Map<_, _> = ACCOUNT_WINDOWS
+        .iter()
+        .filter_map(|(key, _, _)| {
+            let used = limit_usage(previous, key)?;
+            let complete = reported.get(*key).is_some_and(|window| {
+                percent(&window["utilization"]).is_some()
+                    && timestamp(&window["resets_at"]).is_some_and(|reset| reset > observed_at)
+            });
+            (limits.reached(key, Some(used)) && !complete).then(|| ((*key).to_owned(), json!(used)))
+        })
+        .collect();
+    if retained.is_empty() {
+        value
+            .as_object_mut()
+            .expect("quota object")
+            .remove("unconfirmedLimits");
+    } else {
+        value["unconfirmedLimits"] = Value::Object(retained);
+    }
+}
+
+async fn persist_observation(
+    credentials: &Credentials,
+    account: &ProviderAccount,
+    previous: Option<&QuotaObservation>,
+    value: &Value,
+    plan_type: Option<String>,
+    observed_at: DateTime<Utc>,
+) -> Result<(), CredentialError> {
+    let previous_state = previous
+        .filter(|observation| observation.expected_revision == account.revision())
+        .map_or(account.quota(), |observation| observation.state);
+    let state = if value["queryFailed"] == true {
+        previous_state
+    } else {
+        access_state(value, previous_state, observed_at.into())
+    };
+    // 同时校验凭据、阈值配置及合并基线，迟到响应不能清除其他请求刚写入的暂停证据。
+    let outcome = credentials
+        .ports
+        .accounts()
+        .compare_and_swap_quota(QuotaObservation {
+            quota_pause: Some(QuotaPauseDecision {
+                merge_base: Some(QuotaMergeBase {
+                    observed_at: previous.map(|observation| observation.observed_at),
+                }),
+                limits: account.quota_limits().clone(),
+                paused: !paused_windows(value, account.quota_limits()).is_empty()
+                    || (value["queryFailed"] == true && account.quota_paused()),
+            }),
+            expected_connection: None,
+            account_id: account.id().clone(),
+            expected_revision: account.revision(),
+            quota: OpaqueProviderData::new(value.as_object().expect("quota object").clone()),
+            plan_type,
+            observed_at: observed_at.into(),
+            state,
+        })
+        .await
+        .map_err(|_| CredentialError::Unavailable)?;
+    match outcome {
+        QuotaWriteOutcome::Updated => Ok(()),
+        QuotaWriteOutcome::Conflict => Err(CredentialError::Busy),
+    }
+}
+
+/// 只接受通用窗口的成对利用率和 epoch 秒数；代表性及模型专属头不参与账号总量。
+fn header_windows(
+    headers: &reqwest::header::HeaderMap,
+    observed_at: DateTime<Utc>,
+) -> serde_json::Map<String, Value> {
+    ACCOUNT_WINDOWS.iter().filter_map(|(key, suffix, _)| {
+        let used = field(headers, &format!("anthropic-ratelimit-unified-{suffix}-utilization"))?
+            .parse::<f64>().ok()? * 100.0;
+        if !used.is_finite() || used < 0.0 {
+            return None;
+        }
+        let reset = field(headers, &format!("anthropic-ratelimit-unified-{suffix}-reset"))?
+            .parse::<i64>().ok()?;
+        let reset = DateTime::<Utc>::from_timestamp(reset, 0)?;
+        (reset > observed_at).then(|| ((*key).to_owned(), json!({
+            "utilization":used,"resets_at":reset,"source":"response_headers","observedAt":observed_at,
+        })))
+    }).collect()
+}
+
+pub(crate) fn response_metadata(
+    headers: &reqwest::header::HeaderMap,
+    plan_type: Option<&str>,
+    observed_at: DateTime<Utc>,
+) -> Option<ProviderResponseMetadata> {
+    let windows = header_windows(headers, observed_at);
+    if windows.is_empty() {
+        return None;
+    }
+    ProviderResponseMetadata::new(
+        json!({
+            "claudeQuota":{"planType":plan_type,"windows":windows},
+        })
+        .to_string(),
+    )
+}
+
+pub(crate) fn forecast_observation(
+    document: &ProviderDocument,
+    window: &ProviderQuotaWindow,
+) -> Option<gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation> {
+    if window.local_usage_attribution != QuotaLocalUsageAttribution::AccountWide {
+        return None;
+    }
+    let (_, _, seconds) = ACCOUNT_WINDOWS
+        .iter()
+        .find(|(key, _, _)| *key == window.key)?;
+    if window.window_seconds != Some(*seconds) {
+        return None;
+    }
+    let quota = document
+        .expose_to_provider()
+        .expose_to_provider()
+        .get("claudeQuota")?;
+    let observed = &quota["windows"][&window.key];
+    Some(
+        gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation {
+            used_percent: percent(&observed["utilization"])?,
+            reset_at: timestamp(&observed["resets_at"])?,
+            plan_type: quota["planType"].as_str().map(str::to_owned),
+        },
+    )
 }
 
 pub(crate) fn scheduling_signals(
@@ -264,6 +487,12 @@ pub(crate) fn scheduling_signals(
         let Some(window) = windows.get(name) else {
             continue;
         };
+        let Some(window_observed) = timestamp(&window["observedAt"]).map(SystemTime::from) else {
+            continue;
+        };
+        if now.duration_since(window_observed).ok()? > Duration::from_secs(300) {
+            continue;
+        }
         let Some(percent) = window["utilization"]
             .as_f64()
             .filter(|value| value.is_finite() && *value >= 0.0)
@@ -454,6 +683,8 @@ pub(crate) async fn observe_headers(
     credentials: &Credentials,
     account: &gateway_core::account::ProviderAccount,
     headers: &reqwest::header::HeaderMap,
+    request_started_at: SystemTime,
+    observed_at: DateTime<Utc>,
 ) -> Result<(), CredentialError> {
     let mut facts = serde_json::Map::new();
     for (name, raw) in headers {
@@ -469,8 +700,7 @@ pub(crate) async fn observe_headers(
         return Ok(());
     }
     let key = cache_key(credentials, account, "quota_headers")?;
-    // 独立缓存避免并发响应头覆盖主动查询的订阅快照
-    let value = json!({"source":"response_headers","observedAt":Utc::now(),"scope":"upstream_reported","facts":facts});
+    let value = json!({"source":"response_headers","observedAt":observed_at,"scope":"upstream_reported","facts":facts});
     credentials
         .ports
         .catalog_cache()
@@ -480,7 +710,97 @@ pub(crate) async fn observe_headers(
             Duration::from_secs(90 * 86400),
         )
         .await
-        .map_err(|_| CredentialError::Unavailable)
+        .map_err(|_| CredentialError::Unavailable)?;
+    let mut windows = header_windows(headers, observed_at);
+    if windows.is_empty() {
+        return Ok(());
+    }
+    let previous = credentials
+        .ports
+        .accounts()
+        .get_quotas(std::slice::from_ref(account.id()))
+        .await
+        .map_err(|_| CredentialError::Unavailable)?
+        .into_iter()
+        .next();
+    let mut value = previous
+        .as_ref()
+        .filter(|observation| observation.expected_revision == account.revision())
+        .map(|observation| Value::Object(observation.quota.expose_to_provider().clone()))
+        .unwrap_or_else(|| json!({"windows":{}}));
+    if previous
+        .as_ref()
+        .is_some_and(|observation| observation.observed_at > request_started_at)
+    {
+        retain_overlapping_increases(&value, &mut windows, account.plan_type());
+        if windows.is_empty() {
+            return Ok(());
+        }
+    }
+    invalidate_changed_plan(
+        &mut value,
+        account.plan_type(),
+        account.quota_limits(),
+        observed_at,
+    );
+    let previous_value = value.clone();
+    retain_limit_evidence(
+        &previous_value,
+        &mut value,
+        &windows,
+        account.quota_limits(),
+        observed_at,
+    );
+    // 头中未出现的窗口保留旧值；主动查询和响应头共用 CAS 合并与暂停决策。
+    value["windows"]
+        .as_object_mut()
+        .expect("quota windows object")
+        .extend(windows);
+    value["observedAt"] = json!(observed_at);
+    value["queryFailed"] = json!(false);
+    value["source"] = json!("response_headers");
+    value["planType"] = json!(account.plan_type());
+    // 响应头不确认套餐，不能用请求开始时的账号快照覆盖并发刷新后的套餐。
+    persist_observation(
+        credentials,
+        account,
+        previous.as_ref(),
+        &value,
+        None,
+        observed_at,
+    )
+    .await
+}
+
+/// 并发在途请求只补充更高用量；较低比例须由更新观测后发起的请求或主动查询确认。
+fn retain_overlapping_increases(
+    previous: &Value,
+    windows: &mut serde_json::Map<String, Value>,
+    plan_type: Option<&str>,
+) {
+    // 不同套餐的比例不能比较；保留刷新取得的新套餐观测。
+    if previous["planType"]
+        .as_str()
+        .zip(plan_type)
+        .is_some_and(|(current, request)| !current.eq_ignore_ascii_case(request))
+    {
+        windows.clear();
+        return;
+    }
+    windows.retain(|key, window| {
+        if timestamp(&previous["windows"][key]["resets_at"])
+            .zip(timestamp(&window["resets_at"]))
+            .is_some_and(|(current, incoming)| {
+                (current - incoming).abs() > chrono::Duration::seconds(2)
+            })
+        {
+            // 已刷新到另一个周期时，旧在途响应的高值也不能重新触发暂停。
+            return false;
+        }
+        limit_usage(previous, key).is_none_or(|used| {
+            percent(&window["utilization"]).is_some_and(|current| current >= used)
+        })
+    });
 }
 
 // 仅账号级窗口能够限制整个账号；额外付费用量可用性未知时不把订阅触顶扩大成账号耗尽
@@ -489,8 +809,7 @@ fn access_state(value: &Value, previous: QuotaState, observed_at: SystemTime) ->
         .into_iter()
         .filter_map(|name| {
             let window = &value["windows"][name];
-            window["utilization"]
-                .as_f64()
+            percent(&window["utilization"])
                 .map(|percent| (percent, timestamp(&window["resets_at"])))
         })
         .collect();
@@ -509,7 +828,12 @@ fn access_state(value: &Value, previous: QuotaState, observed_at: SystemTime) ->
             None
         };
         QuotaState::exhausted(QuotaEvidence::AccountLimitReached, observed_at, reset)
-    } else if windows.len() == 2 && exhausted.is_empty() {
+    } else if windows.len() == 2
+        && exhausted.is_empty()
+        && windows
+            .iter()
+            .all(|(_, reset)| reset.is_some_and(|reset| SystemTime::from(reset) > observed_at))
+    {
         QuotaState::allowed(observed_at)
     } else {
         previous
@@ -556,6 +880,7 @@ pub(crate) async fn synchronize(credentials: &Credentials) -> Result<(), Credent
                     refresh: true,
                     rolling_usage: None,
                 },
+                None,
             )
             .await
         });

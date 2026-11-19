@@ -3,14 +3,16 @@ import type { UsageReasoningRecord } from './shared/presenter'
 
 import { Bot, SquareDashedBottomCode } from '@lucide/vue'
 
+import { computed } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { usageReasoningEffort } from './shared/presenter'
+import { usageReasoningEffort, usageThinkingDescription } from './shared/presenter'
 
-defineProps<{
+const props = defineProps<{
   record: UsageReasoningRecord
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
+const thinkingDescription = computed(() => usageThinkingDescription(props.record))
 </script>
 
 <template>
@@ -18,6 +20,15 @@ const { t } = useI18n({ useScope: 'global' })
     class="inline-flex items-center gap-1 whitespace-nowrap text-z-sm font-bold text-z-text"
   >
     <span>{{ usageReasoningEffort(record) }}</span>
+    <span
+      v-if="thinkingDescription"
+      class="inline-flex h-6 shrink-0 items-center rounded-full bg-z-blue-container px-2 font-mono text-z-xs leading-none font-bold text-z-blue-on-container"
+      tabindex="0"
+      :title="`thinking · ${thinkingDescription}`"
+      :aria-label="`thinking · ${thinkingDescription}`"
+    >
+      thinking
+    </span>
     <span
       v-if="record.subagentKind"
       class="inline-flex shrink-0 text-z-purple-text"

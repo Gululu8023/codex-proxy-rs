@@ -188,9 +188,15 @@ fn capitalize_first(value: &str) -> String {
 }
 
 pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<BillingView> {
-    match billing? {
-        domain::UsageBilling::Total { source, total } => Some(BillingView {
+    let billing = billing?;
+    match billing {
+        domain::UsageBilling::Total { source, total }
+        | domain::UsageBilling::Recorded { source, total, .. } => Some(BillingView {
             long_context_billing_applied: false,
+            recorded: match billing {
+                domain::UsageBilling::Recorded { metadata, .. } => Some(metadata.clone()),
+                _ => None,
+            },
             image: None,
             input_amount_display: "—".to_owned(),
             output_amount_display: "—".to_owned(),
@@ -211,6 +217,7 @@ pub(crate) fn billing_view(billing: Option<&domain::UsageBilling>) -> Option<Bil
         }),
         domain::UsageBilling::Calculated(value) => Some(BillingView {
             long_context_billing_applied: value.long_context_billing_applied,
+            recorded: None,
             image: value
                 .image
                 .as_ref()

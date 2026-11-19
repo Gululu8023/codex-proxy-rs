@@ -331,11 +331,14 @@ pub struct AccountCapabilitiesView {
     pub quota_credits: bool,
     pub quota: bool,
     pub quota_refresh: bool,
+    pub basic_profile: bool,
+    pub quota_forecast: bool,
     pub profile: bool,
     pub subscription: bool,
     pub avatar: bool,
     pub reset_credits: bool,
     pub consume_reset_credit: bool,
+    pub reset_credit_automation: bool,
 }
 
 impl From<gateway_admin::model::accounts::ProviderAccountCapabilities> for AccountCapabilitiesView {
@@ -343,6 +346,8 @@ impl From<gateway_admin::model::accounts::ProviderAccountCapabilities> for Accou
         Self {
             quota: value.quota,
             quota_refresh: value.quota_refresh,
+            basic_profile: value.basic_profile,
+            quota_forecast: value.quota_forecast,
             profile: value.profile,
             subscription: value.subscription,
             avatar: value.avatar,
@@ -350,6 +355,7 @@ impl From<gateway_admin::model::accounts::ProviderAccountCapabilities> for Accou
             quota_limits_supported: value.quota_limits_supported,
             quota_credits: value.quota_credits,
             consume_reset_credit: value.consume_reset_credit,
+            reset_credit_automation: value.reset_credit_automation,
         }
     }
 }
@@ -807,6 +813,7 @@ pub struct AccountDetailData {
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountPersonalInfoData {
+    pub basic_profile: Option<AccountBasicProfileData>,
     pub profile: Option<AccountProfileStatisticsData>,
     pub profile_error: Option<String>,
     pub subscription: Option<AccountSubscriptionData>,
@@ -822,6 +829,13 @@ impl From<(AccountPersonalInfo, crate::time::TimePresenter)> for AccountPersonal
             Err(error) => (None, Some(error.message().to_owned())),
         };
         Self {
+            basic_profile: info.basic_profile.map(|value| AccountBasicProfileData {
+                name: value.name,
+                email: value.email,
+                upstream_user_id: value.upstream_user_id,
+                upstream_account_id: value.upstream_account_id,
+                plan_type: value.plan_type,
+            }),
             profile,
             profile_error,
             subscription: info
@@ -831,14 +845,29 @@ impl From<(AccountPersonalInfo, crate::time::TimePresenter)> for AccountPersonal
     }
 }
 
+/// 已验证并保存的账号身份，与上游个人统计分开表达。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct AccountBasicProfileData {
+    pub name: String,
+    pub email: Option<String>,
+    pub upstream_user_id: Option<String>,
+    pub upstream_account_id: Option<String>,
+    pub plan_type: Option<String>,
+}
+
 /// 按需读取的订阅安全字段，不暴露原始上游响应
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct AccountSubscriptionData {
+    pub created_at: Option<String>,
+    pub created_at_display: Option<String>,
     pub starts_at: Option<String>,
     pub starts_at_display: Option<String>,
-    pub expires_at: String,
-    pub expires_at_display: String,
+    pub expires_at: Option<String>,
+    pub expires_at_display: Option<String>,
+    pub status: Option<String>,
+    pub billing_type: Option<String>,
     pub will_renew: Option<bool>,
     pub billing_period: Option<String>,
     pub billing_currency: Option<String>,
@@ -849,13 +878,23 @@ pub struct AccountSubscriptionData {
 impl From<(ProviderSubscription, crate::time::TimePresenter)> for AccountSubscriptionData {
     fn from((subscription, time): (ProviderSubscription, crate::time::TimePresenter)) -> Self {
         Self {
+            created_at_display: subscription
+                .created_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
+            created_at: subscription.created_at.map(|value| value.to_rfc3339()),
             starts_at_display: subscription
                 .starts_at
                 .as_ref()
                 .map(|value| time.datetime(value)),
             starts_at: subscription.starts_at.map(|value| value.to_rfc3339()),
-            expires_at_display: time.datetime(&subscription.expires_at),
-            expires_at: subscription.expires_at.to_rfc3339(),
+            expires_at_display: subscription
+                .expires_at
+                .as_ref()
+                .map(|value| time.datetime(value)),
+            expires_at: subscription.expires_at.map(|value| value.to_rfc3339()),
+            status: subscription.status,
+            billing_type: subscription.billing_type,
             will_renew: subscription.will_renew,
             billing_period: subscription.billing_period,
             billing_currency: subscription.billing_currency,

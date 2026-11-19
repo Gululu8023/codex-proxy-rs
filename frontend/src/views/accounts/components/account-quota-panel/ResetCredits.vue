@@ -26,6 +26,7 @@ const { t } = useI18n({ useScope: 'global' })
 const panelOpen = shallowRef(false)
 const confirmation = shallowRef<{ credit?: AccountResetCredit, ambiguous: boolean } | null>(null)
 const {
+  credits,
   availableCredits,
   availableCount,
   consumptionCredit,
@@ -74,9 +75,20 @@ const showTriggerCount = computed(() => hasSnapshot.value && availableCount.valu
 const confirmCreditTitle = computed(() => confirmation.value?.credit
   ? creditTitle(confirmation.value.credit)
   : t('accounts.quotaReset.useResetSelectedByUpstream'))
-const creditItems = computed(() => availableCredits.value.map(credit => ({
+const creditStatuses = computed<Record<string, string>>(() => ({
+  available: t('accounts.quotaReset.status.available'),
+  expired: t('accounts.quotaReset.status.expired'),
+  depleted: t('accounts.quotaReset.status.depleted'),
+  scheduled: t('accounts.quotaReset.status.scheduled'),
+  paused: t('accounts.quotaReset.status.paused'),
+}))
+const creditItems = computed(() => (props.account.capabilities.consumeResetCredit ? availableCredits.value : credits.value).map(credit => ({
   id: credit.id,
   title: creditTitle(credit),
+  scope: credit.resetType,
+  status: credit.status
+    ? creditStatuses.value[credit.status] ?? credit.status
+    : null,
   expiry: credit.expiresAtDisplay
     ? t('accounts.quotaReset.expires', { expiresAtDisplay: credit.expiresAtDisplay })
     : t('accounts.quotaReset.expiryHelp'),
@@ -147,11 +159,19 @@ function handleRequestConsume(creditId: string) {
   >
     <div v-if="confirmation" class="grid gap-3">
       <section class="rounded-z bg-z-fill-quaternary px-4 py-3.5">
+        <p class="m-0 mb-2 break-all text-z-sm text-z-text-secondary">
+          {{ account.name }}<template v-if="account.email">
+            · {{ account.email }}
+          </template>
+        </p>
         <p class="m-0 text-z-xs font-heavy text-z-text-quaternary">
           {{ t('accounts.quotaReset.thisTimeUse') }}
         </p>
         <p class="mt-1.5 mb-0 text-z-lg leading-snug font-heavy text-z-text">
           {{ confirmCreditTitle }}
+        </p>
+        <p v-if="confirmation.credit?.resetType" class="mt-1 mb-0 text-z-xs text-z-text-secondary">
+          {{ t('accounts.quotaReset.scope', { value: confirmation.credit.resetType }) }}
         </p>
         <p
           v-if="confirmation.credit"
@@ -169,7 +189,11 @@ function handleRequestConsume(creditId: string) {
 
       <AccountQuotaCredits :key="account.id" :account="account" @account-updated="emit('accountUpdated', $event)" />
 
-      <ResetCreditAutomation v-if="account.capabilities.consumeResetCredit" :key="account.id" :account-id="account.id" />
+      <ResetCreditAutomation v-if="account.capabilities.resetCreditAutomation" :key="account.id" :account-id="account.id" />
+
+      <p v-if="account.provider === 'anthropic' && !account.capabilities.consumeResetCredit" class="m-0 text-z-xs text-z-text-secondary" role="status">
+        {{ t('accounts.quotaReset.queryOnlyHelp') }}
+      </p>
 
       <section v-if="ambiguous" class="flex items-start gap-3 rounded-z bg-z-warning-container px-4 py-3.5" role="status">
         <AlertTriangle class="mt-0.5 size-4 shrink-0 text-z-warning-on-container" />
@@ -229,8 +253,15 @@ function handleRequestConsume(creditId: string) {
                 <p class="mt-1 mb-0 text-z-xs leading-normal font-emphasis text-z-text-secondary">
                   {{ credit.expiry }}
                 </p>
+                <p v-if="credit.scope" class="mt-1 mb-0 break-all text-z-xs text-z-text-secondary">
+                  {{ t('accounts.quotaReset.scope', { value: credit.scope }) }}
+                </p>
+                <p v-if="!account.capabilities.consumeResetCredit && credit.status" class="mt-1 mb-0 text-z-xs text-z-text-secondary">
+                  {{ credit.status }}
+                </p>
               </div>
               <ZButton
+                v-if="account.capabilities.consumeResetCredit"
                 size="small"
                 type="primary"
                 :disabled="!account.capabilities.consumeResetCredit || loading || consuming || ambiguous || availableCount <= 0"

@@ -57,6 +57,9 @@ pub struct CostCoverageView {
 #[serde(rename_all = "camelCase")]
 pub struct BillingView {
     pub long_context_billing_applied: bool,
+    /// 请求时保存并与账本核对的原生费用及价格，不包含其他 Provider 观测。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recorded: Option<Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub image: Option<ImageBillingView>,
     pub input_amount_display: String,

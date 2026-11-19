@@ -239,8 +239,15 @@ impl ProviderAdmin for AnthropicAdmin {
         authentication: &str,
     ) -> gateway_admin::model::accounts::ProviderAccountCapabilities {
         gateway_admin::model::accounts::ProviderAccountCapabilities {
+            quota_limits_supported: authentication == "oauth",
             quota: authentication == "oauth",
             quota_refresh: authentication == "oauth",
+            basic_profile: authentication == "oauth",
+            subscription: authentication == "oauth",
+            quota_forecast: authentication == "oauth",
+            reset_credits: authentication == "oauth",
+            // Claude 重置权益只允许人工操作，不能由手动消费能力推导自动消费权限。
+            reset_credit_automation: false,
             ..Default::default()
         }
     }
@@ -479,9 +486,112 @@ impl ProviderAdmin for AnthropicAdmin {
         &self,
         request: ProviderQuotaRequest,
     ) -> Result<ProviderQuota, ProviderAdminError> {
-        crate::quota::read(&self.credentials, request)
+        crate::quota::read(&self.credentials, request, None)
             .await
             .map_err(admin_error)
+    }
+
+    fn quota_forecast_time_path(&self, window: &ProviderQuotaWindow) -> Option<Vec<String>> {
+        Some(vec![
+            "claudeQuota".into(),
+            "windows".into(),
+            window.key.clone(),
+            "observedAt".into(),
+        ])
+    }
+
+    fn quota_forecast_observation(
+        &self,
+        document: &ProviderDocument,
+        window: &ProviderQuotaWindow,
+    ) -> Option<gateway_admin::model::quota_forecast_sampling::QuotaForecastObservation> {
+        crate::quota::forecast_observation(document, window)
+    }
+
+    async fn read_quotas(
+        &self,
+        requests: &[ProviderQuotaReadRequest<'_>],
+    ) -> Vec<Result<ProviderQuota, ProviderAdminError>> {
+        futures::future::join_all(requests.iter().map(|request| async {
+            if request.account.provider_kind != self.kind {
+                return Err(invalid());
+            }
+            crate::quota::read(
+                &self.credentials,
+                ProviderQuotaRequest {
+                    account_id: ProviderAccountId::new(request.account.id.clone())
+                        .map_err(|_| invalid())?,
+                    refresh: false,
+                    rolling_usage: request.rolling_usage.cloned(),
+                },
+                Some(request.account),
+            )
+            .await
+            .map_err(admin_error)
+        }))
+        .await
+    }
+
+    async fn subscription(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<Option<ProviderSubscription>, ProviderAdminError> {
+        let (loaded, tokens) = self
+            .credentials
+            .load(account_id)
+            .await
+            .map_err(admin_error)?;
+        if loaded.account.credential_state() != gateway_core::account::CredentialState::Ready {
+            return Err(invalid());
+        }
+        if tokens
+            .expiry()
+            .is_some_and(|expiry| expiry <= std::time::SystemTime::now())
+        {
+            return Err(ProviderAdminError::new(
+                ProviderAdminErrorKind::CredentialRefreshRequired,
+            ));
+        }
+        // 只读查询不刷新凭据；汇聚用例在返回前仍会校验 credential revision。
+        let profile = self
+            .credentials
+            .profile(&tokens, loaded.account.outbound_proxy())
+            .await
+            .map_err(|error| match error {
+                CredentialError::AccessUnauthorized => {
+                    ProviderAdminError::new(ProviderAdminErrorKind::CredentialRefreshRequired)
+                }
+                error => admin_error(error),
+            })?;
+        if loaded.account.upstream_user_id() != Some(profile.user.as_str())
+            || loaded.account.upstream_account_id() != Some(profile.organization.as_str())
+        {
+            return Err(invalid());
+        }
+        if profile.subscription_created_at.is_none()
+            && profile.subscription_status.is_none()
+            && profile.billing_type.is_none()
+        {
+            return Ok(None);
+        }
+        Ok(Some(ProviderSubscription {
+            created_at: profile.subscription_created_at,
+            starts_at: None,
+            expires_at: None,
+            status: profile.subscription_status,
+            billing_type: profile.billing_type,
+            will_renew: None,
+            billing_period: None,
+            billing_currency: None,
+            observed_at: Utc::now(),
+        }))
+    }
+
+    async fn reset_credits(
+        &self,
+        account_id: &ProviderAccountId,
+    ) -> Result<ProviderResetCredits, ProviderAdminError> {
+        crate::reset_credits::read(&self.credentials, account_id).await
     }
 
     async fn models(
@@ -698,7 +808,7 @@ fn invalid() -> ProviderAdminError {
 fn unavailable() -> ProviderAdminError {
     ProviderAdminError::new(ProviderAdminErrorKind::Unavailable)
 }
-fn admin_error(error: CredentialError) -> ProviderAdminError {
+pub(crate) fn admin_error(error: CredentialError) -> ProviderAdminError {
     ProviderAdminError::new(match error {
         CredentialError::Invalid
         | CredentialError::Revoked

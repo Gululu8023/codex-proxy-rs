@@ -22,6 +22,8 @@ import { useUsageRecordsTable } from './composables/useUsageRecordsTable'
 import { useUsageTimeRange } from './composables/useUsageTimeRange'
 import { isErrorUsageRecord } from './utils/detail'
 
+const { timezone } = defineProps<{ timezone: string }>()
+
 const { t } = useI18n({ useScope: 'global' })
 
 const recordView = shallowRef<UsageRecordStatus>('success')
@@ -41,7 +43,7 @@ const recordColumns = computed<TableColumn<UsageListRecord>[]>(() => recordView.
   : usageRecordColumns.value)
 const { visibleColumns, columnOptions, setColumnVisible, setColumnOrder, resetColumns } = useTableColumns(recordColumns, 'usage-records')
 const { timeRange, timeRangeParams, disabledDate, refreshTimeRangeEnd, latestTimeRangeParams }
-  = useUsageTimeRange()
+  = useUsageTimeRange(timezone)
 
 const {
   filterField,
@@ -100,6 +102,7 @@ watch(timeRange, () => {
         :aria-label="t('usage.page.dateRangeLabel')"
         class="min-w-0 flex-1 basis-full @min-[21rem]:basis-auto @min-[28rem]:w-60 @min-[28rem]:flex-none @max-[28rem]:[&>div]:gap-1.5 @max-[28rem]:[&>div]:px-2"
       />
+      <span class="text-xs text-z-text-secondary">{{ timezone }}</span>
     </div>
 
     <UsageSummaryCards :summary="summary.data" :error="summary.error" />

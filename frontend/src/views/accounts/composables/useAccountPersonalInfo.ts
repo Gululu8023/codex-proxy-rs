@@ -15,6 +15,9 @@ export function useAccountPersonalInfo({ accountId, open, capabilities }: {
   const info = shallowRef<AccountPersonalInfoResponse | null>(null)
   const request = useRequestState()
   const { loading } = request
+  const basicProfile = computed(() => capabilities.value.basicProfile
+    ? info.value?.basicProfile ?? null
+    : null)
   const profile = computed(() => capabilities.value.profile
     ? info.value?.profile ?? null
     : null)
@@ -53,6 +56,7 @@ export function useAccountPersonalInfo({ accountId, open, capabilities }: {
   watch([
     open,
     accountId,
+    () => capabilities.value.basicProfile,
     () => capabilities.value.profile,
     () => capabilities.value.subscription,
   ], ([isOpen]) => {
@@ -65,6 +69,7 @@ export function useAccountPersonalInfo({ accountId, open, capabilities }: {
   }, { immediate: true })
 
   return {
+    basicProfile,
     profile,
     subscription,
     loading,

@@ -202,11 +202,14 @@ export interface AccountCapabilities {
   quotaCredits: boolean
   quota: boolean
   quotaRefresh: boolean
+  basicProfile: boolean
+  quotaForecast: boolean
   profile: boolean
   subscription: boolean
   avatar: boolean
   resetCredits: boolean
   consumeResetCredit: boolean
+  resetCreditAutomation: boolean
 }
 
 export interface AccountRefreshResponse {

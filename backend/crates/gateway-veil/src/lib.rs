@@ -134,6 +134,10 @@ struct State {
     key_fingerprint: String,
     max_mappings: u64,
     packs: veil::config::PacksConfig,
+    /// 上游只在 `rules` 非空时整体替换内置包；仅有规则文件不代表规则来源是自定义。
+    custom_rules: bool,
+    /// 上游 `Allowlist` 不提供读取接口，保留生效列表供管理端只读展示。
+    allowlist: Vec<String>,
 }
 
 pub struct Runtime {
@@ -195,8 +199,84 @@ pub struct Health {
     pub restoration_operations: u64,
     pub failed_operations: u64,
     pub processing_ms: u64,
+    /// 仅内置规则包生效时返回；自定义规则会整体替换内置包，此时开关不生效。
     pub packs: Option<veil::config::PacksConfig>,
     pub categories: std::collections::BTreeMap<String, usize>,
+    pub rules: Option<RulesView>,
+}
+
+/// 管理端只读展示的生效规则；词典规则只给数量，避免回显被保护的字面量。
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RulesView {
+    pub source: RuleSource,
+    pub allowlist: Vec<String>,
+    pub items: Vec<RuleView>,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleSource {
+    Builtin,
+    Custom,
+}
+
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RuleMatcher {
+    Regex,
+    Dictionary,
+    Ip,
+}
+
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RuleView {
+    pub id: String,
+    pub type_prefix: String,
+    pub enabled: bool,
+    pub priority: i32,
+    pub matcher: RuleMatcher,
+    pub pattern: Option<String>,
+    pub word_count: Option<usize>,
+}
+
+impl RulesView {
+    fn new(state: &State) -> Self {
+        use veil_engine::rules::Matcher;
+        let items = state
+            .rules
+            .rules()
+            .iter()
+            .map(|rule| {
+                let (matcher, pattern, word_count) = match &rule.matcher {
+                    Matcher::Regex(_) => (RuleMatcher::Regex, rule.pattern.clone(), None),
+                    Matcher::Dictionary(words) => {
+                        (RuleMatcher::Dictionary, None, Some(words.len()))
+                    }
+                    Matcher::Ip => (RuleMatcher::Ip, None, None),
+                };
+                RuleView {
+                    id: rule.id.clone(),
+                    type_prefix: rule.type_prefix.clone(),
+                    enabled: rule.enabled,
+                    priority: rule.priority,
+                    matcher,
+                    pattern,
+                    word_count,
+                }
+            })
+            .collect();
+        Self {
+            source: if state.custom_rules {
+                RuleSource::Custom
+            } else {
+                RuleSource::Builtin
+            },
+            allowlist: state.allowlist.clone(),
+            items,
+        }
+    }
 }
 
 impl Runtime {
@@ -326,7 +406,9 @@ impl Runtime {
             restoration_operations: self.metrics.restorations.load(Ordering::Relaxed),
             failed_operations: self.metrics.errors.load(Ordering::Relaxed),
             processing_ms: self.metrics.processing_ms.load(Ordering::Relaxed),
-            packs: state.map(|state| state.packs.clone()),
+            packs: state
+                .filter(|state| !state.custom_rules)
+                .map(|state| state.packs.clone()),
             categories: state.map_or_else(Default::default, |state| {
                 let mut categories = std::collections::BTreeMap::new();
                 for rule in state.rules.rules().iter().filter(|rule| rule.enabled) {
@@ -334,6 +416,7 @@ impl Runtime {
                 }
                 categories
             }),
+            rules: state.map(|state| RulesView::new(state)),
         }
     }
 }
@@ -457,6 +540,8 @@ fn initialize(config: Config) -> Result<State, Error> {
         key_fingerprint,
         max_mappings: config.max_mappings,
         packs: rules_config.packs,
+        custom_rules: !rules_config.rules.is_empty(),
+        allowlist: rules_config.allowlist,
     })
 }
 

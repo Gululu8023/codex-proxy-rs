@@ -1,5 +1,5 @@
 name: Build binary
-description: Build a native release binary with shared dependency caching and timings
+description: Build a Linux binary with shared dependency caching and timings
 inputs:
   rust:
     description: Pinned Rust toolchain
@@ -21,26 +21,14 @@ runs:
   steps:
     # Veil 是脚本准备的 path 依赖，必须在 cargo metadata（含缓存步骤）之前就绪。
     - name: Prepare Veil source
-      if: runner.os != 'Windows'
       shell: bash
       run: sh scripts/prepare-veil.sh
-
-    - name: Prepare Veil source on Windows
-      if: runner.os == 'Windows'
-      shell: pwsh
-      run: ./scripts/prepare-veil.ps1
 
     - name: Setup Rust
       uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
       with:
         toolchain: ${{ inputs.rust }}
         targets: ${{ inputs.target }}
-
-    - name: Configure Windows runtime linkage
-      if: runner.os == 'Windows'
-      shell: bash
-      # 发行包静态链接 MSVC 运行库，解压运行时无需安装 VC++ Redistributable
-      run: echo 'RUSTFLAGS=-C target-feature=+crt-static' >> "$GITHUB_ENV"
 
     - name: Cache Rust dependencies
       uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3

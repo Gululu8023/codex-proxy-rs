@@ -32,7 +32,9 @@ large_enum_variant = { level = "warn", priority = 8 }
 needless_collect = { level = "deny", priority = 7 }
 
 [profile.dev]
-debug = true
+# check 使用 dev，test 继承 dev；关闭调试符号与增量缓存以限制本地验证产物。
+debug = false
+incremental = false
 
 [profile.release]
 debug = false

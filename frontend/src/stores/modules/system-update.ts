@@ -545,6 +545,7 @@ export const useSystemUpdateStore = defineStore('system-update', () => {
     canUpdate,
     canRestart,
     loadSidebarVersion,
+    loadVersion,
     loadSystem,
     checkUpdates,
     changeChannel,

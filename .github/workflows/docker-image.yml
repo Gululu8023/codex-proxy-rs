@@ -15,15 +15,41 @@ permissions:
   packages: write
 
 jobs:
-  image:
+  source:
     # workflow_run 有写权限，只接受本仓库 main 的 push 检查结果，不能消费 PR 源码。
     if: >-
       ${{ (github.event_name == 'workflow_run' &&
            github.event.workflow_run.conclusion == 'success' &&
            github.event.workflow_run.event == 'push' &&
+           github.event.workflow_run.head_branch == 'main' &&
            github.event.workflow_run.head_repository.full_name == github.repository) ||
           (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main') }}
-    # 只排队通过条件的任务；CI 完成事件可能乱序，旧事件不能取消较新提交的发布。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+    outputs:
+      sha: ${{ steps.source.outputs.sha }}
+    steps:
+      # 使用 main 的检查逻辑，旧 CI 事件不要求旧提交也包含当前工作流脚本。
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Resolve source with successful CI
+        id: source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+        run: |
+          MAIN_SHA="$(git rev-parse HEAD)" ruby .github/scripts/main-image.rb resolve >> "$GITHUB_OUTPUT"
+
+  image:
+    needs: source
+    if: needs.source.outputs.sha != ''
+    # CI 事件可能乱序，旧任务不能取消新任务；提升 latest 前还需重新核对 main。
     concurrency:
       group: docker-image-main
       cancel-in-progress: false
@@ -31,21 +57,12 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     env:
-      SOURCE_SHA: ${{ github.event.workflow_run.head_sha || github.sha }}
+      SOURCE_SHA: ${{ needs.source.outputs.sha }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SOURCE_SHA }}
-
-      - name: Require current main and successful CI
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          # 旧 CI 重跑不能覆盖新 main；手动重建也必须有同一提交的 CI 成功记录。
-          main_sha="$(gh api "repos/${GITHUB_REPOSITORY}/git/ref/heads/main" --jq '.object.sha')"
-          test "$SOURCE_SHA" = "$main_sha"
-          conclusion="$(gh api "repos/${GITHUB_REPOSITORY}/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=${SOURCE_SHA}&per_page=1" --jq '.workflow_runs[0].conclusion')"
-          test "$conclusion" = success
+          fetch-depth: 0
 
       - name: Build metadata
         id: meta
@@ -73,6 +90,7 @@ jobs:
           password: ${{ secrets.GITHUB_TOKEN }}
 
       - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        id: build
         with:
           context: .
           file: deploy/Dockerfile
@@ -80,7 +98,6 @@ jobs:
           platforms: linux/amd64
           push: true
           tags: |
-            ${{ steps.meta.outputs.image }}:latest
             ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
           labels: |
             org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
@@ -94,3 +111,20 @@ jobs:
           no-cache-filters: runtime-base
           cache-from: type=gha,scope=docker-main
           cache-to: type=gha,mode=max,scope=docker-main
+
+      - name: Recheck main before promoting latest
+        id: current
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          git fetch --no-tags origin main
+          MAIN_SHA="$(git rev-parse FETCH_HEAD)" ruby .github/scripts/main-image.rb current >> "$GITHUB_OUTPUT"
+
+      - name: Promote built image digest to latest
+        if: steps.current.outputs.promote == 'true'
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+          DIGEST: ${{ steps.build.outputs.digest }}
+        run: |
+          docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
+          test "$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')" = "$DIGEST"

@@ -13,7 +13,7 @@ const props = defineProps<{
 const { t } = useI18n({ useScope: 'global' })
 
 const items = computed(() => orderedPanelQuotaWindows(props.windows)
-  .filter(window => window.limitId === 'codex' || !window.limitId)
+  .filter(window => window.limitId === 'codex' || window.limitId === 'account' || !window.limitId)
   .map((window) => {
     const remaining = window.usedPercent !== null && Number.isFinite(window.usedPercent)
       ? Math.round((100 - Math.min(100, Math.max(0, window.usedPercent))) * 10) / 10

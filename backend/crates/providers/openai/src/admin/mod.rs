@@ -209,11 +209,14 @@ impl ProviderAdmin for OpenAiAdminProvider {
             quota_credits: oauth,
             quota: oauth,
             quota_refresh: oauth,
+            basic_profile: oauth,
+            quota_forecast: oauth,
             profile: oauth,
             subscription: oauth,
             avatar: oauth,
             reset_credits: oauth,
             consume_reset_credit: oauth,
+            reset_credit_automation: oauth,
         }
     }
 
@@ -842,8 +845,11 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .await
             .map(|subscription| {
                 subscription.map(|subscription| ProviderSubscription {
+                    created_at: None,
                     starts_at: subscription.starts_at,
-                    expires_at: subscription.expires_at,
+                    expires_at: Some(subscription.expires_at),
+                    status: None,
+                    billing_type: None,
                     will_renew: subscription.will_renew,
                     billing_period: subscription.billing_period,
                     billing_currency: subscription.billing_currency,

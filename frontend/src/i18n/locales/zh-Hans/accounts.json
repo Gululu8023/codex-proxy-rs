@@ -73,12 +73,7 @@
         "query_failed": "查询失败",
         "exhausted": "订阅额度已耗尽",
         "sampled": "官方订阅观测"
-      },
-      "sources": {
-        "oauth_usage": "订阅查询"
-      },
-      "accountScope": "整个账号",
-      "headerObserved": "响应头观测（以上游声明范围为准）"
+      }
     },
     "account": "账号",
     "connectionTest": {
@@ -449,6 +444,16 @@
       "stopHelp": "停止后仍会完成当前条目"
     },
     "profile": {
+      "basic": {
+        "title": "基础资料",
+        "name": "账号名称",
+        "email": "邮箱",
+        "userId": "用户 ID",
+        "organizationId": "组织 ID",
+        "accountId": "上游账号 ID",
+        "plan": "套餐",
+        "loading": "正在加载账号信息"
+      },
       "activity": {
         "quickMode": "快速模式",
         "reasoningEffort": "最常用的推理强度",
@@ -493,8 +498,13 @@
         "noAutomaticRenewal": "不自动续费",
         "byMonth": "按月",
         "byYear": "按年",
-        "subscriptionStarts": "订阅开始",
-        "subscriptionEnds": "订阅结束",
+        "subscriptionCreated": "订阅开通时间",
+        "subscriptionStarts": "本期开始",
+        "subscriptionEnds": "本期结束",
+        "status": "订阅状态",
+        "active": "有效",
+        "billingType": "计费类型",
+        "stripeSubscription": "Stripe 订阅",
         "label": "订阅",
         "renewalMethod": "续费方式"
       },
@@ -506,6 +516,7 @@
       "refreshInformation": "刷新信息"
     },
     "quotaForecast": {
+      "monthlyExtrapolated": "月额度（折算）",
       "tokenCapacity": "Token 容量",
       "equivalentFeeUsd": "等价费用 · USD",
       "capacityForecast": "容量预测",
@@ -537,6 +548,15 @@
       "refreshQuota": "刷新额度"
     },
     "quotaReset": {
+      "queryOnlyHelp": "目前仅支持查询，请前往 Claude 官方页面手动使用重置卡。",
+      "scope": "作用范围：{value}",
+      "status": {
+        "available": "持有可用权益",
+        "expired": "已过期",
+        "depleted": "已用尽",
+        "scheduled": "尚未生效",
+        "paused": "权益已暂停"
+      },
       "automation": {
         "confirming": "上次自动重置结果待确认，将继续核对",
         "unconfirmed": "上次自动重置结果待确认",

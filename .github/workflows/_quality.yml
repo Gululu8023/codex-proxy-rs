@@ -28,10 +28,9 @@ jobs:
     timeout-minutes: 30
     env:
       CARGO_TERM_COLOR: always
-      CARGO_PROFILE_DEV_DEBUG: '1'
       CARGO_BUILD_JOBS: '2'
       VEIL_SKIP_UI_BUILD: '1'
-      # 编译 AWS SDK 调试信息需要更大的 codegen 线程栈
+      # 为 AWS SDK 编译保留较大的 codegen 线程栈；debug 沿用 workspace 的关闭配置。
       RUST_MIN_STACK: 16777216
       CPR_TEST_DATABASE_URL: postgres://codex_proxy:codex_proxy@127.0.0.1:5432/codex_proxy
       CPR_TEST_REDIS_URL: redis://127.0.0.1:6379
@@ -64,8 +63,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref }}
-          # PR 场景需要 base 提交做冻结清单的 append-only 比对。
-          fetch-depth: ${{ github.event_name == 'pull_request' && 0 || 1 }}
+          # 数字 0 在表达式中为假值；使用字符串，确保 PR 能取到 base 的冻结清单。
+          fetch-depth: ${{ github.event_name == 'pull_request' && '0' || '1' }}
 
       # 已应用迁移的字节被 sqlx 启动校验钉死：改动已发布迁移会让所有
       # 存量部署重启即失败。冻结清单保证旧文件不被改、新文件必须入册。
@@ -272,3 +271,5 @@ jobs:
           for script in .github/**/*.sh; do bash -n "$script"; done
           for script in .github/scripts/*.rb; do ruby -c "$script"; done
           ruby .github/scripts/toolchains.rb
+          ruby -r './.github/scripts/release-metadata' -e 'ReleaseMetadata.platforms'
+          ruby -rjson -e 'ARGV.each { |path| JSON.parse(File.read(path)) }' .github/rulesets/*.json

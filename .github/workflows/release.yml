@@ -1,14 +1,17 @@
 name: Release
 
 on:
+  push:
+    tags:
+      - 'v*'
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to release, for example v0.1.0'
+        description: 'Release tag matching version.yaml, for example v4.0.4 (created from main if absent)'
         required: true
         type: string
       index_only:
-        description: 'Recover the index for an already public release without rebuilding'
+        description: 'Recover stable/latest Release and update index for a public release without rebuilding'
         type: boolean
         default: false
 
@@ -16,7 +19,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: release-${{ inputs.tag }}
+  group: release-${{ inputs.tag || github.ref_name }}
   cancel-in-progress: false
 
 env:
@@ -29,7 +32,7 @@ jobs:
     runs-on: ubuntu-26.04
     timeout-minutes: 10
     permissions:
-      contents: read
+      contents: write
       actions: read
     outputs:
       tag: ${{ steps.version.outputs.tag }}
@@ -39,8 +42,6 @@ jobs:
       git_sha: ${{ steps.version.outputs.git_sha }}
       platform_matrix: ${{ steps.version.outputs.platform_matrix }}
       docker_matrix: ${{ steps.version.outputs.docker_matrix }}
-      non_docker_matrix: ${{ steps.version.outputs.non_docker_matrix }}
-      windows_matrix: ${{ steps.version.outputs.windows_matrix }}
       docker_platforms: ${{ steps.version.outputs.docker_platforms }}
       previous_tag: ${{ steps.version.outputs.previous_tag }}
       prerelease: ${{ steps.version.outputs.prerelease }}
@@ -53,14 +54,61 @@ jobs:
       - name: Checkout
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: ${{ inputs.tag }}
+          ref: ${{ github.sha }}
           fetch-depth: 0
+
+      - name: Resolve release commit
+        id: source
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+          EVENT_NAME: ${{ github.event_name }}
+          EVENT_REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [[ "$EVENT_NAME" == workflow_dispatch && "$EVENT_REF" != refs/heads/main ]]; then
+            echo "Manual releases must run from main" >&2
+            exit 1
+          fi
+          ruby -r './.github/scripts/release-metadata' -e '
+            tag = ARGV.fetch(0)
+            abort "Expected a canonical v<version> tag" unless tag == "v#{ReleaseMetadata.version(tag)}"
+          ' "$RELEASE_TAG"
+
+          event_sha="$(git rev-parse HEAD)"
+          if git show-ref --verify --quiet "refs/tags/$RELEASE_TAG"; then
+            git checkout --detach "refs/tags/$RELEASE_TAG"
+            echo "create_tag=false" >> "$GITHUB_OUTPUT"
+          else
+            [[ "$EVENT_NAME" == workflow_dispatch ]] || exit 1
+            echo "create_tag=true" >> "$GITHUB_OUTPUT"
+          fi
+          if [[ "$EVENT_NAME" == push && "$(git rev-parse HEAD)" != "$event_sha" ]]; then
+            echo "Release tag moved after the triggering event" >&2
+            exit 1
+          fi
 
       - name: Read release metadata
         id: version
         env:
-          RELEASE_TAG: ${{ inputs.tag }}
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
         run: ruby .github/scripts/release-metadata.rb outputs "$RELEASE_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Reject an already public release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ steps.version.outputs.version }}
+        run: ruby .github/scripts/published-channels.rb check "$VERSION"
+
+      # GITHUB_TOKEN 创建的 tag 不会触发 push 工作流；本次运行继续构建，不能再次 dispatch。
+      - name: Create missing release tag
+        if: steps.source.outputs.create_tag == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.version.outputs.tag }}
+          RELEASE_SHA: ${{ steps.version.outputs.git_sha }}
+        run: |
+          gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+            -f "ref=refs/tags/$RELEASE_TAG" -f "sha=$RELEASE_SHA" >/dev/null
 
       - name: Read build toolchains
         id: toolchains
@@ -79,43 +127,6 @@ jobs:
       ref: ${{ needs.release-info.outputs.git_sha }}
       run_backend: ${{ needs.release-info.outputs.run_backend == 'true' }}
       run_frontend: false
-
-  windows:
-    needs: release-info
-    name: windows-check (${{ matrix.arch }})
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.release-info.outputs.windows_matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 30
-    env:
-      RUST_MIN_STACK: '16777216'
-      RUSTFLAGS: '-C target-feature=+crt-static'
-      CARGO_PROFILE_DEV_DEBUG: '1'
-      VEIL_SKIP_UI_BUILD: '1'
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-info.outputs.git_sha }}
-      - name: Prepare Veil source
-        shell: pwsh
-        run: ./scripts/prepare-veil.ps1
-      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
-        with:
-          toolchain: ${{ needs.release-info.outputs.rust }}
-          targets: ${{ matrix.target }}
-      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
-        with:
-          workspaces: backend -> target
-          shared-key: platform-check-${{ matrix.target }}
-          cache-bin: false
-          save-if: ${{ github.event_name != 'pull_request' }}
-      - name: Check Windows platform compilation
-        shell: bash
-        working-directory: backend
-        env:
-          BUILD_TARGET: ${{ matrix.target }}
-        run: cargo check --locked --target "$BUILD_TARGET" -p gateway-host
 
   security:
     needs: release-info
@@ -180,44 +191,8 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  build-binary:
-    name: build-binary (${{ matrix.os }}-${{ matrix.arch }})
-    needs: release-info
-    strategy:
-      fail-fast: false
-      matrix: ${{ fromJson(needs.release-info.outputs.non_docker_matrix) }}
-    runs-on: ${{ matrix.runner }}
-    timeout-minutes: 90
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ needs.release-info.outputs.git_sha }}
-
-      - name: Build binary
-        uses: ./.github/actions/build-binary
-        with:
-          rust: ${{ needs.release-info.outputs.rust }}
-          target: ${{ matrix.target }}
-          platform: ${{ matrix.os }}-${{ matrix.arch }}
-          binary: ${{ matrix.binary }}
-        env:
-          CPR_VERSION: ${{ needs.release-info.outputs.version }}
-          CPR_GIT_SHA: ${{ needs.release-info.outputs.git_sha }}
-          CPR_BUILD_TIME: ${{ needs.release-info.outputs.build_time }}
-          CPR_BUILD_TYPE: ${{ needs.release-info.outputs.build_type }}
-
-      - name: Upload binary artifact
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: codex-proxy-rs-${{ matrix.os }}-${{ matrix.arch }}
-          path: dist/binaries/${{ matrix.os }}-${{ matrix.arch }}/
-          if-no-files-found: error
-          retention-days: 7
-
   package-assets:
-    needs: [release-info, frontend, build-docker-binary, build-binary]
+    needs: [release-info, frontend, build-docker-binary]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -368,7 +343,7 @@ jobs:
       group: release-publication
       queue: max
     # 产物准备可与质量检查并行，版本标签和 GitHub Release 必须等全部质量与镜像验证通过
-    needs: [release-info, quality, windows, security, package-assets, build-docker-image]
+    needs: [release-info, quality, security, package-assets, build-docker-image]
     runs-on: ubuntu-26.04
     timeout-minutes: 20
     permissions:
@@ -382,6 +357,20 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ needs.release-info.outputs.git_sha }}
+
+      - name: Verify release tag still identifies the build
+        env:
+          RELEASE_TAG: ${{ needs.release-info.outputs.tag }}
+          RELEASE_SHA: ${{ needs.release-info.outputs.git_sha }}
+        run: |
+          git fetch --no-tags origin "refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse 'FETCH_HEAD^{commit}')" = "$RELEASE_SHA"
+
+      - name: Check that the release is unpublished
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-info.outputs.version }}
+        run: ruby .github/scripts/published-channels.rb check "$VERSION"
 
       - name: Download release assets
         uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
@@ -492,12 +481,6 @@ jobs:
           File.write(output, "#{notes}\n\n#{installation}\n")
           RUBY
 
-      - name: Check that the release is unpublished
-        env:
-          GH_TOKEN: ${{ github.token }}
-          VERSION: ${{ needs.release-info.outputs.version }}
-        run: ruby .github/scripts/published-channels.rb check "$VERSION"
-
       - name: Generate release asset provenance
         uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
         with:
@@ -511,7 +494,7 @@ jobs:
           generate_release_notes: true
           previous_tag: ${{ needs.release-info.outputs.previous_tag }}
           prerelease: ${{ needs.release-info.outputs.prerelease == 'true' }}
-          # action 保留已公开 Release 的状态，新 Release 上传完成后仍保持草稿
+          # 上方已拒绝公开版本；只允许重试未公开草稿，附件完成后再开放版本入口。
           draft: true
           make_latest: 'false'
           body_path: ${{ runner.temp }}/release-notes.md
@@ -534,15 +517,42 @@ jobs:
         run: ruby .github/scripts/published-channels.rb publish "$VERSION"
 
   recover-index:
-    if: inputs.index_only
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.index_only }}
     runs-on: ubuntu-26.04
+    timeout-minutes: 20
     concurrency:
       group: release-publication
       queue: max
     permissions:
       contents: write
+      packages: write
     steps:
+      - name: Require main workflow
+        env:
+          EVENT_REF: ${{ github.ref }}
+        run: test "$EVENT_REF" = refs/heads/main
+
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup Docker Buildx
+        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      # 公开后的恢复只使用现有版本镜像，不重建或覆盖附件；同时补齐跨服务提升。
+      - name: Recover public release promotion
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ inputs.tag }}
+        run: ruby .github/scripts/publish-release.rb recover "$TAG"
+
       - name: Verify public assets and publish channels to main
         env:
           GH_TOKEN: ${{ github.token }}

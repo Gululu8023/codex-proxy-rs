@@ -10,6 +10,50 @@ fn enable_capability(provider: &FakeProviderAdmin) {
     let mut capabilities = provider.capabilities.lock().unwrap();
     capabilities.reset_credits = true;
     capabilities.consume_reset_credit = true;
+    capabilities.reset_credit_automation = true;
+}
+
+#[tokio::test]
+async fn automation_requires_explicit_capability_before_configuration_status_or_execution() {
+    let events = events();
+    let provider = FakeProviderAdmin::new("openai", events.clone());
+    enable_capability(&provider);
+    provider
+        .capabilities
+        .lock()
+        .unwrap()
+        .reset_credit_automation = false;
+    let store = FakeAccountStore::new("openai", events.clone());
+    store
+        .automations
+        .lock()
+        .unwrap()
+        .insert("acct_test".into(), plan(Utc::now() + TimeDelta::days(1)));
+    let services = accounts_service(provider.clone(), store.clone()).await;
+    let id = ProviderAccountId::new("acct_test").unwrap();
+    assert!(
+        services
+            .accounts()
+            .reset_credit_automation_status(id.clone())
+            .await
+            .is_err()
+    );
+    assert!(
+        services
+            .accounts()
+            .set_reset_credit_automation(&context("unsupported-automation"), id.clone(), true)
+            .await
+            .is_err()
+    );
+    assert!(
+        services
+            .accounts()
+            .reconcile_reset_credit_automation(id)
+            .await
+            .is_err()
+    );
+    assert!(!recorded(&events).contains(&"provider.reset_credits"));
+    assert!(provider.reset_credit_commands().is_empty());
 }
 
 fn plan(expires_at: chrono::DateTime<Utc>) -> ResetCreditAutomation {
