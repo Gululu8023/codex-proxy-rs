@@ -157,7 +157,7 @@ pub(crate) async fn declare_usage_statistics(
     ), cost_values as (
         select name, origin, c.key, trim_scale(sum(c.value::numeric))::text as value
         from inputs cross join lateral jsonb_each_text(costs) c
-        where c.key not in ('standard_usd','no_cache_usd')
+        where c.key not in ('standard_usd','no_cache_usd','standard_usd_compared','standard_usd_actual','no_cache_usd_compared','no_cache_usd_actual')
         group by name, origin, c.key
     ), cost_groups as (
         select name,

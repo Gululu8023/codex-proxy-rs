@@ -371,7 +371,7 @@ interface UsageLatencyPercentiles {
   p99Ms: number | null
 }
 
-type UsageCostSummary = Pick<UsageOverviewCost, 'estimatedCost' | 'cacheSavings' | 'tierPremium' | 'costPerSuccessfulRequest' | 'coverage'>
+type UsageCostSummary = Pick<UsageOverviewCost, 'estimatedCost' | 'cacheSavings' | 'tierPremium' | 'costPerSuccessfulRequest' | 'coverage'> & { cacheSavingsRequestCount: number }
 
 interface UsageMetricData {
   health: UsageOverviewHealth

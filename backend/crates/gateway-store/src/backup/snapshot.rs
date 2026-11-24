@@ -114,7 +114,7 @@ impl BusinessSnapshot {
             ), amounts AS (
                 SELECT bucket_start, c.key, sum(c.value::numeric)::text AS value
                 FROM native CROSS JOIN LATERAL jsonb_each_text(costs) c
-                WHERE c.key NOT IN ('standard_usd','no_cache_usd') GROUP BY bucket_start,c.key
+                WHERE c.key NOT IN ('standard_usd','no_cache_usd','standard_usd_compared','standard_usd_actual','no_cache_usd_compared','no_cache_usd_actual') GROUP BY bucket_start,c.key
             ), totals AS (
                 SELECT bucket_start, jsonb_object_agg(key,value) AS counts FROM counters GROUP BY bucket_start
             ), costs AS (

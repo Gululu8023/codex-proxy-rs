@@ -254,7 +254,8 @@
     "cost": {
       "savings": "节省",
       "cache": "缓存",
-      "cacheSavings": "缓存节省",
+      "cacheSavings": "缓存净节省",
+      "comparisonCoverage": "可比请求覆盖率 {rate}。仅比较有历史计费快照的请求；负值表示缓存写入成本高于读取节省。Claude 为 API 等价估算。",
       "cacheTokenProportion": "缓存 Token 占比",
       "hitRequestRate": "请求命中率",
       "actualCost": "费用",

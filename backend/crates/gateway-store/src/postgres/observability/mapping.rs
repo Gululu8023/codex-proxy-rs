@@ -207,6 +207,7 @@ pub(crate) fn admin_calculated_usage_billing_fact(
     fact: CalculatedUsageBillingFact,
 ) -> admin_observability::UsageCalculatedBillingFact {
     admin_observability::UsageCalculatedBillingFact {
+        recorded_billing: None,
         breakdown: fact
             .billing_snapshot_json
             .as_ref()

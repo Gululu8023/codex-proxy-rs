@@ -276,6 +276,39 @@ pub enum DiagnosticDimension {
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct DecimalAmount(String);
 
+/// 费用场景的有符号差额；实际账本金额仍使用非负 DecimalAmount。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AmountDifference(String);
+
+impl AmountDifference {
+    #[must_use]
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for AmountDifference {
+    type Err = AdminModelError;
+
+    fn from_str(input: &str) -> Result<Self, Self::Err> {
+        let input = input.trim();
+        let magnitude: DecimalAmount = input.strip_prefix('-').unwrap_or(input).parse()?;
+        Ok(Self(
+            if input.starts_with('-') && magnitude.as_str() != "0" {
+                format!("-{magnitude}")
+            } else {
+                magnitude.to_string()
+            },
+        ))
+    }
+}
+
+impl std::fmt::Display for AmountDifference {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.0)
+    }
+}
+
 impl DecimalAmount {
     #[must_use]
     pub fn as_str(&self) -> &str {
@@ -405,6 +438,8 @@ pub struct ProviderBillingInput {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UsageCalculatedBillingFact {
     pub breakdown: Option<CalculatedBillingBreakdown>,
+    /// 仅包含请求当时的计费快照，不携带凭据或其他 Provider 观测。
+    pub recorded_billing: Option<serde_json::Value>,
     pub bucket_start: DateTime<Utc>,
     pub provider_kind: String,
     pub upstream_model_id: String,
@@ -1478,7 +1513,7 @@ pub struct UsageInsightsCostPoint {
     pub estimated_cost: Option<DecimalAmount>,
     pub standard_cost: Option<DecimalAmount>,
     pub no_cache_cost: Option<DecimalAmount>,
-    pub cache_savings: Option<DecimalAmount>,
+    pub cache_savings: Option<AmountDifference>,
     pub cached_token_rate: f64,
     pub cache_hit_request_rate: Option<f64>,
 }
@@ -1486,11 +1521,12 @@ pub struct UsageInsightsCostPoint {
 /// 洞察成本汇总
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageInsightsCost {
+    pub cache_savings_request_count: u64,
     pub estimated_cost: Option<DecimalAmount>,
     pub standard_cost: Option<DecimalAmount>,
     pub no_cache_cost: Option<DecimalAmount>,
-    pub cache_savings: Option<DecimalAmount>,
-    pub tier_premium: Option<DecimalAmount>,
+    pub cache_savings: Option<AmountDifference>,
+    pub tier_premium: Option<AmountDifference>,
     pub cost_per_request: Option<DecimalAmount>,
     pub cost_per_successful_request: Option<DecimalAmount>,
     pub tokens_per_request: f64,
@@ -1555,9 +1591,10 @@ pub struct UsageThroughputPercentiles {
 /// 成本卡片各视图共同显示的汇总
 #[derive(Debug, Clone, PartialEq)]
 pub struct UsageCostSummary {
+    pub cache_savings_request_count: u64,
     pub estimated_cost: Option<DecimalAmount>,
-    pub cache_savings: Option<DecimalAmount>,
-    pub tier_premium: Option<DecimalAmount>,
+    pub cache_savings: Option<AmountDifference>,
+    pub tier_premium: Option<AmountDifference>,
     pub cost_per_successful_request: Option<DecimalAmount>,
     pub coverage: CostCoverage,
 }
@@ -1584,7 +1621,7 @@ pub enum UsageInsightData {
     Throughput(UsageMetricSeries<UsageThroughputPercentiles>),
     Load(UsageMetricSeries<UsageInsightsLoad>),
     Cost(UsageMetricSeries<UsageCostSummary, UsageCostComparison>),
-    Savings(UsageMetricSeries<UsageCostSummary, Option<DecimalAmount>>),
+    Savings(UsageMetricSeries<UsageCostSummary, Option<AmountDifference>>),
     Cache(UsageMetricSeries<UsageCostSummary, UsageCacheEfficiency>),
 }
 

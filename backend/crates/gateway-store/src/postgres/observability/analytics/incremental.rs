@@ -387,7 +387,7 @@ async fn rebuild_groups(
                     mr.ops_auth_failure_count,mr.ops_provider_5xx_count,mr.input_tokens,mr.output_tokens,
                     mr.cached_input_tokens,mr.cache_write_input_tokens,mr.reasoning_output_tokens,
                     mr.image_input_tokens,mr.image_output_tokens,mr.total_tokens,
-                    mr.cost_source,mr.cost_currency,mr.cost_amount,mr.standard_cost_amount,mr.no_cache_cost_amount,
+                    mr.cost_source,mr.cost_currency,mr.cost_amount,mr.standard_cost_amount,mr.no_cache_cost_amount,mr.billing_comparison_ready,
                     mr.first_token_ms,mr.latency_ms,mr.admission_decision_ms,mr.account_selection_wait_ms,
                     mr.upstream_response_ms,mr.capacity_used_slots,mr.capacity_total_slots,coalesce((",
             );

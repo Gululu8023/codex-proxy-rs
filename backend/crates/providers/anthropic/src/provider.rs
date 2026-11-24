@@ -1041,7 +1041,13 @@ impl Provider for AnthropicProvider {
                         execution_context.trace().record("anthropic.credential_state_update_failed", serde_json::json!({"status":status}));
                     }
                 }
-                let mut error = sent(match status { 401 => ProviderErrorKind::Unauthorized, 403 => ProviderErrorKind::PermissionDenied, 429 => ProviderErrorKind::RateLimited, _ => ProviderErrorKind::Unavailable })
+                // 完整 HTTP 限流拒绝尚未交付内容，可由协调器按原有预算切号；请求级拒绝仍不可重放。
+                let kind = match status { 401 => ProviderErrorKind::Unauthorized, 403 => ProviderErrorKind::PermissionDenied, 429 => ProviderErrorKind::RateLimited, _ => ProviderErrorKind::Unavailable };
+                let mut error = if !policy_rejection && status == 429 && matches!(scope, crate::quota::ErrorScope::Account | crate::quota::ErrorScope::Model) {
+                    ProviderError::new(kind, UpstreamSendState::Sent).with_replay_safe()
+                } else {
+                    sent(kind)
+                }
                     .with_status(status).with_upstream_failure_fields(raw_fields.clone()).with_client_visible_upstream_response(ClientVisibleUpstreamResponse::new(status, content_type.clone(), bytes.clone()).with_headers(headers.clone()));
                 if let Some(rejection) = &rejection { error = error.with_retry_after(rejection.until.duration_since(SystemTime::now()).unwrap_or_default()); }
                 error = error.with_diagnostic(gateway_core::error::ProviderDiagnostic::new("Anthropic upstream refusal")

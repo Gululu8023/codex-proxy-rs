@@ -254,7 +254,8 @@
     "cost": {
       "savings": "節省",
       "cache": "緩存",
-      "cacheSavings": "緩存節省",
+      "cacheSavings": "快取淨節省",
+      "comparisonCoverage": "可比請求覆蓋率 {rate}。僅比較有歷史計費快照的請求；負值表示快取寫入成本高於讀取節省。Claude 為 API 等價估算。",
       "cacheTokenProportion": "緩存 Token 佔比",
       "hitRequestRate": "請求命中率",
       "actualCost": "費用",

@@ -274,6 +274,16 @@ pub trait ProviderAdmin: Send + Sync {
         input: &ProviderBillingInput,
     ) -> Result<Option<CalculatedBillingBreakdown>, ProviderAdminError>;
 
+    /// 从请求时保存的 Provider 原生快照恢复费用场景，不能套用当前价目。
+    fn recorded_billing_projection(
+        &self,
+        _input: &ProviderBillingInput,
+        _recorded: &serde_json::Value,
+    ) -> Result<Option<crate::model::observability::UsageBillingProjection>, ProviderAdminError>
+    {
+        Ok(None)
+    }
+
     async fn prepare_import(
         &self,
         command: PrepareCredentialImport,
@@ -524,6 +534,17 @@ impl ProviderAdminRegistry {
         input: &ProviderBillingInput,
     ) -> Result<Option<CalculatedBillingBreakdown>, ProviderAdminError> {
         self.require(provider_kind)?.calculated_billing(input)
+    }
+
+    pub fn recorded_billing_projection(
+        &self,
+        provider_kind: &ProviderKind,
+        input: &ProviderBillingInput,
+        recorded: &serde_json::Value,
+    ) -> Result<Option<crate::model::observability::UsageBillingProjection>, ProviderAdminError>
+    {
+        self.require(provider_kind)?
+            .recorded_billing_projection(input, recorded)
     }
 }
 

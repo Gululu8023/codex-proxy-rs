@@ -1360,6 +1360,7 @@ fn metric_throughput_view(value: domain::UsageThroughputPercentiles) -> UsageThr
 
 fn metric_cost_summary_view(value: domain::UsageCostSummary) -> UsageCostSummaryView {
     UsageCostSummaryView {
+        cache_savings_request_count: value.cache_savings_request_count,
         estimated_cost: value.estimated_cost.as_ref().map(ToString::to_string),
         cache_savings: value.cache_savings.as_ref().map(ToString::to_string),
         tier_premium: value.tier_premium.as_ref().map(ToString::to_string),

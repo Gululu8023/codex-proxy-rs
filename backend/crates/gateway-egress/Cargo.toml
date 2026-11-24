@@ -11,7 +11,7 @@ gateway-core = { path = "../gateway-core" }
 http = "1.4.0"
 hyper-util = { version = "=0.1.21", features = ["client-proxy"] }
 reqwest = { version = "=0.12.28", default-features = false, features = ["socks"] }
-url = "2.5"
+url = "2.5.9"
 
 [lints]
 workspace = true

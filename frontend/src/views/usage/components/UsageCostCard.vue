@@ -63,6 +63,16 @@ const coverageRate = computed(() => {
     ? (known + partial) / total
     : null
 })
+const comparisonCoverageRate = computed(() => {
+  if (!cost.value)
+    return null
+  const { known, partial, unknown } = cost.value.coverage
+  const total = known + partial + unknown
+  return total > 0
+    ? cost.value.cacheSavingsRequestCount / total
+    : null
+})
+const savingsNegative = computed(() => (decimalDisplayNumber(cost.value?.cacheSavings) ?? 0) < 0)
 
 const viewOptions = computed(() => ([
   {
@@ -281,7 +291,7 @@ function costAmount(value: string | null, pointIndex: number) {
           </div>
           <div class="grid min-w-0 gap-1 px-1.5">
             <span class="text-[10px] font-bold text-z-text-quaternary" :title="t('usage.cost.cacheSavings')">{{ t('usage.cost.savings') }}</span>
-            <strong class="wrap-anywhere font-mono text-z-sm font-heavy tabular-nums text-z-green-text">
+            <strong class="wrap-anywhere font-mono text-z-sm font-heavy tabular-nums" :class="savingsNegative ? 'text-z-orange-text' : 'text-z-green-text'">
               {{ formatUsd(cost.cacheSavings) }}
             </strong>
           </div>
@@ -304,6 +314,9 @@ function costAmount(value: string | null, pointIndex: number) {
             </strong>
           </div>
         </div>
+        <p v-if="cost" class="text-xs text-z-text-tertiary">
+          {{ t('usage.cost.comparisonCoverage', { rate: formatPercent(comparisonCoverageRate) }) }}
+        </p>
         <BaseChart v-if="hasData" :option="chartOption" :height="210" />
         <ZEmpty
           v-else

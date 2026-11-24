@@ -394,6 +394,8 @@ impl<'a> AnalyticsSnapshot<'a> {
                 "provider_reported_count",
                 "calculated_count",
                 "unavailable_count",
+                "standard_usd_comparison_count",
+                "no_cache_usd_comparison_count",
             ],
             UsageInsightMetric::Cache => &[
                 "request_count",
@@ -405,6 +407,8 @@ impl<'a> AnalyticsSnapshot<'a> {
                 "provider_reported_count",
                 "calculated_count",
                 "unavailable_count",
+                "standard_usd_comparison_count",
+                "no_cache_usd_comparison_count",
             ],
             _ => &["request_count"],
         };
@@ -1174,6 +1178,8 @@ fn projected_cost_points(
                 bucket_start: *bucket_start,
                 standard_amount: state.projected_cost("standard_usd")?,
                 no_cache_amount: state.projected_cost("no_cache_usd")?,
+                standard_comparison: state.cost_comparison("standard_usd")?,
+                no_cache_comparison: state.cost_comparison("no_cache_usd")?,
             })
         })
         .collect()

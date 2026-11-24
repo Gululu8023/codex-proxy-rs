@@ -275,6 +275,17 @@ impl ProviderAdmin for AnthropicAdmin {
         let selection = crate::profile::Selection::parse(configuration).ok()?;
         Some(self.credentials.profiles.dashboard(selection))
     }
+    fn recorded_billing_projection(
+        &self,
+        input: &ProviderBillingInput,
+        recorded: &Value,
+    ) -> Result<
+        Option<gateway_admin::model::observability::UsageBillingProjection>,
+        ProviderAdminError,
+    > {
+        Ok(crate::usage::recorded_billing_projection(input, recorded))
+    }
+
     fn calculated_billing(
         &self,
         _input: &ProviderBillingInput,

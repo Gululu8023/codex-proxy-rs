@@ -276,6 +276,74 @@ pub(crate) fn pricing_catalog() -> gateway_admin::model::pricing::ProviderPricin
     default_prices().clone()
 }
 
+/// 历史写入可能混合 5m/1h TTL；采用请求时分项，不能伪造统一写入单价。
+pub(crate) fn recorded_billing_projection(
+    input: &gateway_admin::model::observability::ProviderBillingInput,
+    recorded: &Value,
+) -> Option<gateway_admin::model::observability::UsageBillingProjection> {
+    use gateway_admin::model::observability::{DecimalAmount, UsageBillingProjection};
+    use gateway_core::metering::Decimal;
+
+    let breakdown = &recorded["costBreakdown"];
+    let pricing = &recorded["pricing"];
+    if recorded["kind"] != "api_equivalent_estimate"
+        || input.total.currency != "USD"
+        || breakdown["currency"] != "USD"
+        || pricing["model"].as_str() != Some(input.upstream_model_id.as_str())
+    {
+        return None;
+    }
+    let amount = |key: &str| breakdown[key].as_str()?.parse::<Decimal>().ok();
+    let total = amount("total")?;
+    if total.canonical() != input.total.amount.as_str() {
+        return None;
+    }
+    let ordinary = amount("input")?;
+    let output = amount("output")?;
+    let read = amount("cacheRead")?;
+    let write = amount("cacheWrite")?;
+    if ordinary
+        .checked_add(output)?
+        .checked_add(read)?
+        .checked_add(write)?
+        != total
+    {
+        return None;
+    }
+    let input_tokens = input.input_tokens?;
+    let read_tokens = input.cached_input_tokens.unwrap_or_default();
+    let write_tokens = input.cache_write_input_tokens.unwrap_or_default();
+    let ordinary_tokens = input_tokens
+        .checked_sub(read_tokens)?
+        .checked_sub(write_tokens)?;
+    let input_rate = pricing["inputTicksPerToken"].as_u64()?;
+    let output_rate = pricing["outputTicksPerToken"].as_u64()?;
+    let multiplier = pricing["multiplierBps"].as_u64()?;
+    let quote = |tokens: u64, rate: u64| {
+        u128::from(tokens)
+            .checked_mul(u128::from(rate))?
+            .checked_mul(u128::from(multiplier))
+            .map(|ticks| ticks / 10_000)
+    };
+    // 核对持久用量与历史单价，避免把不匹配的观测当作可比样本。
+    if quote(ordinary_tokens, input_rate)? != ordinary.scaled()
+        || quote(input.output_tokens?, output_rate)? != output.scaled()
+    {
+        return None;
+    }
+    let no_cache = quote(input_tokens, input_rate)?.checked_add(output.scaled())?;
+    Some(UsageBillingProjection {
+        standard_amount: breakdown["standard"]
+            .as_str()
+            .and_then(|value| value.parse::<DecimalAmount>().ok()),
+        no_cache_amount: Decimal::from_scaled(no_cache)
+            .ok()?
+            .canonical()
+            .parse()
+            .ok(),
+    })
+}
+
 fn default_prices() -> &'static gateway_admin::model::pricing::ProviderPricingCatalog {
     static PRICES: std::sync::OnceLock<gateway_admin::model::pricing::ProviderPricingCatalog> =
         std::sync::OnceLock::new();

@@ -56,6 +56,16 @@ pub struct UsageProjectedCostPoint {
     pub bucket_start: DateTime<Utc>,
     pub standard_amount: Option<DecimalAmount>,
     pub no_cache_amount: Option<DecimalAmount>,
+    pub standard_comparison: Option<UsageCostComparisonAmounts>,
+    pub no_cache_comparison: Option<UsageCostComparisonAmounts>,
+}
+
+/// 情景与实际金额来自同一批请求，不能用部分基线减去全量账本。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct UsageCostComparisonAmounts {
+    pub baseline_amount: DecimalAmount,
+    pub actual_amount: DecimalAmount,
+    pub request_count: u64,
 }
 
 /// 同一数据库快照内的完整洞察输入

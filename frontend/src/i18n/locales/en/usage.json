@@ -254,7 +254,8 @@
     "cost": {
       "savings": "Savings",
       "cache": "Cache",
-      "cacheSavings": "Cache savings",
+      "cacheSavings": "Net cache savings",
+      "comparisonCoverage": "Comparison coverage: {rate}. Uses requests with recorded billing; negative values mean cache writes cost more than reads saved. Claude amounts are API-equivalent estimates.",
       "cacheTokenProportion": "Cached tokens",
       "hitRequestRate": "Request hit rate",
       "actualCost": "Cost",

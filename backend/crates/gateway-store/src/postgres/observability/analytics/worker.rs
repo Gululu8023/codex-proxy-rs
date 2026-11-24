@@ -95,6 +95,7 @@ impl PgRequestAnalyticsRepository {
                     .execute(&mut *transaction).await.map_err(|error| postgres_unavailable("set analytics projection work_mem", error))?;
             }
             let mut result = AnalyticsMaintenance::default();
+            self.enqueue_billing_backfill(&mut transaction, batch_size).await?;
             // 历史删除可能一次排入大量旧任务，给仍存在的请求预留半批名额，避免实时统计饥饿
             // 其余名额仍按最早入队消费，两类任务都能前进；同一快照内选版本，沿用精确版本 ACK
             let rows = sqlx::query("with live as materialized (
@@ -247,13 +248,64 @@ impl PgRequestAnalyticsRepository {
         Ok(rows.len() as u64)
     }
 
+    async fn enqueue_billing_backfill(
+        &self,
+        tx: &mut sqlx::Transaction<'_, Postgres>,
+        batch_size: u32,
+    ) -> StoreResult<()> {
+        let state = sqlx::query("select billing_backfill_complete,billing_backfill_started_at,billing_backfill_id from request_analytics_build_state where singleton")
+            .fetch_one(&mut **tx).await.map_err(|error| postgres_unavailable("load billing backfill cursor", error))?;
+        if get::<bool>(&state, "billing_backfill_complete")? {
+            return Ok(());
+        }
+        let mut query = QueryBuilder::<Postgres>::new("select id,started_at from model_requests");
+        if let Some(start) = get::<Option<DateTime<Utc>>>(&state, "billing_backfill_started_at")? {
+            let id = get::<Option<String>>(&state, "billing_backfill_id")?
+                .ok_or_else(|| invalid("incomplete billing backfill cursor"))?;
+            query
+                .push(" where (started_at,id)<(")
+                .push_bind(start)
+                .push(",")
+                .push_bind(id)
+                .push(")");
+        }
+        query
+            .push(" order by started_at desc,id desc limit ")
+            .push_bind(i64::from(batch_size));
+        let rows = query
+            .build()
+            .fetch_all(&mut **tx)
+            .await
+            .map_err(|error| postgres_unavailable("read billing backfill batch", error))?;
+        let ids = rows
+            .iter()
+            .map(|row| get::<String>(row, "id"))
+            .collect::<StoreResult<Vec<_>>>()?;
+        // 游标与入队同事务提交；原投影队列按版本 ACK，重启或并发写入不会重复累加。
+        sqlx::query("select enqueue_request_analytics(id) from unnest($1::text[]) source(id)")
+            .bind(ids)
+            .execute(&mut **tx)
+            .await
+            .map_err(|error| postgres_unavailable("enqueue billing backfill", error))?;
+        if let Some(last) = rows.last() {
+            sqlx::query("update request_analytics_build_state set billing_backfill_started_at=$1,billing_backfill_id=$2 where singleton")
+                .bind(get::<DateTime<Utc>>(last, "started_at")?).bind(get::<String>(last, "id")?)
+                .execute(&mut **tx).await.map_err(|error| postgres_unavailable("save billing backfill cursor", error))?;
+        }
+        if rows.len() < batch_size as usize {
+            sqlx::query("update request_analytics_build_state set billing_backfill_complete=true where singleton")
+                .execute(&mut **tx).await.map_err(|error| postgres_unavailable("complete billing backfill", error))?;
+        }
+        Ok(())
+    }
+
     async fn project_billing_batch(
         &self,
         tx: &mut sqlx::Transaction<'_, Postgres>,
         ids: &[String],
     ) -> StoreResult<()> {
         let fact = completed_usage_fact_predicate("mr");
-        let rows=sqlx::query(sqlx::AssertSqlSafe(format!("select mr.id, mr.billing_snapshot_json, mr.started_at as bucket_start, mr.provider_kind, mr.upstream_model_id, mr.service_tier, mr.input_tokens, mr.output_tokens, mr.cached_input_tokens, mr.cache_write_input_tokens, mr.cost_amount::text as amount, mr.cost_currency from model_request_observations mr where mr.id=any($1::text[]) and {fact} and mr.cost_source='calculated' and mr.cost_amount is not null and mr.cost_currency is not null and nullif(mr.provider_kind,'') is not null and nullif(mr.upstream_model_id,'') is not null")))
+        let rows=sqlx::query(sqlx::AssertSqlSafe(format!("select mr.id, mr.billing_snapshot_json, jsonb_build_object('kind',mr.provider_observation_json->'billingKind','costBreakdown',mr.provider_observation_json->'costBreakdown','pricing',mr.provider_observation_json->'pricing') as recorded_billing_json, mr.started_at as bucket_start, mr.provider_kind, mr.upstream_model_id, mr.service_tier, mr.input_tokens, mr.output_tokens, mr.cached_input_tokens, mr.cache_write_input_tokens, mr.cost_amount::text as amount, mr.cost_currency from model_request_observations mr where mr.id=any($1::text[]) and {fact} and mr.cost_source='calculated' and mr.cost_amount is not null and mr.cost_currency is not null and nullif(mr.provider_kind,'') is not null and nullif(mr.upstream_model_id,'') is not null")))
             .bind(ids).fetch_all(&mut **tx).await.map_err(|error| postgres_unavailable("read analytics billing source",error))?;
         if rows.is_empty() {
             return Ok(());
@@ -266,8 +318,9 @@ impl PgRequestAnalyticsRepository {
         let mut standard = Vec::with_capacity(rows.len());
         let mut no_cache = Vec::with_capacity(rows.len());
         for row in rows {
-            let fact =
+            let mut fact =
                 admin_calculated_usage_billing_fact(calculated_usage_billing_fact_from_row(&row)?);
+            fact.recorded_billing = get(&row, "recorded_billing_json")?;
             let projection = projector
                 .project(&fact)
                 .map_err(|error| postgres_unavailable("project analytics billing", error))?;
@@ -275,7 +328,7 @@ impl PgRequestAnalyticsRepository {
             standard.push(projection.standard_amount.map(|value| value.to_string()));
             no_cache.push(projection.no_cache_amount.map(|value| value.to_string()));
         }
-        sqlx::query("update request_analytics_facts facts set standard_cost_amount=projection.standard::numeric,no_cache_cost_amount=projection.no_cache::numeric from unnest($1::text[],$2::text[],$3::text[]) projection(id,standard,no_cache) where facts.id=projection.id")
+        sqlx::query("update request_analytics_facts facts set billing_comparison_ready=true,standard_cost_amount=projection.standard::numeric,no_cache_cost_amount=projection.no_cache::numeric from unnest($1::text[],$2::text[],$3::text[]) projection(id,standard,no_cache) where facts.id=projection.id")
             .bind(request_ids).bind(standard).bind(no_cache).execute(&mut **tx).await.map_err(|error| postgres_unavailable("persist analytics billing projections",error))?;
         Ok(())
     }
@@ -304,6 +357,7 @@ async fn read_status(
         coverage_start: get(&row, "coverage_start")?,
         coverage_end: get(&row, "coverage_end")?,
         oldest_pending_at: get(&row, "oldest_pending_at")?,
+        // 计费补算只补充可比指标，不改变已有事实的覆盖范围或阻断统计读取。
         building: !get::<bool>(&row, "backfill_complete")?
             || get::<i16>(&row, "reset_phase")? != 0
             || get::<i32>(&row, "schema_version")? != SCHEMA_VERSION

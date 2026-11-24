@@ -126,7 +126,7 @@ impl AnalyticsSnapshot<'_> {
             // 每行一次展开指标，避免对可能位于 TOAST 的同一 JSON 反复解码
             query.push(format!(
                 "), totals as (select account_id,model,jsonb_build_object({}) as counts,max(last_used_at) as last_used_at from selected cross join lateral jsonb_to_record(counts) as metric({}) group by account_id,model),
-                currencies as (select account_id,model,c.key,sum(c.value::numeric)::text as amount from selected cross join lateral jsonb_each_text(costs) c where c.key not in ('standard_usd','no_cache_usd') group by account_id,model,c.key),
+                currencies as (select account_id,model,c.key,sum(c.value::numeric)::text as amount from selected cross join lateral jsonb_each_text(costs) c where c.key not in ('standard_usd','no_cache_usd','standard_usd_compared','standard_usd_actual','no_cache_usd_compared','no_cache_usd_actual') group by account_id,model,c.key),
                 costs as (select account_id,model,jsonb_object_agg(key,amount) as costs from currencies group by account_id,model)
                 select totals.*,coalesce(costs.costs,'{{}}'::jsonb) as costs,'{{}}'::jsonb as distributions from totals left join costs using(account_id,model)",
                 counters.iter().map(|name| format!("'{name}',coalesce(sum(metric.{name}),0)")).collect::<Vec<_>>().join(","),

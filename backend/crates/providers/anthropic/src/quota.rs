@@ -127,9 +127,14 @@ pub(crate) async fn read(
                         .as_f64()
                         .filter(|n| n.is_finite() && *n >= 0.0)
                     {
-                        windows.insert(name.clone(),json!({"utilization":percent,"resets_at":window["resets_at"].as_str(),"source":"oauth_usage","observedAt":attempted_at}));
+                        let mut observation = json!({"utilization":percent,"source":"oauth_usage","observedAt":attempted_at});
+                        if let Some(reset) = window.get("resets_at") {
+                            observation["resets_at"] = reset.clone();
+                        }
+                        windows.insert(name.clone(), observation);
                     }
                 }
+                retain_window_resets(&value, &mut windows, attempted_at);
                 let previous_value = value.clone();
                 retain_limit_evidence(
                     &previous_value,
@@ -328,7 +333,50 @@ fn paused_windows(value: &Value, limits: &AccountQuotaLimits) -> Vec<String> {
         .collect()
 }
 
-/// 缺失窗口或缺失有效重置时间不能解除已确认的暂停；只有该窗口的新观测可替换证据。
+/// 不完整的主动查询不能清除同一周期内已知的重置时间；跨周期或用量回落不能拼接旧时间。
+fn retain_window_resets(
+    previous: &Value,
+    reported: &mut serde_json::Map<String, Value>,
+    observed_at: DateTime<Utc>,
+) {
+    // 整个窗口缺失时保留仍有效的旧观测及其时间，不把它标记为本次新采样。
+    for (key, _, _) in ACCOUNT_WINDOWS {
+        let old = &previous["windows"][key];
+        if !reported.contains_key(key)
+            && timestamp(&old["resets_at"]).is_some_and(|reset| reset > observed_at)
+        {
+            reported.insert(key.to_owned(), old.clone());
+        }
+    }
+    for (key, window) in reported {
+        if timestamp(&window["resets_at"]).is_some()
+            || (percent(&window["utilization"]) == Some(0.0)
+                && window.get("resets_at").is_some_and(Value::is_null))
+        {
+            continue;
+        }
+        let old = &previous["windows"][key];
+        if timestamp(&old["resets_at"]).is_some_and(|reset| reset > observed_at)
+            && percent(&old["utilization"])
+                .zip(percent(&window["utilization"]))
+                .is_some_and(|(old, current)| current >= old)
+        {
+            window["resets_at"] = old["resets_at"].clone();
+        }
+    }
+}
+
+/// 新 OAuth 零用量观测可确认恢复，即使上游尚未报告下一次重置时间；缺字段仍是未知。
+fn complete_window(window: &Value, observed_at: DateTime<Utc>) -> bool {
+    percent(&window["utilization"]).is_some()
+        && (timestamp(&window["resets_at"]).is_some_and(|reset| reset > observed_at)
+            || (window["source"] == "oauth_usage"
+                && percent(&window["utilization"]) == Some(0.0)
+                && timestamp(&window["observedAt"]) == Some(observed_at)
+                && window.get("resets_at").is_some_and(Value::is_null)))
+}
+
+/// 只有对应窗口的新完整观测可替换已确认的暂停证据。
 fn retain_limit_evidence(
     previous: &Value,
     value: &mut Value,
@@ -340,10 +388,9 @@ fn retain_limit_evidence(
         .iter()
         .filter_map(|(key, _, _)| {
             let used = limit_usage(previous, key)?;
-            let complete = reported.get(*key).is_some_and(|window| {
-                percent(&window["utilization"]).is_some()
-                    && timestamp(&window["resets_at"]).is_some_and(|reset| reset > observed_at)
-            });
+            let complete = reported
+                .get(*key)
+                .is_some_and(|window| complete_window(window, observed_at));
             (limits.reached(key, Some(used)) && !complete).then(|| ((*key).to_owned(), json!(used)))
         })
         .collect();
@@ -830,9 +877,9 @@ fn access_state(value: &Value, previous: QuotaState, observed_at: SystemTime) ->
         QuotaState::exhausted(QuotaEvidence::AccountLimitReached, observed_at, reset)
     } else if windows.len() == 2
         && exhausted.is_empty()
-        && windows
+        && ACCOUNT_WINDOWS
             .iter()
-            .all(|(_, reset)| reset.is_some_and(|reset| SystemTime::from(reset) > observed_at))
+            .all(|(key, _, _)| complete_window(&value["windows"][key], observed_at.into()))
     {
         QuotaState::allowed(observed_at)
     } else {

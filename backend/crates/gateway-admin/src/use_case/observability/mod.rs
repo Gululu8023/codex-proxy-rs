@@ -477,6 +477,16 @@ fn insights_from_observation(
 ) -> Result<UsageInsights, AdminError> {
     let mut standard_costs = UsageCostScenarios::default();
     for point in observation.costs {
+        if let Some(comparison) = point.standard_comparison {
+            standard_costs
+                .standard_comparison
+                .add(point.bucket_start, comparison)?;
+        }
+        if let Some(comparison) = point.no_cache_comparison {
+            standard_costs
+                .no_cache_comparison
+                .add(point.bucket_start, comparison)?;
+        }
         if let Some(amount) = point.standard_amount {
             standard_costs.standard.add(point.bucket_start, amount)?;
         }
@@ -591,6 +601,7 @@ fn cost_summary(cost: &UsageInsightsCost) -> UsageCostSummary {
     UsageCostSummary {
         estimated_cost: cost.estimated_cost.clone(),
         cache_savings: cost.cache_savings.clone(),
+        cache_savings_request_count: cost.cache_savings_request_count,
         tier_premium: cost.tier_premium.clone(),
         cost_per_successful_request: cost.cost_per_successful_request.clone(),
         coverage: cost.coverage.clone(),
@@ -740,9 +751,17 @@ fn build_usage_insights(
                 total: no_cache_cost,
                 by_bucket: no_cache_costs_by_bucket,
             },
+        standard_comparison,
+        no_cache_comparison,
     } = standard_costs;
-    let cache_savings = amount_difference(no_cache_cost.as_ref(), estimated_cost.as_ref());
-    let tier_premium = amount_difference(estimated_cost.as_ref(), standard_cost.as_ref());
+    let cache_savings = amount_difference(
+        no_cache_comparison.baseline.total.as_ref(),
+        no_cache_comparison.actual.total.as_ref(),
+    );
+    let tier_premium = amount_difference(
+        standard_comparison.actual.total.as_ref(),
+        standard_comparison.baseline.total.as_ref(),
+    );
     let cost_per_request = estimated_cost
         .as_ref()
         .and_then(|cost| cost.checked_div_u64(requests.request_count));
@@ -755,6 +774,7 @@ fn build_usage_insights(
         standard_cost,
         no_cache_cost,
         cache_savings,
+        cache_savings_request_count: no_cache_comparison.request_count,
         tier_premium,
         tokens_per_request: rate_or_zero(requests.total_tokens, requests.request_count),
         cost_per_successful_request,
@@ -779,8 +799,14 @@ fn build_usage_insights(
                 standard_cost: standard_costs_by_bucket.get(&point.bucket_start).cloned(),
                 no_cache_cost: no_cache_costs_by_bucket.get(&point.bucket_start).cloned(),
                 cache_savings: amount_difference(
-                    no_cache_costs_by_bucket.get(&point.bucket_start),
-                    usd_cost(&point.costs).as_ref(),
+                    no_cache_comparison
+                        .baseline
+                        .by_bucket
+                        .get(&point.bucket_start),
+                    no_cache_comparison
+                        .actual
+                        .by_bucket
+                        .get(&point.bucket_start),
                 ),
                 cached_token_rate: rate_or_zero(
                     point.metrics.cached_input_tokens,
@@ -844,6 +870,32 @@ impl ScenarioCosts {
 struct UsageCostScenarios {
     standard: ScenarioCosts,
     no_cache: ScenarioCosts,
+    standard_comparison: ComparisonCosts,
+    no_cache_comparison: ComparisonCosts,
+}
+
+#[derive(Debug, Default)]
+struct ComparisonCosts {
+    baseline: ScenarioCosts,
+    actual: ScenarioCosts,
+    request_count: u64,
+}
+
+impl ComparisonCosts {
+    fn add(
+        &mut self,
+        bucket_start: DateTime<Utc>,
+        comparison: crate::model::analytics::UsageCostComparisonAmounts,
+    ) -> Result<(), AdminError> {
+        self.baseline
+            .add(bucket_start, comparison.baseline_amount)?;
+        self.actual.add(bucket_start, comparison.actual_amount)?;
+        self.request_count = self
+            .request_count
+            .checked_add(comparison.request_count)
+            .ok_or_else(|| AdminError::internal("费用比较请求数超出数值范围"))?;
+        Ok(())
+    }
 }
 
 /// 在后台投影时恢复费用场景，查询不再逐请求读取计费快照
@@ -875,6 +927,19 @@ impl UsageBillingProjector for ProviderUsageBillingProjector {
             cache_write_input_tokens: fact.cache_write_input_tokens,
             total: fact.total.clone(),
         };
+        if let Some(recorded) = &fact.recorded_billing {
+            match self
+                .providers
+                .recorded_billing_projection(&provider_kind, &input, recorded)
+            {
+                Ok(Some(projection)) => return Ok(projection),
+                Ok(None) => {}
+                Err(error) if error.kind() == ProviderAdminErrorKind::Unsupported => {
+                    return Ok(UsageBillingProjection::default());
+                }
+                Err(error) => return Err(map_provider_error(error, "recorded usage billing")),
+            }
+        }
         let breakdown = match fact
             .breakdown
             .as_ref()
@@ -956,16 +1021,17 @@ fn no_cache_cost(
 fn amount_difference(
     larger: Option<&DecimalAmount>,
     smaller: Option<&DecimalAmount>,
-) -> Option<DecimalAmount> {
-    let difference = decimal(larger?)?
-        .scaled()
-        .checked_sub(decimal(smaller?)?.scaled())?;
-    DecimalAmount::from_str(
-        &gateway_core::metering::Decimal::from_scaled(difference)
-            .ok()?
-            .canonical(),
-    )
-    .ok()
+) -> Option<crate::model::observability::AmountDifference> {
+    let left = decimal(larger?)?.scaled();
+    let right = decimal(smaller?)?.scaled();
+    let magnitude = gateway_core::metering::Decimal::from_scaled(left.abs_diff(right))
+        .ok()?
+        .canonical();
+    if left < right {
+        format!("-{magnitude}").parse().ok()
+    } else {
+        magnitude.parse().ok()
+    }
 }
 
 fn decimal(value: &DecimalAmount) -> Option<gateway_core::metering::Decimal> {

@@ -858,6 +858,7 @@ pub struct UsageThroughputView {
 #[derive(Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct UsageCostSummaryView {
+    pub cache_savings_request_count: u64,
     pub estimated_cost: Option<String>,
     pub cache_savings: Option<String>,
     pub tier_premium: Option<String>,

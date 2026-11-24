@@ -22,6 +22,27 @@ pub(super) async fn seed(pool: &sqlx::PgPool, id: &str, start: DateTime<Utc>, gr
 }
 
 #[tokio::test]
+async fn billing_backfill_keeps_existing_statistics_visible() {
+    let Some(database) = TestDatabase::create("billing_backfill_visible").await else {
+        return;
+    };
+    let start = Utc::now() - TimeDelta::hours(1);
+    seed(&database.pool, "billing_history", start, &[]).await;
+    drain_analytics(&database.pool).await;
+    sqlx::query("update request_analytics_build_state set billing_backfill_complete=false,billing_backfill_started_at=null,billing_backfill_id=null")
+        .execute(&database.pool).await.unwrap();
+    // 查询可早于第一条历史记录；补算期间该区间的既有汇总仍然完整。
+    let range =
+        ObservabilityRange::new(start - TimeDelta::hours(1), start + TimeDelta::hours(1)).unwrap();
+    let summary = observability_repository(&database.pool)
+        .usage_summary(range, Default::default())
+        .await
+        .unwrap();
+    assert_eq!(summary.requests.request_count, 1);
+    database.close().await;
+}
+
+#[tokio::test]
 async fn usage_summary_preserves_counts_latency_samples_and_costs_across_read_paths() {
     let Some(database) = TestDatabase::create("analytics_summary_projection").await else {
         return;

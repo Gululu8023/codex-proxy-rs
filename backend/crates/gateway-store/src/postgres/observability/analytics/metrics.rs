@@ -280,6 +280,14 @@ impl MetricState {
                 if let Some(amount) = get::<Option<String>>(row, source)? {
                     self.increment(&format!("{name}_known_count"), 1)?;
                     self.add_cost(name, &amount)?;
+                    if get::<bool>(row, "billing_comparison_ready")?
+                        && get::<Option<String>>(row, "cost_currency")?.as_deref() == Some("USD")
+                        && let Some(actual) = get::<Option<String>>(row, "cost_amount_text")?
+                    {
+                        self.increment(&format!("{name}_comparison_count"), 1)?;
+                        self.add_cost(&format!("{name}_compared"), &amount)?;
+                        self.add_cost(&format!("{name}_actual"), &actual)?;
+                    }
                 }
             }
             let source: String = get(row, "cost_source")?;
@@ -414,10 +422,39 @@ impl MetricState {
             })
             .transpose()
     }
+    pub fn cost_comparison(
+        &self,
+        name: &str,
+    ) -> StoreResult<Option<gateway_admin::model::analytics::UsageCostComparisonAmounts>> {
+        let Some(baseline_amount) = self.projected_cost(&format!("{name}_compared"))? else {
+            return Ok(None);
+        };
+        let actual_amount = self
+            .projected_cost(&format!("{name}_actual"))?
+            .ok_or_else(|| invalid("missing analytics comparison actual cost"))?;
+        Ok(Some(
+            gateway_admin::model::analytics::UsageCostComparisonAmounts {
+                baseline_amount,
+                actual_amount,
+                request_count: self.count(&format!("{name}_comparison_count")),
+            },
+        ))
+    }
+
     pub fn costs(&self) -> StoreResult<Vec<CurrencyCostTotal>> {
         self.costs
             .iter()
-            .filter(|(currency, _)| !matches!(currency.as_str(), "standard_usd" | "no_cache_usd"))
+            .filter(|(currency, _)| {
+                !matches!(
+                    currency.as_str(),
+                    "standard_usd"
+                        | "no_cache_usd"
+                        | "standard_usd_compared"
+                        | "standard_usd_actual"
+                        | "no_cache_usd_compared"
+                        | "no_cache_usd_actual"
+                )
+            })
             .map(|(currency, amount)| {
                 Ok(CurrencyCostTotal {
                     currency: currency.clone(),

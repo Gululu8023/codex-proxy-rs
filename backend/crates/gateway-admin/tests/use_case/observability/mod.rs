@@ -692,6 +692,20 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
         bucket_start: quarter_hour_start(now),
         standard_amount: Some("1".parse().expect("standard cost")),
         no_cache_amount: Some("1.25".parse().expect("no-cache cost")),
+        standard_comparison: Some(
+            gateway_admin::model::analytics::UsageCostComparisonAmounts {
+                baseline_amount: "1".parse().unwrap(),
+                actual_amount: "0.25".parse().unwrap(),
+                request_count: 1,
+            },
+        ),
+        no_cache_comparison: Some(
+            gateway_admin::model::analytics::UsageCostComparisonAmounts {
+                baseline_amount: "1.25".parse().unwrap(),
+                actual_amount: "0.25".parse().unwrap(),
+                request_count: 1,
+            },
+        ),
     }]);
     store.replace_diagnostics(DiagnosticsObservation {
         analytics: Default::default(),
@@ -789,9 +803,19 @@ async fn observability_services_should_calculate_usage_insights_and_diagnostic_s
             .cost
             .tier_premium
             .as_ref()
-            .map(gateway_admin::model::observability::DecimalAmount::as_str),
-        Some("0.25")
+            .map(gateway_admin::model::observability::AmountDifference::as_str),
+        Some("-0.75")
     );
+    // 其余实际费用没有可比基线，不能混入这一个已覆盖请求的差额。
+    assert_eq!(
+        insights
+            .cost
+            .cache_savings
+            .as_ref()
+            .map(|amount| amount.as_str()),
+        Some("1")
+    );
+    assert_eq!(insights.cost.cache_savings_request_count, 1);
     assert_eq!(diagnostics.items[0].request_share, 0.75);
     assert_eq!(diagnostics.items[1].request_share, 0.25);
 }
@@ -1011,6 +1035,20 @@ async fn usage_insights_should_reject_partial_costs_when_insights_fail() {
         bucket_start: quarter_hour_start(now),
         standard_amount: Some("1".parse().expect("standard cost")),
         no_cache_amount: Some("1.25".parse().expect("no-cache cost")),
+        standard_comparison: Some(
+            gateway_admin::model::analytics::UsageCostComparisonAmounts {
+                baseline_amount: "1".parse().unwrap(),
+                actual_amount: "0.25".parse().unwrap(),
+                request_count: 1,
+            },
+        ),
+        no_cache_comparison: Some(
+            gateway_admin::model::analytics::UsageCostComparisonAmounts {
+                baseline_amount: "1.25".parse().unwrap(),
+                actual_amount: "0.25".parse().unwrap(),
+                request_count: 1,
+            },
+        ),
     }]);
     store.insights_fail.store(true, Ordering::SeqCst);
     let services = observability_services_with_calculated_billing(store).await;

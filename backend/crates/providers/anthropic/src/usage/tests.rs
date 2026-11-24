@@ -3,6 +3,41 @@
 use super::*;
 use gateway_core::upstream::UpstreamTransport;
 
+#[test]
+fn recorded_projection_uses_historical_rates_and_keeps_cache_write_premium() {
+    use gateway_admin::model::observability::{CurrencyCost, ProviderBillingInput};
+
+    let input = ProviderBillingInput {
+        upstream_model_id: "retired-model".into(),
+        service_tier: None,
+        input_tokens: Some(600),
+        output_tokens: Some(10),
+        cached_input_tokens: Some(200),
+        cache_write_input_tokens: Some(300),
+        total: CurrencyCost {
+            currency: "USD".into(),
+            amount: "0.0019725".parse().unwrap(),
+        },
+    };
+    let mut recorded = json!({
+        "kind":"api_equivalent_estimate",
+        "costBreakdown":{"currency":"USD","input":"0.0003","output":"0.00015",
+            "cacheRead":"0.00006","cacheWrite":"0.0014625","cacheWrite5m":"0.0005625",
+            "cacheWrite1h":"0.0009","standard":"0.0019725","total":"0.0019725"},
+        "pricing":{"model":"retired-model","inputTicksPerToken":30000,
+            "outputTicksPerToken":150000,"multiplierBps":10000}
+    });
+    let projected = recorded_billing_projection(&input, &recorded).unwrap();
+    assert_eq!(projected.no_cache_amount.unwrap().as_str(), "0.00195");
+    assert_eq!(projected.standard_amount.unwrap(), input.total.amount);
+    recorded["pricing"]["inputTicksPerToken"] = json!(60000);
+    assert!(recorded_billing_projection(&input, &recorded).is_none());
+    recorded["pricing"]["inputTicksPerToken"] = json!(30000);
+    recorded["costBreakdown"]["cacheWrite"] = json!("0");
+    assert!(recorded_billing_projection(&input, &recorded).is_none());
+    assert!(recorded_billing_projection(&input, &json!({})).is_none());
+}
+
 fn facts(events: &[ProviderEvent]) -> Vec<&GatewayEvent> {
     events
         .iter()

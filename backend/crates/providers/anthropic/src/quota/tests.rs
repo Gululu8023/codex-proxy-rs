@@ -177,6 +177,107 @@ fn exhausted_access_requires_complete_recovery_of_both_account_windows() {
 }
 
 #[test]
+fn incomplete_oauth_updates_keep_known_resets_when_reaching_both_window_limits() {
+    let reset_5h = now() + ChronoDuration::hours(1);
+    let reset_7d = now() + ChronoDuration::days(3);
+    let previous = json!({"windows":{
+        "five_hour":{"utilization":95,"resets_at":reset_5h},
+        "seven_day":{"utilization":98,"resets_at":reset_7d}
+    }});
+    for reset in [None, Some(Value::Null), Some(json!("invalid"))] {
+        let mut reported = json!({
+            "five_hour":{"utilization":100},
+            "seven_day":{"utilization":100}
+        })
+        .as_object()
+        .unwrap()
+        .clone();
+        if let Some(reset) = reset {
+            for window in reported.values_mut() {
+                window["resets_at"] = reset.clone();
+            }
+        }
+        retain_window_resets(&previous, &mut reported, now());
+        assert_eq!(
+            timestamp(&reported["five_hour"]["resets_at"]),
+            Some(reset_5h)
+        );
+        assert_eq!(
+            timestamp(&reported["seven_day"]["resets_at"]),
+            Some(reset_7d)
+        );
+        let value = json!({"windows":reported,"extraUsageEnabled":false});
+        let state = access_state(&value, QuotaState::allowed(now().into()), now().into());
+        assert!(state.is_exhausted());
+        assert_eq!(state.reset_at(), Some(reset_7d.into()));
+    }
+}
+
+#[test]
+fn oauth_reset_retention_does_not_invent_the_next_cycle() {
+    let reset = now() + ChronoDuration::hours(1);
+    let previous = json!({"windows":{"five_hour":{"utilization":100,"resets_at":reset}}});
+    for (incoming, observed) in [
+        (json!({"utilization":0,"resets_at":null}), now()),
+        (json!({"utilization":10}), now()),
+        (json!({"utilization":100}), reset),
+        (
+            json!({"utilization":10,"resets_at":reset + ChronoDuration::hours(5)}),
+            now(),
+        ),
+    ] {
+        let mut reported = json!({"five_hour":incoming}).as_object().unwrap().clone();
+        let original = reported.clone();
+        retain_window_resets(&previous, &mut reported, observed);
+        assert_eq!(reported, original);
+    }
+}
+
+#[test]
+fn omitted_oauth_window_keeps_its_valid_reset_and_original_observation_time() {
+    let reset = now() + ChronoDuration::hours(1);
+    let previous = json!({"windows":{"five_hour":{
+        "utilization":100,"resets_at":reset,"observedAt":now()-ChronoDuration::minutes(1)
+    }}});
+    let mut reported = serde_json::Map::new();
+    retain_window_resets(&previous, &mut reported, now());
+    assert_eq!(reported["five_hour"], previous["windows"]["five_hour"]);
+    let mut expired = serde_json::Map::new();
+    retain_window_resets(&previous, &mut expired, reset);
+    assert!(expired.is_empty());
+}
+
+#[test]
+fn fresh_inactive_oauth_window_recovers_exhaustion_and_threshold_pause() {
+    let reset = now() + ChronoDuration::hours(1);
+    let previous = json!({"windows":{"five_hour":{"utilization":100,"resets_at":now()}}});
+    let windows = json!({
+        "five_hour":{"utilization":0,"resets_at":null,"source":"oauth_usage","observedAt":now()},
+        "seven_day":{"utilization":28,"resets_at":reset}
+    });
+    let state = QuotaState::exhausted(QuotaEvidence::AccountLimitReached, now().into(), None);
+    let mut value = json!({"windows":windows});
+    retain_limit_evidence(
+        &previous,
+        &mut value,
+        windows.as_object().unwrap(),
+        &limits(),
+        now(),
+    );
+    assert!(paused_windows(&value, &limits()).is_empty());
+    assert!(!access_state(&value, state, now().into()).is_exhausted());
+    for incomplete in [
+        json!({"utilization":0,"source":"oauth_usage","observedAt":now()}),
+        json!({"utilization":7,"resets_at":null,"source":"oauth_usage","observedAt":now()}),
+        json!({"utilization":0,"resets_at":null,"source":"response_headers","observedAt":now()}),
+        json!({"utilization":0,"resets_at":null,"source":"oauth_usage","observedAt":now()-ChronoDuration::hours(1)}),
+    ] {
+        value["windows"]["five_hour"] = incomplete;
+        assert_eq!(access_state(&value, state, now().into()), state);
+    }
+}
+
+#[test]
 fn overlapping_response_cannot_clear_newer_limit_but_can_report_higher_usage() {
     let previous =
         json!({"windows":{"five_hour":{"utilization":85},"seven_day":{"utilization":20}}});

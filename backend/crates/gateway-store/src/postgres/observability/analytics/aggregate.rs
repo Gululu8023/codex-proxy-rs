@@ -47,9 +47,9 @@ pub(super) fn push_fact_aggregation_selected(
     }
     query.push(" from matching group by output_bucket,name)");
     if read_costs {
-        // 先按原币种合并金额，再展开费用场景，避免每条事实放大成三条聚合输入
+        // 先按原币种合并金额，再展开费用场景，避免每条事实按费用场景放大聚合输入
         // 空币种仍参与场景费用，金额为空的实际费用继续在展开后排除
-        query.push(", cost_groups as (select output_bucket,name,cost_currency,sum(cost_amount) as cost_amount,sum(standard_cost_amount) as standard_cost_amount,sum(no_cache_cost_amount) as no_cache_cost_amount from matching where is_completed_usage group by output_bucket,name,cost_currency), cost_values as (select output_bucket,name,currency,sum(amount)::text as amount from cost_groups cross join lateral (values (cost_currency,cost_amount),('standard_usd',standard_cost_amount),('no_cache_usd',no_cache_cost_amount)) cost(currency,amount) where currency is not null and amount is not null group by output_bucket,name,currency), merged_costs as (select output_bucket,name,jsonb_object_agg(currency,amount) as costs from cost_values group by output_bucket,name)");
+        query.push(", cost_groups as (select output_bucket,name,cost_currency,sum(cost_amount) as cost_amount,sum(standard_cost_amount) as standard_cost_amount,sum(no_cache_cost_amount) as no_cache_cost_amount,sum(standard_cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and standard_cost_amount is not null) as standard_usd_compared,sum(cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and standard_cost_amount is not null) as standard_usd_actual,sum(no_cache_cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and no_cache_cost_amount is not null) as no_cache_usd_compared,sum(cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and no_cache_cost_amount is not null) as no_cache_usd_actual from matching where is_completed_usage group by output_bucket,name,cost_currency), cost_values as (select output_bucket,name,currency,sum(amount)::text as amount from cost_groups cross join lateral (values (cost_currency,cost_amount),('standard_usd',standard_cost_amount),('no_cache_usd',no_cache_cost_amount),('standard_usd_compared',standard_usd_compared),('standard_usd_actual',standard_usd_actual),('no_cache_usd_compared',no_cache_usd_compared),('no_cache_usd_actual',no_cache_usd_actual)) cost(currency,amount) where currency is not null and amount is not null group by output_bucket,name,currency), merged_costs as (select output_bucket,name,jsonb_object_agg(currency,amount) as costs from cost_values group by output_bucket,name)");
     }
     if !read_distributions {
         query.push(" select c.output_bucket as bucket_start,c.name,c.counts,c.last_used_at,'{}'::jsonb as distributions,'{}'::jsonb as exact_percentiles,");
@@ -123,9 +123,9 @@ fn push_fact_statistics_by_currency(
     push_counter_object(query, &selected_counter_expressions(counter_names));
     query.push(" as counts,");
     push_distribution_statistics(query, distribution_names, false);
-    query.push(",sum(cost_amount) filter(where is_completed_usage) as cost_amount,sum(standard_cost_amount) filter(where is_completed_usage) as standard_cost_amount,sum(no_cache_cost_amount) filter(where is_completed_usage) as no_cache_cost_amount from matching group by output_bucket,name,cost_currency)");
+    query.push(",sum(cost_amount) filter(where is_completed_usage) as cost_amount,sum(standard_cost_amount) filter(where is_completed_usage) as standard_cost_amount,sum(no_cache_cost_amount) filter(where is_completed_usage) as no_cache_cost_amount,sum(standard_cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and standard_cost_amount is not null) as standard_usd_compared,sum(cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and standard_cost_amount is not null) as standard_usd_actual,sum(no_cache_cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and no_cache_cost_amount is not null) as no_cache_usd_compared,sum(cost_amount) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null and no_cache_cost_amount is not null) as no_cache_usd_actual from matching group by output_bucket,name,cost_currency)");
     // 空币种只排除实际费用，情景费用仍保留；同名费用项先求和，维持原有合并语义
-    query.push(", currency_summaries as (select output_bucket,name,last_used_at,counts,distributions,coalesce(costs,'{}'::jsonb) as costs from currency_groups cross join lateral (select jsonb_object_agg(currency,amount::text) as costs from (select currency,sum(amount) as amount from (values (cost_currency,cost_amount),('standard_usd',standard_cost_amount),('no_cache_usd',no_cache_cost_amount)) cost(currency,amount) where currency is not null and amount is not null group by currency) merged) cost)");
+    query.push(", currency_summaries as (select output_bucket,name,last_used_at,counts,distributions,coalesce(costs,'{}'::jsonb) as costs from currency_groups cross join lateral (select jsonb_object_agg(currency,amount::text) as costs from (select currency,sum(amount) as amount from (values (cost_currency,cost_amount),('standard_usd',standard_cost_amount),('no_cache_usd',no_cache_cost_amount),('standard_usd_compared',standard_usd_compared),('standard_usd_actual',standard_usd_actual),('no_cache_usd_compared',no_cache_usd_compared),('no_cache_usd_actual',no_cache_usd_actual)) cost(currency,amount) where currency is not null and amount is not null group by currency) merged) cost)");
     push_summary_aggregation_from(
         query,
         "currency_summaries",
@@ -214,6 +214,10 @@ fn counter_expressions() -> Vec<(String, String)> {
         counters.push((
             format!("{name}_known_count"),
             format!("count({column}) filter(where is_completed_usage)"),
+        ));
+        counters.push((
+            format!("{name}_comparison_count"),
+            format!("count({column}) filter(where is_completed_usage and billing_comparison_ready and cost_currency='USD' and cost_amount is not null)"),
         ));
     }
     for source in ["provider_reported", "calculated", "unavailable"] {
