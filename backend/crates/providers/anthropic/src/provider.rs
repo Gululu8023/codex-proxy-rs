@@ -721,7 +721,7 @@ impl Provider for AnthropicProvider {
             self.credentials.kind(),
             model.clone(),
             account_id.clone(),
-            transport(),
+            transport(stream_requested),
         )
         .with_credential_revision(account.revision())
         .with_selection_observation(ProviderSelectionObservation::new(
@@ -935,6 +935,7 @@ impl Provider for AnthropicProvider {
         let redaction_started = std::time::Instant::now();
         let redacted = await_privacy(
             privacy.redact_observed(body),
+            &privacy,
             &execution_context,
             UpstreamSendState::NotSent,
         )
@@ -1000,7 +1001,7 @@ impl Provider for AnthropicProvider {
             }
             let status = response.status().as_u16();
             let headers = safe_headers(response.headers());
-            let mut observation = ProviderResponseObservation::new(transport()).with_status_code(status).with_client_headers(headers.clone()).with_timings(timings);
+            let mut observation = ProviderResponseObservation::new(transport(stream_requested)).with_status_code(status).with_client_headers(headers.clone()).with_timings(timings);
             if endpoint == "/v1/messages" && let Some(metadata) = crate::quota::response_metadata(response.headers(), loaded.account.plan_type(), headers_observed_at) {
                 observation = observation.with_provider_metadata(metadata);
             }
@@ -1088,7 +1089,7 @@ impl Provider for AnthropicProvider {
                 }
                 usage.observe(&value["usage"]);
                 let restoration_started = std::time::Instant::now();
-                let restored = await_privacy(privacy.restore(value), &execution_context, UpstreamSendState::Sent).await;
+                let restored = await_privacy(privacy.restore(value), &privacy, &execution_context, UpstreamSendState::Sent).await;
                 phase(&execution_context, "anthropic.restoration", milliseconds(restoration_started), restored.is_ok());
                 let value = restored.map_err(|error| error
                     .with_atomic_client_events(usage.finish(model.as_str(), execution_context.pricing(), &body, false, &observation)))?;
@@ -1163,7 +1164,7 @@ impl Provider for AnthropicProvider {
                         }
                         let event = std::str::from_utf8(&raw).map_err(|_| sent(ProviderErrorKind::Protocol))?.to_owned();
                         let restoration_started = std::time::Instant::now();
-                        let restored = await_privacy(restorer.push(event), &execution_context, UpstreamSendState::Sent).await;
+                        let restored = await_privacy(restorer.push(event), &privacy, &execution_context, UpstreamSendState::Sent).await;
                         restoration_ms = restoration_ms.saturating_add(milliseconds(restoration_started));
                         if restored.is_err() { phase(&execution_context, "anthropic.restoration", restoration_ms, false); }
                         let restored = restored.map_err(|error| error
@@ -1183,7 +1184,7 @@ impl Provider for AnthropicProvider {
                             if value["type"] == "message_stop" {
                                 if !started { Err(sent(ProviderErrorKind::Protocol))?; }
                                 let restoration_started = std::time::Instant::now();
-                                let tail = await_privacy(restorer.finish(), &execution_context, UpstreamSendState::Sent).await;
+                                let tail = await_privacy(restorer.finish(), &privacy, &execution_context, UpstreamSendState::Sent).await;
                                 restoration_ms = restoration_ms.saturating_add(milliseconds(restoration_started));
                                 phase(&execution_context, "anthropic.restoration", restoration_ms, tail.is_ok());
                                 let tail = tail?;
@@ -1420,8 +1421,14 @@ pub(crate) async fn account_models(
     Err(CredentialError::Unavailable)
 }
 
-fn transport() -> UpstreamTransport {
-    UpstreamTransport::new("http_sse").expect("transport")
+fn transport(stream_requested: bool) -> UpstreamTransport {
+    // 使用发送前冻结的响应协议；计数和普通非流式请求不能被记为 SSE。
+    UpstreamTransport::new(if stream_requested {
+        "http_sse"
+    } else {
+        "http_json"
+    })
+    .expect("transport")
 }
 
 fn request_stream(body: &Value, count_tokens: bool) -> Result<bool, ProviderError> {
@@ -1562,11 +1569,16 @@ async fn restore_error_body(
     bytes: Bytes,
     context: &AttemptContext,
 ) -> Result<Bytes, ProviderError> {
-    // 上游网关也会返回纯文本或 HTML 错误，保留其状态与类型，同时严格恢复其中的占位符。
+    // 上游网关也会返回纯文本或 HTML 错误，保留其状态与类型；已知占位符恢复，未知引用原样保留。
     match serde_json::from_slice::<Value>(&bytes) {
         Ok(value) => {
-            let value =
-                await_privacy(privacy.restore(value), context, UpstreamSendState::Sent).await?;
+            let value = await_privacy(
+                privacy.restore(value),
+                privacy,
+                context,
+                UpstreamSendState::Sent,
+            )
+            .await?;
             serde_json::to_vec(&value)
                 .map(Bytes::from)
                 .map_err(|_| sent(ProviderErrorKind::Protocol))
@@ -1576,6 +1588,7 @@ async fn restore_error_body(
                 std::str::from_utf8(&bytes).map_err(|_| sent(ProviderErrorKind::Protocol))?;
             let restored = await_privacy(
                 privacy.restore(Value::String(text.to_owned())),
+                privacy,
                 context,
                 UpstreamSendState::Sent,
             )
@@ -1595,6 +1608,7 @@ fn not_sent(kind: ProviderErrorKind) -> ProviderError {
 
 async fn await_privacy<T>(
     work: impl std::future::Future<Output = Result<T, gateway_veil::Error>>,
+    privacy: &gateway_veil::ReservedSession,
     context: &AttemptContext,
     send_state: UpstreamSendState,
 ) -> Result<T, ProviderError> {
@@ -1604,7 +1618,12 @@ async fn await_privacy<T>(
         biased;
         _ = context.cancellation().cancelled() => Err(ProviderError::new(ProviderErrorKind::Cancelled, send_state).with_retry_prohibited()),
         _ = deadline_elapsed(context) => Err(ProviderError::new(ProviderErrorKind::Timeout, send_state).with_retry_prohibited()),
-        result = work => result.map_err(|error| veil_error(error, send_state)),
+        result = work => {
+            if let Some(evidence) = privacy.take_missing_mapping() {
+                context.trace().record_evidence("anthropic.restoration_unresolved", serde_json::json!(evidence));
+            }
+            result.map_err(|error| veil_error(error, send_state))
+        },
     }
 }
 fn sent(kind: ProviderErrorKind) -> ProviderError {
@@ -1614,7 +1633,7 @@ fn infra() -> ProviderError {
     not_sent(ProviderErrorKind::ProviderInfrastructureUnavailable)
 }
 fn veil_error(error: gateway_veil::Error, state: UpstreamSendState) -> ProviderError {
-    // 隐私基础设施失败不应处罚选中的订阅账号，且绝不重发未恢复的内容。
+    // 实际隐私处理失败不应处罚选中的订阅账号，且不重放已发送的请求。
     let code = error.to_string();
     ProviderError::new(ProviderErrorKind::ProviderInfrastructureUnavailable, state)
         .with_retry_prohibited()

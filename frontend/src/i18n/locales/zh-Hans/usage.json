@@ -104,7 +104,9 @@
       "valueLabel": "请求明细筛选内容"
     },
     "route": {
-      "compressionRequest": "压缩请求"
+      "compressionRequest": "压缩请求",
+      "tokenCount": "Token 计数",
+      "tokenCountRequest": "仅计算输入 Token 数量，不生成回复"
     },
     "tokens": {
       "enterToken": "普通输入 Token",

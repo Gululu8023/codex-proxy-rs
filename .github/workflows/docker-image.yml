@@ -1,4 +1,4 @@
-# main 的 CI 通过后构建 linux/amd64 镜像并发布到 GHCR。
+# main 的 CI 通过后提升已经验证的 linux/amd64 镜像，不重复构建。
 # 服务器上执行 docker compose pull && docker compose up -d 即可更新到最新提交。
 name: Docker image
 
@@ -31,6 +31,8 @@ jobs:
       actions: read
     outputs:
       sha: ${{ steps.source.outputs.sha }}
+      run_id: ${{ steps.source.outputs.run_id }}
+      artifact_id: ${{ steps.source.outputs.artifact_id }}
     steps:
       # 使用 main 的检查逻辑，旧 CI 事件不要求旧提交也包含当前工作流脚本。
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -38,7 +40,7 @@ jobs:
           ref: main
           fetch-depth: 0
 
-      - name: Resolve source with successful CI
+      - name: Resolve verified CI build
         id: source
         env:
           GH_TOKEN: ${{ github.token }}
@@ -58,28 +60,19 @@ jobs:
     timeout-minutes: 120
     env:
       SOURCE_SHA: ${{ needs.source.outputs.sha }}
+      ARTIFACT_ID: ${{ needs.source.outputs.artifact_id }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ env.SOURCE_SHA }}
           fetch-depth: 0
 
-      - name: Build metadata
-        id: meta
-        run: |
-          # GHCR 镜像名必须小写
-          version="$(ruby -r './.github/scripts/release-metadata' -e 'puts ReleaseMetadata.version(YAML.load_file("release/version.yaml").fetch("version"))')"
-          {
-            echo "image=ghcr.io/${GITHUB_REPOSITORY,,}"
-            echo "version=$version"
-            echo "short_sha=${SOURCE_SHA::12}"
-            echo "build_time=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-            if [[ "$version" == *-exp.* ]]; then
-              echo 'build_type=experimental'
-            else
-              echo 'build_type=release'
-            fi
-          } >> "$GITHUB_OUTPUT"
+      - name: Restore verified CI build
+        id: verified
+        uses: ./.github/actions/restore-ci-build
+        with:
+          run-id: ${{ needs.source.outputs.run_id }}
+          artifact-id: ${{ needs.source.outputs.artifact_id }}
 
       - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
 
@@ -89,28 +82,17 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        id: build
-        with:
-          context: .
-          file: deploy/Dockerfile
-          target: runtime
-          platforms: linux/amd64
-          push: true
-          tags: |
-            ${{ steps.meta.outputs.image }}:sha-${{ steps.meta.outputs.short_sha }}
-          labels: |
-            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
-            org.opencontainers.image.revision=${{ env.SOURCE_SHA }}
-            org.opencontainers.image.version=${{ steps.meta.outputs.version }}
-          build-args: |
-            CPR_VERSION=${{ steps.meta.outputs.version }}
-            CPR_GIT_SHA=${{ env.SOURCE_SHA }}
-            CPR_BUILD_TIME=${{ steps.meta.outputs.build_time }}
-            CPR_BUILD_TYPE=${{ steps.meta.outputs.build_type }}
-          no-cache-filters: runtime-base
-          cache-from: type=gha,scope=docker-main
-          cache-to: type=gha,mode=max,scope=docker-main
+      - name: Publish verified commit image
+        id: image
+        env:
+          SOURCE_IMAGE: ${{ steps.verified.outputs.image }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          digest="${SOURCE_IMAGE##*@}"
+          docker buildx imagetools create -t "$image:sha-${SOURCE_SHA::12}" "$SOURCE_IMAGE"
+          test "$(docker buildx imagetools inspect "$image:sha-${SOURCE_SHA::12}" --format '{{.Manifest.Digest}}')" = "$digest"
+          echo "image=$image" >> "$GITHUB_OUTPUT"
+          echo "digest=$digest" >> "$GITHUB_OUTPUT"
 
       - name: Recheck main before promoting latest
         id: current
@@ -120,11 +102,11 @@ jobs:
           git fetch --no-tags origin main
           MAIN_SHA="$(git rev-parse FETCH_HEAD)" ruby .github/scripts/main-image.rb current >> "$GITHUB_OUTPUT"
 
-      - name: Promote built image digest to latest
+      - name: Promote verified image digest to latest
         if: steps.current.outputs.promote == 'true'
         env:
-          IMAGE: ${{ steps.meta.outputs.image }}
-          DIGEST: ${{ steps.build.outputs.digest }}
+          IMAGE: ${{ steps.image.outputs.image }}
+          DIGEST: ${{ steps.image.outputs.digest }}
         run: |
           docker buildx imagetools create -t "$IMAGE:latest" "$IMAGE@$DIGEST"
           test "$(docker buildx imagetools inspect "$IMAGE:latest" --format '{{.Manifest.Digest}}')" = "$DIGEST"

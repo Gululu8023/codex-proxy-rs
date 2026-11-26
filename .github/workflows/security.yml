@@ -76,9 +76,37 @@ jobs:
 
   container-security:
     if: github.event_name == 'schedule'
+    runs-on: ubuntu-26.04
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        channel: [latest, stable]
     permissions:
       contents: read
       security-events: write
-    uses: ./.github/workflows/_container.yml
-    with:
-      ref: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Resolve published image digest
+        id: image
+        env:
+          CHANNEL: ${{ matrix.channel }}
+        run: |
+          image="ghcr.io/${GITHUB_REPOSITORY,,}"
+          digest="$(docker buildx imagetools inspect "$image:$CHANNEL" --format '{{.Manifest.Digest}}')"
+          echo "image=$image@$digest" >> "$GITHUB_OUTPUT"
+      # 扫描用户实际可拉取的已发布字节；重建会更新系统包，反而掩盖旧镜像中的漏洞。
+      - uses: ./.github/actions/scan-container
+        with:
+          image: ${{ steps.image.outputs.image }}
+          platform: linux/amd64
+          category: published-container-${{ matrix.channel }}-amd64
+      - name: Upload scan reports
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: published-container-${{ matrix.channel }}
+          path: trivy-results.*
+          if-no-files-found: ignore
+          retention-days: 7

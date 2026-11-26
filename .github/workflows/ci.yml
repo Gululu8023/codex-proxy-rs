@@ -74,6 +74,9 @@ jobs:
               - '.github/scripts/toolchains.rb'
               - '.github/scripts/package-release.rb'
               - '.github/scripts/release-metadata.rb'
+              - '.github/scripts/build-artifacts.rb'
+              - '.github/actions/scan-container/**'
+              - '.github/actions/restore-ci-build/**'
               - '.github/workflows/_container.yml'
               - '.github/workflows/ci.yml'
               - '!**/*.md'
@@ -107,10 +110,12 @@ jobs:
 
   container:
     needs: changes
-    if: needs.changes.outputs.container == 'true'
+    # main 的候选产物统一在 CI 生成，避免后续文档提交使 latest 找不到对应构建。
+    if: needs.changes.outputs.container == 'true' || (github.event_name == 'push' && github.ref == 'refs/heads/main')
     permissions:
       contents: read
       security-events: write
+      packages: write
     uses: ./.github/workflows/_container.yml
     with:
       ref: ${{ github.event.pull_request.head.sha || github.sha }}

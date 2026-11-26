@@ -1,0 +1,33 @@
+name: Restore verified CI build
+description: Download an exact main CI artifact and verify its source, build contract and file hashes
+inputs:
+  run-id:
+    required: true
+    description: Successful main push CI run
+  artifact-id:
+    required: true
+    description: Immutable verified artifact ID in that run
+outputs:
+  image:
+    description: Verified candidate image digest
+    value: ${{ steps.verify.outputs.image }}
+  directory:
+    description: Verified binary and frontend directory
+    value: ${{ runner.temp }}/verified-ci-build
+runs:
+  using: composite
+  steps:
+    - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+      with:
+        artifact-ids: ${{ inputs.artifact-id }}
+        run-id: ${{ inputs.run-id }}
+        github-token: ${{ github.token }}
+        merge-multiple: true
+        # 跨工作流文件先放临时目录，校验前不能覆盖 checkout 中的脚本。
+        path: ${{ runner.temp }}/verified-ci-build
+    - id: verify
+      shell: bash
+      env:
+        BUILD_RUN_ID: ${{ inputs.run-id }}
+        BUILD_DIRECTORY: ${{ runner.temp }}/verified-ci-build
+      run: ruby .github/scripts/build-artifacts.rb verify "$BUILD_DIRECTORY" >> "$GITHUB_OUTPUT"

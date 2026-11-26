@@ -104,7 +104,9 @@
       "valueLabel": "Request detail filter value"
     },
     "route": {
-      "compressionRequest": "Compression request"
+      "compressionRequest": "Compression request",
+      "tokenCount": "Token count",
+      "tokenCountRequest": "Counts input tokens without generating a reply"
     },
     "tokens": {
       "enterToken": "Uncached input tokens",

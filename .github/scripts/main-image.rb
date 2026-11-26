@@ -1,8 +1,9 @@
 require 'json'
 require 'open3'
 require 'yaml'
+require_relative 'build-artifacts'
 
-# main 镜像只能使用成功 CI 的源码；发布机器人只改 published 时可沿用原提交的 CI。
+# main 只提升成功 CI 已验证的镜像；发布机器人只改 published 时可沿用原构建。
 module MainImage
   VERSION_PATH = 'release/version.yaml'
 
@@ -35,12 +36,12 @@ module MainImage
 
     candidate = requested
     loop do
-      endpoint = "repos/#{repository}/actions/workflows/ci.yml/runs?event=push&branch=main&head_sha=#{candidate}&per_page=1"
-      run = JSON.parse(capture('gh', 'api', endpoint)).fetch('workflow_runs').first
+      run = BuildArtifacts.ci_run(repository, candidate)
       if run
-        if run.fetch('head_sha') == candidate && run.fetch('head_repository').fetch('full_name') == repository &&
-           run.fetch('conclusion') == 'success'
-          return candidate
+        if run.fetch('status') == 'completed' && run.fetch('conclusion') == 'success'
+          artifact = BuildArtifacts.artifact(repository, run)
+          warn "No retained verified build for #{candidate}; rerun CI to build it" unless artifact
+          return artifact
         end
         # 失败或仍在运行的 CI 不能被旧的成功记录替代。
         warn "Latest CI is not successful for #{candidate}; skipping this image request"
@@ -62,13 +63,14 @@ if $PROGRAM_NAME == __FILE__
   begin
     case ARGV
     when ['resolve']
-      sha = MainImage.resolve(ENV.fetch('REQUESTED_SHA'), ENV.fetch('MAIN_SHA'), ENV.fetch('GITHUB_REPOSITORY'))
-      puts "sha=#{sha}"
+      build = MainImage.resolve(ENV.fetch('REQUESTED_SHA'), ENV.fetch('MAIN_SHA'), ENV.fetch('GITHUB_REPOSITORY'))
+      %w[sha run_id artifact_id].each { |key| puts "#{key}=#{build&.fetch(key)}" }
     when ['current']
-      # 构建期间 main 或同提交的最新 CI 结果都可能变化，提升前重新取得证据。
+      # 下载期间 main 或 CI 重跑结果可能变化；旧 artifact 不能替代新一次验证产物。
       source = ENV.fetch('SOURCE_SHA')
-      current = MainImage.resolve(source, ENV.fetch('MAIN_SHA'), ENV.fetch('GITHUB_REPOSITORY')) == source
-      puts "promote=#{current}"
+      build = MainImage.resolve(source, ENV.fetch('MAIN_SHA'), ENV.fetch('GITHUB_REPOSITORY'))
+      current = build && build.fetch('sha') == source && build.fetch('artifact_id').to_s == ENV.fetch('ARTIFACT_ID')
+      puts "promote=#{!!current}"
     else
       raise 'usage: main-image.rb resolve|current'
     end

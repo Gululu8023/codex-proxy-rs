@@ -559,7 +559,7 @@ new file mode 100644
 +    visit(value, Location::Root, transform)
 +}
 +pub fn restore_json(value: &Value, store: &(impl MappingStore + ?Sized), creator: &Creator) -> Result<Value, WalkError> {
-+    visit(value, Location::Root, &mut |text| restore_string(text, store, creator, true))
++    visit(value, Location::Root, &mut |text| restore_string(text, store, creator, false))
 +}
 +
 +#[derive(Clone, Copy)]

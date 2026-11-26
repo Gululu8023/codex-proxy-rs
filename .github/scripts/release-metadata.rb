@@ -64,8 +64,20 @@ module ReleaseMetadata
     "#{APP_NAME}_#{version}_#{platform.fetch('os')}_#{platform.fetch('arch')}.#{platform.fetch('archive')}"
   end
 
-  def self.outputs(tag)
+  # CI 与发行使用相同的内嵌版本合同；复用产物保留它实际编译时的时间。
+  def self.build
     value = version(YAML.load_file('release/version.yaml').fetch('version'))
+    {
+      'version' => value,
+      'git_sha' => git('rev-parse', 'HEAD'),
+      'build_time' => Time.now.utc.iso8601,
+      'build_type' => value.split('+', 2).first.include?('-exp.') ? 'experimental' : 'release'
+    }
+  end
+
+  def self.outputs(tag)
+    metadata = build
+    value = metadata.fetch('version')
     raise "Release tag #{tag} does not match v#{value}" unless tag == "v#{value}"
     validate_notes(value)
     # 手动入口和 tag 触发都只接受 main 已包含的提交；重试可以使用旧版本的精确提交。
@@ -76,19 +88,15 @@ module ReleaseMetadata
       key = sort_key(candidate)
       [key, candidate] if key < sort_key(value)
     end.max_by(&:first)&.last
-    {
+    metadata.merge(
       'tag' => tag,
-      'version' => value,
       'docker_version' => value.tr('+', '-'),
-      'build_time' => Time.now.utc.iso8601,
-      'git_sha' => git('rev-parse', 'HEAD'),
       'platform_matrix' => JSON.generate('include' => entries),
       'docker_matrix' => JSON.generate('include' => entries),
       'docker_platforms' => entries.map { |entry| entry['dockerPlatform'] }.join(','),
       'previous_tag' => previous,
-      'prerelease' => prerelease?(value),
-      'build_type' => value.split('+', 2).first.include?('-exp.') ? 'experimental' : 'release'
-    }
+      'prerelease' => prerelease?(value)
+    )
   end
 
 end

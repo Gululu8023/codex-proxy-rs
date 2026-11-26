@@ -949,6 +949,13 @@ async fn zero_attempt_postgres_write_failures_are_not_retried_and_do_not_stop_th
             None
         )
     );
+    // PostgreSQL 可先返回 ErrorResponse 再释放失败语句的行锁；先等待锁释放，
+    // 避免恢复的 SKIP LOCKED 把临时仍锁定的行跳过。
+    sqlx::query("select id from model_requests where id = $1 for update")
+        .bind("req_zero_attempt_finalize_rejected")
+        .execute(&database.pool)
+        .await
+        .expect("wait for failed finalization to release its row lock");
     assert_eq!(
         store
             .recover_expired(request.deadline_at.at().unwrap())

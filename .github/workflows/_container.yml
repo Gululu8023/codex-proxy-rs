@@ -15,12 +15,34 @@ on:
 permissions:
   contents: read
   security-events: write
+  packages: write
 
 jobs:
+  metadata:
+    runs-on: ubuntu-26.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.build.outputs.version }}
+      build_time: ${{ steps.build.outputs.build_time }}
+      build_type: ${{ steps.build.outputs.build_type }}
+      image: ${{ steps.build.outputs.image }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.ref }}
+      - id: build
+        run: |
+          ruby -r './.github/scripts/release-metadata' -e 'ReleaseMetadata.build.each { |key, value| puts "#{key}=#{value}" }' >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_OUTPUT"
+
   frontend:
     if: ${{ !inputs.source_build }}
     runs-on: ubuntu-26.04
     timeout-minutes: 15
+    permissions:
+      contents: read
     env:
       CI: 'true'
     steps:
@@ -32,9 +54,12 @@ jobs:
           upload-artifact: 'true'
 
   binary:
+    needs: metadata
     if: ${{ !inputs.source_build }}
     runs-on: ubuntu-26.04
     timeout-minutes: 45
+    permissions:
+      contents: read
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -48,7 +73,10 @@ jobs:
           platform: linux-amd64
           rust-image: ${{ steps.toolchains.outputs.rust_image }}
         env:
+          CPR_VERSION: ${{ needs.metadata.outputs.version }}
           CPR_GIT_SHA: ${{ inputs.ref }}
+          CPR_BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+          CPR_BUILD_TYPE: ${{ needs.metadata.outputs.build_type }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: codex-proxy-rs-linux-amd64
@@ -57,7 +85,7 @@ jobs:
           retention-days: 7
 
   container:
-    needs: [frontend, binary]
+    needs: [metadata, frontend, binary]
     if: always() && !cancelled()
     runs-on: ubuntu-26.04
     timeout-minutes: 45
@@ -66,6 +94,11 @@ jobs:
       TRIVY_QUIET: 'true'
       TRIVY_SKIP_VERSION_CHECK: 'true'
     steps:
+      - name: Require build metadata
+        env:
+          METADATA_RESULT: ${{ needs.metadata.result }}
+        run: test "$METADATA_RESULT" = success
+
       # 上游失败必须传递给已有的容器检查，不能让必需状态变成 skipped
       - name: Require prebuilt inputs
         if: ${{ !inputs.source_build }}
@@ -82,6 +115,14 @@ jobs:
       - name: Setup Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+
+      - name: Login to GHCR for main candidate
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: docker/login-action@8aa5831fb8d48d8f76594c7ddde61ae58019f550 # v4.8.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Download frontend
         if: ${{ !inputs.source_build }}
@@ -106,6 +147,7 @@ jobs:
         run: ruby .github/scripts/package-release.rb image
 
       - name: Build runtime image
+        id: build
         uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
@@ -113,9 +155,22 @@ jobs:
           target: ${{ inputs.source_build && 'runtime' || 'runtime-prebuilt' }}
           build-args: |
             CPR_PREBUILT_DIR=dist/docker
+            CPR_VERSION=${{ needs.metadata.outputs.version }}
             CPR_GIT_SHA=${{ inputs.ref }}
-          load: true
-          tags: ${{ env.CPR_IMAGE }}
+            CPR_BUILD_TIME=${{ needs.metadata.outputs.build_time }}
+            CPR_BUILD_TYPE=${{ needs.metadata.outputs.build_type }}
+          platforms: linux/amd64
+          # PR 只在本机验证；main 先保存候选 digest，全部 CI 成功后才允许提升公开入口。
+          push: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          load: ${{ github.event_name != 'push' || github.ref != 'refs/heads/main' }}
+          tags: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}:ci-{1}-{2}-{3}', needs.metadata.outputs.image, inputs.ref, github.run_id, github.run_attempt) || env.CPR_IMAGE }}
+          provenance: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'mode=max' || 'false' }}
+          sbom: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          labels: |
+            org.opencontainers.image.title=Codex Proxy RS
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.revision=${{ inputs.ref }}
+            org.opencontainers.image.version=${{ needs.metadata.outputs.version }}
           no-cache-filters: |
             runtime-base
             runtime
@@ -126,6 +181,30 @@ jobs:
       - name: Verify runtime image
         uses: ./.github/actions/verify-container
         with:
-          image: ${{ env.CPR_IMAGE }}
+          image: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && format('{0}@{1}', needs.metadata.outputs.image, steps.build.outputs.digest) || env.CPR_IMAGE }}
           platform: linux/amd64
           artifact-name: container-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}-amd64
+
+      - name: Export verified application assets
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        env:
+          ARTIFACT_IMAGE: ${{ needs.metadata.outputs.image }}@${{ steps.build.outputs.digest }}
+          CPR_BUILD_TIME: ${{ needs.metadata.outputs.build_time }}
+        run: |
+          set -euo pipefail
+          mkdir -p dist/verified-build/binary dist/verified-build/frontend
+          container="$(docker create --platform linux/amd64 "$ARTIFACT_IMAGE")"
+          trap 'docker rm "$container" >/dev/null' EXIT
+          docker cp "$container:/app/bin/codex-proxy-rs" dist/verified-build/binary/
+          docker cp "$container:/app/web/dist/." dist/verified-build/frontend/
+          ruby .github/scripts/build-artifacts.rb pack dist/verified-build
+
+      - name: Upload verified build
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: verified-build-linux-amd64
+          path: dist/verified-build/
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7

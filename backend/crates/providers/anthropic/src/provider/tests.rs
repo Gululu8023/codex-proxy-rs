@@ -98,7 +98,7 @@ async fn restored_text_stream_reaches_completed_after_usage() {
                     &Default::default(),
                     &json!({}),
                     value["type"] == "message_stop",
-                    &ProviderResponseObservation::new(transport()),
+                    &ProviderResponseObservation::new(transport(true)),
                 ));
             }
             if value["type"] == "message_stop" {
@@ -113,7 +113,7 @@ async fn restored_text_stream_reaches_completed_after_usage() {
             gateway_core::routing::ProviderKind::new(NAME).unwrap(),
             UpstreamModelId::new("claude-sonnet-4-5").unwrap(),
             ProviderAccountId::new("acct_fixture").unwrap(),
-            transport(),
+            transport(true),
         );
         let mut stream = ProviderStream::new(
             metadata,
@@ -178,7 +178,7 @@ async fn restored_json_text_blocks_pass_canonical_validation_with_usage() {
         &Default::default(),
         &value,
         true,
-        &ProviderResponseObservation::new(transport()),
+        &ProviderResponseObservation::new(transport(false)),
     ) {
         facts.extend_from_slice(event.canonical_facts());
     }
@@ -193,7 +193,7 @@ async fn restored_json_text_blocks_pass_canonical_validation_with_usage() {
         gateway_core::routing::ProviderKind::new(NAME).unwrap(),
         UpstreamModelId::new("claude-sonnet-4-5").unwrap(),
         ProviderAccountId::new("acct_fixture").unwrap(),
-        transport(),
+        transport(false),
     );
     let mut stream = ProviderStream::new(metadata, futures::stream::iter([Ok(event)]), ());
     let delivered = stream.next().await.unwrap().unwrap();
@@ -211,6 +211,124 @@ async fn restored_json_text_blocks_pass_canonical_validation_with_usage() {
         .collect();
     assert_eq!(indexes, [1, 2]);
     assert!(stream.next().await.is_none());
+}
+
+#[tokio::test]
+async fn unresolved_privacy_reference_passes_through_and_is_recorded_once() {
+    use std::num::NonZeroU32;
+
+    use gateway_core::{
+        account::AccountSelectionPolicy,
+        diagnostics::TraceContext,
+        engine::{AccountAttemptContext, ModelRequestId, RequestAttemptContext},
+        lifecycle::{CancellationToken, Deadline},
+        policy::ClientApiKeyId,
+    };
+    use serde_json::json;
+
+    let directory = tempfile::tempdir().unwrap();
+    let runtime = gateway_veil::Runtime::initialize(gateway_veil::Config {
+        data_directory: directory.path().join("veil"),
+        ..Default::default()
+    })
+    .await;
+    let privacy = runtime
+        .session(gateway_veil::Scope::ClientKey("key_fixture"))
+        .unwrap()
+        .reserve()
+        .unwrap();
+    privacy
+        .redact(json!({"messages":[{"role":"user","content":"ordinary text"}]}))
+        .await
+        .unwrap();
+    let trace = TraceContext::new("req_unresolved_privacy");
+    let context = AttemptContext::new(
+        RequestAttemptContext::new(
+            ModelRequestId::new("req_unresolved_privacy").unwrap(),
+            ClientApiKeyId::new("key_fixture").unwrap(),
+        )
+        .with_trace(trace.clone()),
+        NonZeroU32::new(1).unwrap(),
+        Deadline::default(),
+        AccountSelectionPolicy::new(RotationStrategy::RoundRobin, NonZeroU32::new(1).unwrap()),
+        AccountAttemptContext::default(),
+        None,
+        CancellationToken::new(),
+    );
+    let unknown = "{{IP_01ARZ3NDEKTSV4RRFFQ69G5FAV}}";
+    let response = json!({"type":"message","content":[{"type":"text","text":unknown}]});
+    assert_eq!(
+        await_privacy(
+            privacy.restore(response.clone()),
+            &privacy,
+            &context,
+            UpstreamSendState::Sent,
+        )
+        .await
+        .unwrap(),
+        response
+    );
+    let plain = json!({"type":"message","content":[{"type":"text","text":"next chunk"}]});
+    assert_eq!(
+        await_privacy(
+            privacy.restore(plain.clone()),
+            &privacy,
+            &context,
+            UpstreamSendState::Sent,
+        )
+        .await
+        .unwrap(),
+        plain
+    );
+    let snapshot = trace.snapshot().unwrap();
+    let events = snapshot["events"].as_array().unwrap();
+    assert_eq!(events.len(), 1);
+    assert_eq!(events[0]["stage"], "anthropic.restoration_unresolved");
+    assert_eq!(events[0]["data"]["seenInRedactedRequest"], false);
+    assert_eq!(
+        snapshot["stageCounts"]["anthropic.restoration_unresolved"],
+        1
+    );
+    assert!(!snapshot.to_string().contains(unknown));
+
+    let error = await_privacy(
+        std::future::ready(Err::<Value, _>(gateway_veil::Error::StoreUnavailable)),
+        &privacy,
+        &context,
+        UpstreamSendState::Sent,
+    )
+    .await
+    .unwrap_err();
+    assert_eq!(
+        error.kind(),
+        ProviderErrorKind::ProviderInfrastructureUnavailable
+    );
+    assert!(error.retry_is_prohibited());
+    assert!(!score_account_failure(&error));
+}
+
+#[test]
+fn request_mode_selects_json_for_count_tokens_and_non_streaming_messages() {
+    use serde_json::json;
+
+    for (body, count_tokens, expected) in [
+        (json!({}), true, "http_json"),
+        (json!({}), false, "http_json"),
+        (json!({"stream":false}), false, "http_json"),
+        (json!({"stream":true}), false, "http_sse"),
+    ] {
+        let stream_requested = request_stream(&body, count_tokens).unwrap();
+        assert_eq!(
+            transport(stream_requested),
+            UpstreamTransport::new(expected).unwrap()
+        );
+    }
+    for body in [json!({"stream":true}), json!({"thread":{"type":"create"}})] {
+        assert_eq!(
+            request_stream(&body, true).unwrap_err().kind(),
+            ProviderErrorKind::InvalidRequest
+        );
+    }
 }
 
 #[test]

@@ -19,6 +19,8 @@ use zeroize::Zeroizing;
 
 mod redaction;
 pub use redaction::{RedactionResult, RedactionStatistics};
+mod restoration;
+pub use restoration::MissingMapping;
 
 pub const REVISION: &str = "82f9290022144c82609aaad149d81693c4a563ec+cprs-library-3";
 
@@ -361,6 +363,7 @@ impl Runtime {
             last_error: self.last_error.clone(),
             metrics: self.metrics.clone(),
             creator: scope.creator(),
+            restoration: Arc::default(),
         })
     }
 
@@ -759,12 +762,15 @@ pub struct Session {
     last_error: Arc<Mutex<Option<Failure>>>,
     creator: Creator,
     metrics: Arc<Metrics>,
+    restoration: Arc<Mutex<restoration::Observations>>,
 }
 
 impl Session {
     /// 在发送上游前预留整个请求的隐私处理容量；后续阶段不能再次申请同一个槽位。
-    pub fn reserve(self) -> Result<ReservedSession, Error> {
+    pub fn reserve(mut self) -> Result<ReservedSession, Error> {
         let slot = self.acquire_slot()?;
+        // Session 可以克隆，但不同请求的失败证据不能共享。
+        self.restoration = Arc::default();
         Ok(ReservedSession {
             session: self,
             slot,
@@ -796,11 +802,17 @@ impl Session {
         let creator = self.creator;
         let errors = self.last_error.clone();
         let metrics = self.metrics.clone();
+        let observations = self.restoration.clone();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
             let started = Instant::now();
             let result = if restore {
-                veil_engine::anthropic::restore_json(&value, &state.store, &creator)
+                let store = restoration::Store {
+                    inner: &state.store,
+                    observations: &observations,
+                };
+                // 未命中的引用保持模型原文，不猜测映射；存储和解密错误仍由引擎返回失败。
+                veil_engine::anthropic::restore_json(&value, &store, &creator)
             } else {
                 veil_engine::anthropic::desensitize_json(
                     &value,
@@ -809,6 +821,12 @@ impl Session {
                     &creator,
                 )
             };
+            if !restore && let Ok(value) = &result {
+                observations
+                    .lock()
+                    .expect("restoration observations")
+                    .request(value);
+            }
             metrics.observe(restore, result.is_err(), started);
             remember(result.map_err(Error::from), &errors)
         })
@@ -826,10 +844,16 @@ impl Session {
         let creator = self.creator;
         let errors = self.last_error.clone();
         let metrics = self.metrics.clone();
+        let observations = self.restoration.clone();
         // 每条流只有一个恢复器；接收端丢弃后阻塞任务退出，槽位不会在取消时提前释放。
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
-            let mut restorer = veil::proxy::SseRestorer::new_strict(&state.store, creator);
+            let store = restoration::Store {
+                inner: &state.store,
+                observations: &observations,
+            };
+            // JSON 与流式保持同一语义：未知引用原样返回，工具 JSON 仍需完整且合法。
+            let mut restorer = veil::proxy::SseRestorer::new(&store, creator);
             while let Some(job) = receiver.blocking_recv() {
                 let started = Instant::now();
                 let finish = job.chunk.is_none();
@@ -866,6 +890,7 @@ impl ReservedSession {
         let creator = self.session.creator;
         let errors = self.session.last_error.clone();
         let metrics = self.session.metrics.clone();
+        let observations = self.session.restoration.clone();
         let queued = Instant::now();
         tokio::task::spawn_blocking(move || {
             let _slot = slot;
@@ -873,6 +898,10 @@ impl ReservedSession {
             let worker_wait_us = u64::try_from(queued.elapsed().as_micros()).unwrap_or(u64::MAX);
             let result = redaction::redact(&state, creator, &value).map(|mut result| {
                 result.statistics.worker_wait_us = worker_wait_us;
+                observations
+                    .lock()
+                    .expect("restoration observations")
+                    .request(&result.value);
                 result
             });
             metrics.observe(false, result.is_err(), started);
@@ -884,6 +913,15 @@ impl ReservedSession {
 
     pub async fn restore(&self, value: Value) -> Result<Value, Error> {
         self.session.transform(value, true, self.slot.clone()).await
+    }
+
+    /// 取走本次处理的未命中证据，避免后续流事件重复记录；不暴露占位符或原文。
+    pub fn take_missing_mapping(&self) -> Option<MissingMapping> {
+        self.session
+            .restoration
+            .lock()
+            .expect("restoration observations")
+            .take_missing()
     }
 
     pub fn stream(&self) -> Stream {

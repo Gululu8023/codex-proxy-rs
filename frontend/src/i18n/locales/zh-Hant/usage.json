@@ -104,7 +104,9 @@
       "valueLabel": "請求明細篩選內容"
     },
     "route": {
-      "compressionRequest": "壓縮請求"
+      "compressionRequest": "壓縮請求",
+      "tokenCount": "Token 計數",
+      "tokenCountRequest": "僅計算輸入 Token 數量，不生成回覆"
     },
     "tokens": {
       "enterToken": "普通輸入 Token",
