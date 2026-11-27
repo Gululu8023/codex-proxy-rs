@@ -406,6 +406,7 @@ impl ProviderAccountStore for MemoryAccountStore {
     async fn list_for_provider(
         &self,
         provider: &ProviderKind,
+        include_disabled: bool,
     ) -> Result<Vec<ProviderAccount>, StoreError> {
         self.provider_list_reads.fetch_add(1, Ordering::SeqCst);
         if self.fail_provider_listing.load(Ordering::SeqCst) {
@@ -423,7 +424,10 @@ impl ProviderAccountStore for MemoryAccountStore {
             .lock()
             .expect("account store lock")
             .values()
-            .filter(|stored| stored.account.provider() == provider && stored.account.enabled())
+            .filter(|stored| {
+                stored.account.provider() == provider
+                    && (include_disabled || stored.account.enabled())
+            })
             .map(|stored| stored.account.clone())
             .collect())
     }
@@ -528,6 +532,7 @@ impl ProviderAccountStore for MemoryAccountStore {
             expected_revision,
             profile,
             preserve_profile,
+            preserve_access_token_expiry,
             credential,
             has_refresh_token,
             access_token_expires_at,
@@ -567,7 +572,11 @@ impl ProviderAccountStore for MemoryAccountStore {
                 quota: stored.account.quota(),
                 last_error_reason,
                 last_error_message,
-                access_token_expires_at,
+                access_token_expires_at: if preserve_access_token_expiry {
+                    stored.account.access_token_expires_at()
+                } else {
+                    access_token_expires_at
+                },
                 has_refresh_token,
                 next_refresh_at,
                 profile: (!preserve_profile).then_some((
@@ -730,6 +739,32 @@ impl ProviderAccountStore for MemoryAccountStore {
             observation.state = change.state;
         }
         Ok(QuotaWriteOutcome::Updated)
+    }
+
+    async fn expire_access_token(
+        &self,
+        account: &ProviderAccount,
+        observed_at: SystemTime,
+    ) -> Result<bool, StoreError> {
+        let mut accounts = self.accounts.lock().expect("account store lock");
+        let Some(stored) = accounts.get_mut(account.id()) else {
+            return Ok(false);
+        };
+        if stored.account.revision() != account.revision()
+            || stored.state_observed_at.is_some_and(|at| at > observed_at)
+        {
+            return Ok(false);
+        }
+        let mut rebuild = AccountRebuild::preserving(&stored.account);
+        rebuild.access_token_expires_at = Some(
+            stored
+                .account
+                .access_token_expires_at()
+                .map_or(observed_at, |at| at.min(observed_at)),
+        );
+        // 与生产存储一致，只标记 access token 到期，不改凭据状态或观测时间。
+        stored.account = rebuild_account(&stored.account, rebuild);
+        Ok(true)
     }
 
     async fn apply_state_change(&self, change: AccountStateChange) -> Result<(), StoreError> {

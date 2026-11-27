@@ -157,8 +157,6 @@ pub(crate) fn request_context<'a>(
         request_id,
         turn_state: None,
         turn_metadata: None,
-        beta_features: None,
-        include_timing_metrics: None,
         version: None,
         codex_window_id: None,
         parent_thread_id: None,
@@ -167,7 +165,6 @@ pub(crate) fn request_context<'a>(
         session_id: None,
         thread_id: None,
         client_request_id: None,
-        turn_id: None,
         account_selection: Default::default(),
     }
 }
@@ -540,4 +537,36 @@ fn assert_substrings_appear_in_order(haystack: &str, needles: &[&str]) {
             .unwrap_or_else(|| panic!("missing ordered substring: {needle}"));
         offset += relative + needle.len();
     }
+}
+
+// 通过真实协议边界编码普通透传头，避免恢复已移除的独立头字段。
+fn with_protocol_headers(
+    request: provider_openai::transport::protocol::responses::CodexResponsesRequest,
+    headers: &[(&str, &str)],
+) -> provider_openai::transport::protocol::responses::CodexResponsesRequest {
+    use base64::Engine as _;
+    let entries: Vec<_> = headers
+        .iter()
+        .map(|(name, value)| {
+            serde_json::json!([
+                name,
+                base64::engine::general_purpose::STANDARD.encode(value)
+            ])
+        })
+        .collect();
+    let payload =
+        gateway_core::operation::ProtocolPayload::json_object("openai", request.body().clone())
+            .expect("protocol payload")
+            .with_context(
+                serde_json::json!({"opaque_request_headers": entries})
+                    .as_object()
+                    .unwrap()
+                    .clone(),
+            );
+    provider_openai::encode_generate_request(
+        &gateway_core::operation::GenerateRequest::from_protocol_payload(payload),
+        request.model(),
+        None,
+    )
+    .expect("encode headers")
 }

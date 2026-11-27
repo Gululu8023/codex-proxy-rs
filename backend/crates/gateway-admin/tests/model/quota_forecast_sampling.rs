@@ -12,7 +12,9 @@ fn time(minutes: i64) -> DateTime<Utc> {
 
 fn point(minute: i64, percent: f64, tokens: u64) -> QuotaForecastPoint {
     QuotaForecastPoint {
+        started_at: time(minute),
         observed_at: time(minute),
+        reset_at: time(7 * 24 * 60),
         used_percent: percent,
         usage: QuotaForecastUsage {
             request_count: minute as u64,

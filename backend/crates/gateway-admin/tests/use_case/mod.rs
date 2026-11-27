@@ -268,6 +268,22 @@ impl AdminHarness {
                 Arc::new(UnavailableStore),
             ),
             gateway_admin::AdminRuntimePorts {
+                published_snapshot: gateway_core::runtime::RuntimeSnapshotHandle::new(
+                    gateway_core::routing::RuntimeSnapshot::new(
+                        gateway_core::routing::ConfigRevision::new(1).unwrap(),
+                        gateway_core::settings::SettingsValues::new(
+                            1,
+                            "smart",
+                            Default::default(),
+                            None,
+                            None,
+                        ),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .expect("empty snapshot"),
+                ),
                 upstream_info: self.upstream_info,
                 timezone: Default::default(),
                 pricing_source: Arc::new(UnavailablePricingSource),
@@ -645,6 +661,22 @@ impl AccountRuntimeStore for UnavailableStore {
 
 #[async_trait]
 impl ClientKeyStore for UnavailableStore {
+    async fn client_key_budget(
+        &self,
+        _: &ClientApiKeyId,
+    ) -> AdminStoreResult<Option<gateway_core::engine::budget::ClientBudgetStatus>> {
+        Err(unavailable("client key budget"))
+    }
+
+    async fn batch_update_client_keys(
+        &self,
+        _: gateway_admin::model::client_keys::BatchUpdateClientKeys,
+        _: gateway_admin::ports::store::BatchClientKeyProfileMerger,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        Err(unavailable("client key batch update"))
+    }
+
     async fn client_key_budget_window(
         &self,
         _: &gateway_core::policy::ClientApiKeyId,
@@ -739,6 +771,23 @@ impl ClientKeyStore for UnavailableStore {
 
 #[async_trait]
 impl ObservabilityStore for UnavailableStore {
+    async fn client_key_statistics(
+        &self,
+        _: TimeRange,
+        _: &ClientApiKeyId,
+        _: gateway_admin::model::observability::KeyUsageMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::KeyStatisticsOverview> {
+        Err(unavailable("client key statistics"))
+    }
+
+    async fn client_key_models(
+        &self,
+        _: TimeRange,
+        _: &ClientApiKeyId,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::observability::KeyModelRow>> {
+        Err(unavailable("client key models"))
+    }
+
     async fn diagnostic_errors(
         &self,
         _target: &gateway_admin::model::diagnostics::DiagnosticTarget,

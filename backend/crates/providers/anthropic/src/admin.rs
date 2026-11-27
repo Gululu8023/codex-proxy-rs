@@ -209,6 +209,20 @@ impl ProviderAdmin for AnthropicAdmin {
         let selection = crate::profile::Selection::parse(configuration).map_err(|_| invalid())?;
         Ok(self.credentials.profiles.preview(selection))
     }
+    fn merge_batch_key_profile(
+        &self,
+        current: Option<&OpaqueProviderData>,
+        update: Option<&Option<OpaqueProviderData>>,
+        installation_seed: Option<gateway_admin::ports::provider::ClientInstallationSeed>,
+    ) -> Result<Option<OpaqueProviderData>, ProviderAdminError> {
+        gateway_core::settings::request_profiles::merge_batch_key_profile(
+            current,
+            update,
+            installation_seed,
+        )
+        .map_err(|_| invalid())
+    }
+
     fn preview_key_client_profile(
         &self,
         key: &OpaqueProviderData,
@@ -747,6 +761,7 @@ fn rotation(rotation: Rotation) -> Result<PreparedCredentialRotation, ProviderAd
             plan_type: account.plan_type().map(str::to_owned),
             preserve_profile: true,
             preserve_credential_state: false,
+            preserve_access_token_expiry: false,
             provider_material: ProviderDocument::new(rotation.tokens.material()),
             has_refresh_token: rotation.tokens.refresh_token.is_some(),
             access_token_expires_at: rotation.tokens.expiry().map(Into::into),

@@ -60,6 +60,8 @@ async fn peer_sharing_persists_across_reads_and_cannot_lose_its_group_scope() {
     groups
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 id: group.clone(),
                 name: "Shared".into(),
                 description: None,

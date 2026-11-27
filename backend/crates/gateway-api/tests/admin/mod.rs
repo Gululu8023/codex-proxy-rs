@@ -218,6 +218,22 @@ impl AdminTestFixture {
             ClientConfig::default(),
             stores,
             gateway_admin::AdminRuntimePorts {
+                published_snapshot: gateway_core::runtime::RuntimeSnapshotHandle::new(
+                    gateway_core::routing::RuntimeSnapshot::new(
+                        gateway_core::routing::ConfigRevision::new(1).unwrap(),
+                        gateway_core::settings::SettingsValues::new(
+                            1,
+                            "smart",
+                            Default::default(),
+                            None,
+                            None,
+                        ),
+                        Vec::new(),
+                        Vec::new(),
+                        Vec::new(),
+                    )
+                    .expect("empty snapshot"),
+                ),
                 upstream_info: Some(Arc::new(upstream_info::TestPeerInfo(Arc::clone(
                     &provider_quota,
                 )))),
@@ -734,6 +750,8 @@ impl MemoryAccountGroupStore {
             (
                 primary_id.clone(),
                 AccountGroupRecord {
+                    model_access: Default::default(),
+                    allow_subagents: true,
                     allow_image_generation: true,
                     fast_mode: FastMode::Default,
                     id: primary_id,
@@ -757,6 +775,8 @@ impl MemoryAccountGroupStore {
             (
                 secondary_id.clone(),
                 AccountGroupRecord {
+                    model_access: Default::default(),
+                    allow_subagents: true,
                     allow_image_generation: true,
                     fast_mode: FastMode::Default,
                     id: secondary_id,
@@ -920,6 +940,8 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         let mut state = self.state.lock().expect("account groups");
         let now = Utc::now();
         let record = AccountGroupRecord {
+            model_access: command.model_access,
+            allow_subagents: command.allow_subagents,
             allow_image_generation: command.allow_image_generation,
             fast_mode: command.fast_mode,
             id: command.id.clone(),
@@ -955,6 +977,12 @@ impl AccountGroupStore for MemoryAccountGroupStore {
         record.color = command.color;
         if let Some(fast_mode) = command.fast_mode {
             record.fast_mode = fast_mode;
+        }
+        if let Some(policy) = command.model_access {
+            record.model_access = policy;
+        }
+        if let Some(allowed) = command.allow_subagents {
+            record.allow_subagents = allowed;
         }
         if let Some(allowed) = command.allow_image_generation {
             record.allow_image_generation = allowed;
@@ -1010,6 +1038,22 @@ fn mutation(
 
 #[async_trait]
 impl ClientKeyStore for MemoryClientKeyStore {
+    async fn client_key_budget(
+        &self,
+        _: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Option<gateway_core::engine::budget::ClientBudgetStatus>> {
+        panic!("unused client key budget")
+    }
+
+    async fn batch_update_client_keys(
+        &self,
+        _: gateway_admin::model::client_keys::BatchUpdateClientKeys,
+        _: gateway_admin::ports::store::BatchClientKeyProfileMerger,
+        _: &MutationContext,
+    ) -> AdminStoreResult<Revision> {
+        panic!("unused client key batch update")
+    }
+
     async fn client_key_budget_window(
         &self,
         _: &gateway_core::policy::ClientApiKeyId,
@@ -1438,6 +1482,23 @@ impl AccountRuntimeStore for UnusedStore {
 
 #[async_trait]
 impl ObservabilityStore for UnusedStore {
+    async fn client_key_statistics(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+        _: gateway_admin::model::observability::KeyUsageMetric,
+    ) -> AdminStoreResult<gateway_admin::model::observability::KeyStatisticsOverview> {
+        panic!("unused client key statistics")
+    }
+
+    async fn client_key_models(
+        &self,
+        _: TimeRange,
+        _: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Vec<gateway_admin::model::observability::KeyModelRow>> {
+        panic!("unused client key models")
+    }
+
     async fn diagnostic_errors(
         &self,
         target: &gateway_admin::model::diagnostics::DiagnosticTarget,

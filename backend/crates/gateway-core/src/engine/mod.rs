@@ -8,6 +8,7 @@ pub mod connection;
 pub mod continuation;
 pub mod coordinator;
 pub mod execution;
+mod group_permissions;
 mod image_generation;
 pub mod middleware;
 pub mod observation;

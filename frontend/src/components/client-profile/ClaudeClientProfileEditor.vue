@@ -6,13 +6,14 @@ import { useI18n } from 'vue-i18n'
 import { getClaudeProfileOptions, previewClaudeProfile } from '@/api/modules/settings/profiles'
 import { errorMessage } from '@/utils/operation'
 
-const props = withDefaults(defineProps<{ active?: boolean, disabled?: boolean, allowInherit?: boolean }>(), {
+const props = withDefaults(defineProps<{ active?: boolean, disabled?: boolean, allowInherit?: boolean, allowPreserve?: boolean }>(), {
   active: true,
   disabled: false,
   allowInherit: false,
+  allowPreserve: false,
 })
 const { t } = useI18n({ useScope: 'global' })
-const model = defineModel<ClaudeProfileSelection | null>({ required: true })
+const model = defineModel<ClaudeProfileSelection | null | undefined>({ required: true })
 const options = shallowRef<ClaudeProfileOptions>()
 const preview = shallowRef<ClaudeProfilePreview>()
 const failure = shallowRef('')
@@ -36,13 +37,17 @@ const effective = computed(() => {
 const inherited = computed(() => props.allowInherit && model.value === null)
 const locked = computed(() => props.disabled || loading.value || inherited.value)
 const source = computed({
-  get: () => model.value === null
-    ? 'global'
-    : 'independent',
+  get: () => model.value === undefined
+    ? 'keep'
+    : model.value === null
+      ? 'global'
+      : 'independent',
   set: (value: string) => {
-    model.value = value === 'global'
-      ? null
-      : { ...options.value!.globalConfiguration }
+    model.value = value === 'keep'
+      ? undefined
+      : value === 'global'
+        ? null
+        : { ...options.value!.globalConfiguration }
   },
 })
 const platforms = { macos: 'macOS', linux: 'Linux', windows: 'Windows' }
@@ -167,7 +172,7 @@ watch([
   effective,
   () => props.active,
 ], ([configuration, active], _, onCleanup) => {
-  if (!active)
+  if (!active || model.value === undefined)
     return
   let cancelled = false
   preview.value = undefined
@@ -202,13 +207,14 @@ watch([
     <div v-if="allowInherit" class="flex flex-wrap items-center justify-between gap-3">
       <ZSegmented
         v-model="source" :disabled="disabled || loading || !options" :options="[
+          ...(allowPreserve ? [{ label: t('accounts.modelAccess.reserve'), value: 'keep' }] : []),
           { label: t('settings.clientProfile.globalConfiguration'), value: 'global' },
           { label: t('settings.clientProfile.customConfiguration'), value: 'independent' },
         ]"
       />
       <slot name="source-extra" />
     </div>
-    <div v-if="effective && !inherited" class="grid gap-4 sm:grid-cols-2">
+    <div v-if="model !== undefined && effective && !inherited" class="grid gap-4 sm:grid-cols-2">
       <ZFormItem :label="t('settings.clientProfile.clientDefault')">
         <ZSelect v-model="selectedPreset" :disabled="locked" :options="presetOptions" />
       </ZFormItem>

@@ -47,7 +47,7 @@
       "cacheReadCost": "Cache read cost",
       "cacheWriteCost": "Cache write cost",
       "cacheWriteUnitPrice": "Cache write unit price",
-      "fastMode": "Fast mode",
+      "speedModeBadge": "{mode} mode",
       "longContextBillingDetails": "Long-context cost details",
       "billingDetails": "Cost details",
       "viewLongContextBillingDetails": "View long-context cost details",
@@ -93,6 +93,8 @@
     "filters": {
       "modelPlaceholder": "Filter by model",
       "error": "Error",
+      "errorSource": "Error source",
+      "allSources": "All sources",
       "requestDetailType": "Request detail type",
       "label": "Usage record filters and actions",
       "refreshUsageHistory": "Refresh usage history",

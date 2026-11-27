@@ -150,6 +150,13 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
     });
     let mut request =
         codex_request_with_prompt_cache_key("gpt-test", "be brief", Vec::new(), "client-thread");
+    request = crate::transport::with_protocol_headers(
+        request,
+        &[
+            ("x-codex-beta-features", "feature-a"),
+            ("x-responsesapi-include-timing-metrics", "true"),
+        ],
+    );
     request.use_websocket = true;
     request.responses_lite = Some("true".to_owned());
     request.memgen_request = Some("true".to_owned());
@@ -179,8 +186,6 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
                 request_id: "req_ws_security",
                 turn_state: Some("turn-state"),
                 turn_metadata: Some("{\"thread_source\":\"subagent\"}"),
-                beta_features: Some("feature-a"),
-                include_timing_metrics: Some("true"),
                 version: Some("26.318.11754"),
                 codex_window_id: Some("cw_derived"),
                 parent_thread_id: Some("parent-456"),
@@ -189,7 +194,6 @@ async fn backend_websocket_should_forward_context_headers_and_preserve_payload_f
                 session_id: Some("cp_derived"),
                 thread_id: None,
                 client_request_id: None,
-                turn_id: None,
                 account_selection: Default::default(),
             },
         )
@@ -265,10 +269,15 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
         request
     });
     let mut request = codex_request("gpt-test", "", Vec::new());
+    request = crate::transport::with_protocol_headers(
+        request,
+        &[
+            ("x-codex-beta-features", "beta-a"),
+            ("x-responsesapi-include-timing-metrics", "true"),
+        ],
+    );
     request.force_http_sse = true;
     request.turn_metadata = Some("turn-meta".to_owned());
-    request.beta_features = Some("beta-a".to_owned());
-    request.include_timing_metrics = Some("true".to_owned());
     request.version = Some("26.707.51957".to_owned());
     request.codex_window_id = Some("cw_1".to_owned());
     request.parent_thread_id = Some("parent-1".to_owned());
@@ -296,8 +305,6 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
                 request_id: "req_order",
                 turn_state: Some("turn-state"),
                 turn_metadata: request.turn_metadata.as_deref(),
-                beta_features: request.beta_features.as_deref(),
-                include_timing_metrics: request.include_timing_metrics.as_deref(),
                 version: request.version.as_deref(),
                 codex_window_id: request.codex_window_id.as_deref(),
                 parent_thread_id: request.parent_thread_id.as_deref(),
@@ -306,7 +313,6 @@ async fn backend_http_should_send_codex_context_without_browser_headers() {
                 session_id: Some("session-1"),
                 thread_id: None,
                 client_request_id: None,
-                turn_id: None,
                 account_selection: Default::default(),
             },
         )
@@ -425,11 +431,8 @@ async fn backend_http_should_ignore_unrepresentable_protocol_headers_without_blo
                 client_request_id: Some("opaque\nclient-request-id"),
                 session_id: Some("opaque\nsession"),
                 thread_id: Some("opaque\nthread"),
-                turn_id: Some("opaque\nturn"),
                 codex_window_id: Some("opaque\nwindow"),
                 parent_thread_id: Some("opaque\nparent"),
-                beta_features: Some("opaque\nbeta"),
-                include_timing_metrics: Some("opaque\ntiming"),
                 version: Some("opaque\nversion"),
                 turn_state: request.turn_state.as_deref(),
                 turn_metadata: request.turn_metadata.as_deref(),

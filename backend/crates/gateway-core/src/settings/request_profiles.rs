@@ -14,6 +14,54 @@ pub fn inherited_fields(key: &OpaqueProviderData) -> Option<&Map<String, Value>>
         .flatten()
 }
 
+#[derive(Debug, thiserror::Error)]
+#[error("batch client profile must use the separate installation seed field")]
+pub struct InvalidBatchKeyProfile;
+
+/// 批量切换画像保留每把 Key、每个 Provider 的种子；显式更换种子时才覆盖。
+pub fn merge_batch_key_profile(
+    current: Option<&OpaqueProviderData>,
+    update: Option<&Option<OpaqueProviderData>>,
+    installation_seed: Option<uuid::Uuid>,
+) -> Result<Option<OpaqueProviderData>, InvalidBatchKeyProfile> {
+    if let Some(Some(profile)) = update
+        && inherited_fields(profile)
+            .unwrap_or_else(|| profile.expose_to_provider())
+            .contains_key("installationSeed")
+    {
+        return Err(InvalidBatchKeyProfile);
+    }
+    let selection = update.map_or(current, Option::as_ref);
+    let seed = installation_seed.map(|seed| seed.to_string()).or_else(|| {
+        current.and_then(|profile| {
+            inherited_fields(profile)
+                .unwrap_or_else(|| profile.expose_to_provider())
+                .get("installationSeed")
+                .and_then(Value::as_str)
+                .filter(|seed| !seed.is_empty())
+                .map(str::to_owned)
+        })
+    });
+    let Some(seed) = seed else {
+        return Ok(selection.cloned());
+    };
+    if let Some(selection) = selection
+        && inherited_fields(selection).is_none()
+    {
+        let mut fields = selection.expose_to_provider().clone();
+        fields.insert("installationSeed".into(), Value::String(seed));
+        return Ok(Some(OpaqueProviderData::new(fields)));
+    }
+    Ok(Some(OpaqueProviderData::new(
+        serde_json::json!({
+            "inherit": {"installationSeed": seed},
+        })
+        .as_object()
+        .expect("fixed profile object")
+        .clone(),
+    )))
+}
+
 /// 在请求快照上应用继承，不把全局字段复制回 Key；没有宿主配置时由 Provider 解析默认值
 #[must_use]
 pub fn resolve_key_profile<'a>(

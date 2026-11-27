@@ -435,6 +435,7 @@ type UsagePageQuery = UsageRangeQuery & PageQuery & {
   accountSearch?: string
   model?: string
   status?: UsageRecordStatus
+  errorOrigin?: UsageErrorOrigin
 }
 
 interface UsageDetailQuery {

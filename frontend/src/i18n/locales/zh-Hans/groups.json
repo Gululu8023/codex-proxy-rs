@@ -27,6 +27,9 @@
       "createGroup": "创建分组"
     },
     "editor": {
+      "subagents": "协作子代理",
+      "subagentsHelp": "允许 Codex 启动协作子代理；关闭后拒绝可识别的协作子代理请求。主会话、审查和上下文压缩不受影响。",
+      "modelAccessHelp": "模型须由 Key 绑定的启用分组授权，且账号自身允许；多个分组按模型合并合格账号。",
       "editDescription": "修改分组信息和请求权限",
       "createDescription": "创建后，可在账号管理中将账号加入这个分组",
       "groupName": "分组名称",

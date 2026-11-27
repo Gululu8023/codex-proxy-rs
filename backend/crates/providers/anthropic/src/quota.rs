@@ -891,7 +891,7 @@ fn access_state(value: &Value, previous: QuotaState, observed_at: SystemTime) ->
 pub(crate) async fn synchronize(credentials: &Credentials) -> Result<(), CredentialError> {
     let accounts = credentials.ports.accounts();
     let candidates = accounts
-        .list_for_provider(&credentials.kind())
+        .list_for_provider(&credentials.kind(), false)
         .await
         .map_err(|_| CredentialError::Unavailable)?;
     let ids: Vec<_> = candidates

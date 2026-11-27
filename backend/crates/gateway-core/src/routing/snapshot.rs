@@ -83,7 +83,9 @@ impl SnapshotClientPolicyFacts {
 /// Store 读取到的账号分组事实
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SnapshotAccountGroupFacts {
+    model_access: crate::account::AccountModelAccess,
     allow_image_generation: bool,
+    allow_subagents: bool,
     fast_mode: FastMode,
     id: AccountGroupId,
     name: String,
@@ -92,8 +94,20 @@ pub struct SnapshotAccountGroupFacts {
 
 impl SnapshotAccountGroupFacts {
     #[must_use]
+    pub fn with_model_access(mut self, model_access: crate::account::AccountModelAccess) -> Self {
+        self.model_access = model_access;
+        self
+    }
+
+    #[must_use]
     pub const fn with_image_generation(mut self, allowed: bool) -> Self {
         self.allow_image_generation = allowed;
+        self
+    }
+
+    #[must_use]
+    pub const fn with_subagents(mut self, allowed: bool) -> Self {
+        self.allow_subagents = allowed;
         self
     }
 
@@ -106,10 +120,12 @@ impl SnapshotAccountGroupFacts {
     #[must_use]
     pub fn new(id: AccountGroupId, name: String, enabled: bool) -> Self {
         Self {
+            model_access: crate::account::AccountModelAccess::all(),
             id,
             name,
             enabled,
             allow_image_generation: true,
+            allow_subagents: true,
             fast_mode: FastMode::Default,
         }
     }
@@ -476,12 +492,24 @@ async fn compile_runtime_snapshot(
                 account.direct_authentication_kind().map(str::to_owned),
             );
     }
-    let account_directory = Arc::new(RuntimeAccountDirectory::new(accounts));
+    // 整份快照共享分组模型政策；默认规则无需为每个 Key 或成员复制
+    let group_model_access = groups
+        .values_mut()
+        .filter(|group| {
+            group.enabled
+                && group.model_access.mode() != crate::account::AccountModelAccessMode::All
+        })
+        .map(|group| (group.id.clone(), std::mem::take(&mut group.model_access)))
+        .collect();
+    let account_directory = Arc::new(
+        RuntimeAccountDirectory::new(accounts).with_group_model_access(group_model_access),
+    );
 
     let mut client_policies = Vec::with_capacity(facts.client_policies.len());
     for policy in facts.client_policies {
         let mut fast_mode = FastMode::Default;
         let mut allow_image_generation = true;
+        let mut allow_subagents = true;
         let account_scope = if policy.group_ids.is_empty() {
             FrozenAccountScope::new(
                 Arc::clone(&account_directory),
@@ -501,6 +529,7 @@ async fn compile_runtime_snapshot(
                 // 停用只影响选号，仍绑定的分组继续贡献请求策略
                 fast_mode = fast_mode.merge(group.fast_mode);
                 allow_image_generation &= group.allow_image_generation;
+                allow_subagents &= group.allow_subagents;
                 bound_groups.push(RoutingGroupSnapshot::new(
                     group.id.clone(),
                     group.name.clone(),
@@ -524,6 +553,7 @@ async fn compile_runtime_snapshot(
                 Arc::new(
                     account_scope
                         .with_image_generation(allow_image_generation)
+                        .with_subagents(allow_subagents)
                         .with_fast_mode(fast_mode)
                         .with_request_profiles(policy.request_profiles),
                 ),
@@ -815,6 +845,43 @@ impl RuntimeSnapshot {
             .collect()
     }
 
+    /// 分组编辑器使用成员账号的实际模型，可编辑已停用或已限制模型的分组
+    #[must_use]
+    pub fn upstream_models_for_group(&self, group: &AccountGroupId) -> Vec<UpstreamModelId> {
+        let mut models = BTreeSet::new();
+        for (account_id, account) in self.account_directory.accounts_in_group(group) {
+            let provider = account.provider_kind();
+            if !self.providers.contains(provider) {
+                continue;
+            }
+            let access = account.model_access();
+            if access.mode() == crate::account::AccountModelAccessMode::Allowlist {
+                // 原生图片、Search 和透传模型可能只有账号白名单明确声明了 ID
+                models.extend(
+                    access
+                        .models()
+                        .iter()
+                        .filter_map(|id| UpstreamModelId::new(id.clone()).ok()),
+                );
+            }
+            let sources = self.model_catalog_accounts.get(provider);
+            if let Some(catalog) = self.provider_models.get(provider) {
+                models.extend(
+                    catalog
+                        .keys()
+                        .filter(|model| {
+                            access.allows(model.as_str())
+                                && sources
+                                    .and_then(|sources| sources.get(model.as_str()))
+                                    .is_none_or(|sources| sources.contains(account_id))
+                        })
+                        .cloned(),
+                );
+            }
+        }
+        models.into_iter().collect()
+    }
+
     /// 合并冻结账号范围内实际存在 Provider 的公开模型
     #[must_use]
     pub fn public_models_for_scope(&self, scope: &FrozenAccountScope) -> Vec<PublicModelId> {
@@ -1069,6 +1136,8 @@ impl RuntimeSnapshot {
 
         let requested_model = public_model.as_str();
         let mut known_model = false;
+        let mut group_model_denied = false;
+        let mut group_model_allowed = false;
 
         let providers = context.required_provider.as_ref().map_or_else(
             || account_scope.provider_kinds().clone(),
@@ -1100,6 +1169,14 @@ impl RuntimeSnapshot {
                 continue;
             }
             // 强制 Provider 路由也不能扩大 Key 授权；管理诊断的目标账号由探测入口固定
+            if enforce_account_model_policy {
+                // 两个 Provider 可以把同一别名映射到不同模型，拒绝不能阻断另一条合规候选。
+                if account_scope.groups_deny_model(Some(upstream_model.as_str())) {
+                    group_model_denied = true;
+                    continue;
+                }
+                group_model_allowed = true;
+            }
             if enforce_account_model_policy
                 && !account_scope.allows_provider_model(provider, upstream_model.as_str())
             {
@@ -1144,6 +1221,9 @@ impl RuntimeSnapshot {
         }
 
         if candidates.is_empty() {
+            if group_model_denied && !group_model_allowed {
+                return Err(RoutingError::GroupModelDenied);
+            }
             // 模型存在性必须包含被请求路由限制排除的 Provider；目录未知时不能断言模型不存在
             let mut scoped_providers = providers.intersection(&self.providers).peekable();
             if scoped_providers.peek().is_some()
@@ -1211,6 +1291,12 @@ impl RuntimeSnapshot {
                 .as_ref()
                 .is_none_or(|required| required == provider)
             && !context.blocked_providers.contains(provider);
+        if available
+            && upstream_model
+                .is_some_and(|model| account_scope.groups_deny_model(Some(model.as_str())))
+        {
+            return Err(RoutingError::GroupModelDenied);
+        }
         if !available
             || upstream_model
                 .is_some_and(|model| !account_scope.allows_provider_model(provider, model.as_str()))

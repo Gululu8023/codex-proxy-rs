@@ -1,7 +1,8 @@
 <script setup lang="ts">
-import type { ClaudeProfileSelection, ClientProfileSelection, ProviderRequestProfile, ProviderRequestProfiles } from '@/api/modules/settings/profiles'
+import type { ClaudeProfileSelection, ClientProfileSelection, ProviderRequestProfile, ProviderRequestProfiles, ProviderRequestProfileUpdates } from '@/api/modules/settings/profiles'
 
 import { ZSegmented } from '@codex-proxy/ui'
+import { isEqual } from 'es-toolkit'
 import { computed, shallowRef } from 'vue'
 import { useI18n } from 'vue-i18n'
 import { formatProviderLabel, PROVIDER_IDS, providerIcon } from '@/utils/providers'
@@ -12,6 +13,7 @@ const props = withDefaults(defineProps<{
   active?: boolean
   disabled?: boolean
   allowInherit?: boolean
+  initialProfiles?: ProviderRequestProfileUpdates
   provider?: (typeof PROVIDER_IDS)[number]
 }>(), {
   active: true,
@@ -21,7 +23,10 @@ const props = withDefaults(defineProps<{
 
 const { t } = useI18n({ useScope: 'global' })
 
-const model = defineModel<ProviderRequestProfiles>({ required: true })
+const model = defineModel<ProviderRequestProfiles>({
+  default: () => ({}),
+})
+const updates = defineModel<ProviderRequestProfileUpdates>('updates')
 const selectedProvider = shallowRef<(typeof PROVIDER_IDS)[number]>('openai')
 const provider = computed({
   get: () => props.provider ?? selectedProvider.value,
@@ -36,9 +41,16 @@ const openai = profileModel<ClientProfileSelection>('openai')
 const anthropic = profileModel<ClaudeProfileSelection>('anthropic')
 
 function profileModel<T extends object>(providerId: string) {
-  return computed<T | null>({
+  return computed<T | null | undefined>({
     get: () => {
-      const profile = model.value[providerId]
+      const source = updates.value === undefined
+        ? model.value
+        : Object.hasOwn(updates.value, providerId)
+          ? updates.value
+          : props.initialProfiles
+      const profile = source?.[providerId]
+      if (updates.value !== undefined && profile === undefined)
+        return undefined
       if (!profile || profile.inherit)
         return null
       // The profile preview endpoint accepts client fields only; seeds remain in the Key override.
@@ -46,7 +58,24 @@ function profileModel<T extends object>(providerId: string) {
       delete configuration.installationSeed
       return configuration as T
     },
-    set: value => updateProfile(providerId, value as ProviderRequestProfile | null),
+    set: (value) => {
+      if (updates.value === undefined) {
+        updateProfile(providerId, value as ProviderRequestProfile | null)
+        return
+      }
+      const next = { ...updates.value }
+      const configuration = value == null
+        ? value
+        : { ...value } as ProviderRequestProfile
+      // 批量编辑只提交画像字段，安装种子由独立字段控制并在后端按每把 Key 合并。
+      if (configuration)
+        delete configuration.installationSeed
+      if (configuration === undefined || isEqual(configuration, props.initialProfiles?.[providerId]))
+        delete next[providerId]
+      else
+        next[providerId] = configuration
+      updates.value = next
+    },
   })
 }
 
@@ -92,9 +121,10 @@ function updateProfile(providerId: string, value: ProviderRequestProfile | null)
       v-if="provider === 'openai'"
       v-model="openai"
       :allow-inherit="allowInherit"
+      :allow-preserve="updates !== undefined && initialProfiles?.[provider] === undefined"
       :active="active"
       :disabled="disabled"
     />
-    <ClaudeClientProfileEditor v-else-if="provider === 'anthropic'" v-model="anthropic" :allow-inherit="allowInherit" :active="active" :disabled="disabled" />
+    <ClaudeClientProfileEditor v-else-if="provider === 'anthropic'" v-model="anthropic" :allow-inherit="allowInherit" :allow-preserve="updates !== undefined && initialProfiles?.[provider] === undefined" :active="active" :disabled="disabled" />
   </div>
 </template>

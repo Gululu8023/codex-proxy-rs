@@ -50,8 +50,6 @@ pub struct CodexResponsesRequest {
     pub client_thread_id: Option<String>,
     /// 客户端 request ID，仅保留在受控本地上下文
     pub client_request_id: Option<String>,
-    /// 客户端 turn ID，仅保留在受控本地上下文
-    pub client_turn_id: Option<String>,
     /// 连接池和 affinity 使用的本地会话身份，不发送上游
     pub local_conversation_id: Option<String>,
     /// 变体身份键
@@ -70,12 +68,10 @@ pub struct CodexResponsesRequest {
     pub turn_state: Option<String>,
     /// turn metadata 透传头
     pub turn_metadata: Option<String>,
-    /// beta features 透传头
-    pub beta_features: Option<String>,
+    /// 实际入站为 WS 帧时，观测优先使用本帧的轮次元数据
+    pub(crate) websocket_frame: bool,
     /// 下游 `version` 扩展头；存在时上游值由 Desktop 版本画像统一生成
     pub version: Option<String>,
-    /// timing metrics 透传头
-    pub include_timing_metrics: Option<String>,
     /// Responses Lite 请求语义；HTTP 使用 header，WebSocket 使用 client metadata 投影
     pub responses_lite: Option<String>,
     /// Memory consolidation 请求语义；HTTP 与 WebSocket opening 均使用 header
@@ -479,6 +475,55 @@ fn is_tool_execution_event(event_type: &str) -> bool {
         )
 }
 
+/// 上游用量拒绝标明的时间边界与窗口时长，两者可独立缺失
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct UsageLimitWindow {
+    pub(crate) reset_at: Option<std::time::SystemTime>,
+    pub(crate) minutes: Option<u16>,
+}
+
+impl UsageLimitWindow {
+    pub(crate) fn from_payload(value: &Value) -> Self {
+        let error = upstream_error_object(value);
+        let reset_at = error
+            .get("resets_at")
+            .and_then(Value::as_i64)
+            .filter(|seconds| *seconds >= 0)
+            .and_then(|seconds| chrono::DateTime::from_timestamp(seconds, 0))
+            .map(Into::into);
+        let mut window = Self {
+            reset_at,
+            minutes: error
+                .get("limit_window_minutes")
+                .and_then(Value::as_u64)
+                .and_then(|minutes| u16::try_from(minutes).ok())
+                .filter(|minutes| *minutes > 0),
+        };
+        if let Some(headers) = value.get("headers").and_then(Value::as_object) {
+            window = window.for_headers(
+                headers
+                    .iter()
+                    .filter_map(|(key, value)| Some((key.as_str(), value.as_str()?))),
+            );
+        }
+        window
+    }
+
+    pub(crate) fn for_headers<'a>(
+        mut self,
+        mut headers: impl Iterator<Item = (&'a str, &'a str)>,
+    ) -> Self {
+        // 具名桶即使与通用窗口周期相同，也不能当作通用窗口的耗尽证据
+        if headers.any(|(name, value)| {
+            name.eq_ignore_ascii_case("x-codex-active-limit")
+                && !value.trim().eq_ignore_ascii_case("codex")
+        }) {
+            self.minutes = None;
+        }
+        self
+    }
+}
+
 /// Codex Responses SSE 失败事件
 #[derive(Clone, PartialEq, Eq)]
 pub struct ResponsesSseFailure {
@@ -494,6 +539,7 @@ pub struct ResponsesSseFailure {
     pub upstream_type: Option<String>,
     /// 上游显式状态码；不从业务码或错误类型推导
     pub explicit_status_code: Option<u16>,
+    pub(crate) usage_limit: UsageLimitWindow,
     /// 上游显式重试间隔，或从官方限流消息中解析出的重试间隔
     pub retry_after_seconds: Option<u64>,
     /// 上游 `x-retry-metadata: NO_MORE_RETRY`，与重试间隔独立
@@ -533,6 +579,7 @@ impl ResponsesSseFailure {
             upstream_message: failure_message(value),
             upstream_type: failure_type(value),
             explicit_status_code: failure_explicit_status_code(value),
+            usage_limit: UsageLimitWindow::from_payload(value),
             retry_after_seconds: events::retry_after_seconds_from_value(value),
             no_more_retry: events::upstream_no_more_retry(value),
             request_id:
@@ -583,6 +630,12 @@ fn failure_explicit_status_code(value: &Value) -> Option<u16> {
         .and_then(|status| u16::try_from(status).ok())
 }
 
+pub(crate) fn upstream_error_object(value: &Value) -> &Value {
+    failure_error(value)
+        .or_else(|| value.get("detail"))
+        .unwrap_or(value)
+}
+
 fn failure_error(value: &Value) -> Option<&Value> {
     value
         .pointer("/response/error")
@@ -605,7 +658,6 @@ impl CodexResponsesRequest {
             client_account_follow_only: false,
             client_thread_id: None,
             client_request_id: None,
-            client_turn_id: None,
             local_conversation_id: None,
             variant_identity: None,
             client_ip: None,
@@ -615,9 +667,8 @@ impl CodexResponsesRequest {
             force_http_sse: false,
             turn_state: None,
             turn_metadata: None,
-            beta_features: None,
+            websocket_frame: false,
             version: None,
-            include_timing_metrics: None,
             responses_lite: None,
             memgen_request: None,
             codex_window_id: None,
@@ -774,7 +825,11 @@ impl CodexResponsesRequest {
     ) -> CodexRequestSemantics {
         let mut semantics = codex_responses_request_semantics_with_turn_metadata(
             self.body(),
-            self.turn_metadata.as_deref(),
+            gateway_protocol::openai::observed_turn_metadata(
+                self.body(),
+                self.turn_metadata.as_deref(),
+                self.websocket_frame,
+            ),
             previous_reasoning_effort_override,
         );
         // 官方 generate=false 只准备连接与上下文，不是模型推理

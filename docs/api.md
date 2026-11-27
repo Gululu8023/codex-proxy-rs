@@ -39,7 +39,8 @@ Codex 原生生图配置还会携带 `X-OpenAI-Actor-Authorization: proxy-manage
 
 Client Key 通过账号分组限定路由范围：未绑定分组时可使用全部账号，绑定一个或多个分组时只能使用
 已启用分组成员的并集。分组可以混合 `openai` 与 `anthropic` 账号；同一请求只会在模型能力明确匹配且满足
-重放安全边界时跨 Provider fallback
+重放安全边界时跨 Provider fallback。绑定分组的模型规则按映射后的上游模型 ID 与账号自身政策共同校验，
+功能权限按 Key 的全部绑定分组合并；详见[账号分组](#6-账号分组)
 
 运行设置可以分别配置 `minCodexDesktopVersion` 与 `minCodexCliVersion`。两者只接受 SemVer，`null`
 表示不限制，比较版本时忽略 `+` 后的构建元数据。API 在 Client Key 鉴权成功后识别官方客户端请求头；
@@ -1883,7 +1884,7 @@ GET 和 POST 均返回 `enabled`、`leadMinutes`、`nextDiscoveryAtDisplay`、`n
 - 关闭：将 `priority`（含 `fast` 别名）改为显式 `default`，继续处理请求
 
 策略只作用于 OpenAI Responses 的顶层 `service_tier`，不改变 `flex`、`ultrafast` 等其他显式档位、嵌套字段或其他 Provider。
-宿主策略在 request 中间件之后应用，形成 attempt 输入基线；attempt 中间件继续改写档位时，以改写后的实际发送值为准。
+Provider 在编码后的出站请求上应用策略，以最终实际发送的档位生成观测与本地费用。
 HTTP 和每个 WebSocket `response.create` 均使用请求开始时的分组策略，同一请求重试保持该策略；
 HTTP 请求头及新建 WS 的握手提示按当时的最终出站档位构造；复用 WS 时不重发握手头，
 每个 `response.create` 仍独立应用档位策略，请求档位统计与本地费用估算使用各帧的最终出站档位
@@ -1893,14 +1894,26 @@ Client Key 任一绑定分组（包括已禁用分组）为 `false` 时，禁止
 限制覆盖 Images 生成与编辑，以及 Responses 中的原生 `image_generation` 工具声明或显式工具选择，
 HTTP 返回 `403` 和 `image_generation_disabled`，WebSocket 每个 `response.create` 独立校验并返回对应错误事件。
 普通图片输入和 Codex 被动声明的 `image_gen` namespace 不触发拒绝；实际 Images 调用仍受限制。
-请求采用开始时冻结的权限，重试期间保持不变；attempt 中间件添加生图工具也会在发送前被策略拒绝
+请求采用开始时冻结的权限，重试期间保持不变
+
+分组的 `modelAccess` 为 `{ mode, models }`，复用账号模型规则：`all` 的列表必须为空，
+`allowlist` / `denylist` 接受 1～256 个完整上游模型 ID，不支持通配符。创建时省略使用 `all`，更新时省略或 `null` 保留。
+请求先完成模型映射，再同时校验账号政策及授权该账号的已启用绑定分组；至少一个这样的分组允许该模型才可用。
+未绑定分组的 Key 只受账号政策限制；已禁用分组不授予模型权限。原生 Images / Search 未指定可识别模型时，
+账号与授权它的分组均须为 `all`，不能猜测上游默认模型。所有已启用绑定分组均拒绝目标模型时返回 `403`、`group_model_denied`。
+
+`allowSubagents` 创建时默认 `true`，更新时省略或 `null` 保留。任一绑定分组（包括已禁用分组）关闭时，
+Codex 模型目录投影 `multi_agent_version: "disabled"`，并在 HTTP / 每个 WS 请求入口以 `403`、`subagents_disabled`
+拒绝标记为 `thread_spawn` / `collab_spawn` 的协作子线程生成请求。父线程工具历史、review、compact 和 Guardian 请求不属于此开关。
+该开关不改变 Claude 的原生工具行为
 
 | 方法 | 路由 | 主要 query/body | 说明 |
 | --- | --- | --- | --- |
 | `GET` | `/api/admin/account-groups` | `page`、`pageSize`、`search`、`enabled` | 分页查询分组；返回账号可用性、并发槽位（Redis 不可用时 `usedSlots=null`）及成功请求 USD 用量 |
 | `GET` | `/api/admin/account-groups/options` | `page`、`pageSize`、`search`、`enabled` | 分页查询分组选择项；item 仅返回 `id`、`name`、`color`、`enabled` |
-| `POST` | `/api/admin/account-groups/create` | `{ name, description, color, fastMode?, allowImageGeneration? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
-| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, fastMode?, allowImageGeneration? }` | 更新分组信息、Fast 模式和生图权限 |
+| `GET` | `/api/admin/account-groups/models` | `id` | 从当前快照返回成员账号的候选上游模型 `{ models }`，供编辑模型规则使用；可手填目录外 ID |
+| `POST` | `/api/admin/account-groups/create` | `{ name, description, color, fastMode?, allowImageGeneration?, allowSubagents?, modelAccess? }` | 创建空分组；`color` 严格为 `#RRGGBBAA`，返回时统一大写 |
+| `POST` | `/api/admin/account-groups/update` | `{ id, name, description, color, fastMode?, allowImageGeneration?, allowSubagents?, modelAccess? }` | 更新分组信息及请求权限 |
 | `POST` | `/api/admin/account-groups/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/account-groups/disable` | `{ id }` | 禁用；已绑定 Key 保持受限，不回退到全部账号 |
 | `POST` | `/api/admin/account-groups/delete` | `{ id }` | 删除未被 Client Key 引用的组 |
@@ -1925,6 +1938,9 @@ HTTP 返回 `403` 和 `image_generation_disabled`，WebSocket 每个 `response.c
 | `POST` | `/api/admin/client-keys/create` | 创建字段 | 创建带账号范围的 Client Key |
 | `GET` | `/api/admin/client-keys/reveal` | `id` | 显式读取完整明文 Key |
 | `POST` | `/api/admin/client-keys/update` | 更新字段 | 原子更新名称、分组范围和限额 |
+| `POST` | `/api/admin/client-keys/batch-update` | `ids` 及局部更新字段 | 原子编辑 1～1000 把不同的 Key，返回 `{ updated, configRevision }` |
+| `GET` | `/api/admin/client-keys/statistics` | `id`、`period?`、`metric?`、`asOf?` | 只读预算、按日模型趋势及总计 |
+| `GET` | `/api/admin/client-keys/statistics/models` | `id`、`period?`、`asOf?` | 同周期的模型明细总计、活跃天数与单日峰值请求数 |
 | `POST` | `/api/admin/client-keys/reset-budget` | `{ id, period }` | 管理员清零日／周已用金额；`period` 为 `daily`、`weekly` 或 `all` |
 | `POST` | `/api/admin/client-keys/enable` | `{ id }` | 启用 |
 | `POST` | `/api/admin/client-keys/disable` | `{ id }` | 禁用 |
@@ -1943,6 +1959,21 @@ HTTP 返回 `403` 和 `image_generation_disabled`，WebSocket 每个 `response.c
 开启后推理和 [CPR 互联导出](#cpr-互联只读协议) 都限制到这些组内的直连 OAuth 账号。
 账号池、原生额度窗口、套餐分布分别按对应开关公开；关闭共享不改变已保存的其他开关值
 
+### 批量编辑与模型统计
+
+批量更新接受 `groupIds`、`enabled`、`maxConcurrency`、`requestsPerMinute`、`dailyLimitUsd`、`weeklyLimitUsd`、
+`peerSharing`、`providerRequestProfileOverrides`、`installationSeed`。省略字段逐把保留；显式零限额表示不限。
+`groupIds: []` 切为全部账号；`peerSharing` 逐项合并。每把 Key 的最终分组、共享和画像均须合法，任一 Key 不存在或校验失败则整批回滚。
+批量画像沿用各把 Key、各 Provider 的安装种子；画像内不接受 `installationSeed`，独立顶层种子为带连字符 UUID，
+仅明确提交时同时更新 OpenAI 和 Anthropic 的种子。画像设为 `null` 恢复继承且保留原种子。
+批量编辑不清零费用、不重置已有预算窗口，不修改名称或密钥值。
+
+统计的 `period` 为 `7d`（默认）或 `30d`，`metric` 为 `costUsd`（默认）、`tokens` 或 `requests`。
+`asOf` 为毫秒时间戳；趋势返回的同名字段可供模型明细复用，固定时间边界。日期按部署时区、请求开始时间归属，
+前五个模型按整段周期的所选指标排序，其余合并为 `model: null`；未记录模型使用空字符串。
+`totals` 包含 `requests`、可空 `tokens`、可空十进制字符串 `costUsd`、`hasMissingCost` 和 `hasEstimatedCost`，
+不完整费用只汇总已知部分并标记缺失，不以当前计价补造历史。预算读取不触发准入、窗口开启或重置，且反映当前账本，独立于历史统计周期。
+
 ### Key 客户端身份
 
 `providerRequestProfileOverrides` 按 Provider ID 保存身份选择，列表返回同名对象。创建时各项为完整配置对象，
@@ -1957,7 +1988,8 @@ OpenAI Key 的 `installationSeed` 接受带连字符的 UUID，保存时规范�
 - 填写种子：按种子、Key 记录 ID 和账号记录 ID 派生安装 UUID；重启、UA 变化或凭据更新不改变结果，换 Key、换账号或修改种子会改变身份
 - 种子不发送给上游，也不改写账号凭据；更改或清除种子使生效身份变化时，WebSocket 精确续写须重发完整上下文
 
-兼容字段 `openaiClientProfileOverride` 对应上述映射中的 `openai`。Anthropic 不提供身份覆盖配置
+Anthropic 的画像与安装种子同样保存在 `providerRequestProfileOverrides.anthropic`，由 Anthropic Provider 解释。
+兼容字段 `openaiClientProfileOverride` 对应上述映射中的 `openai`
 创建时省略或 `null` 表示无覆盖；更新时省略保留、`null` 清除。与通用字段同时提交时必须一致，否则拒绝整个请求；
 响应中的兼容字段从同一映射派生，不是第二份配置
 
@@ -2385,13 +2417,20 @@ Anthropic 请求费用仍是公开 API 等价估算，不代表订阅扣费或 P
 实际服务档位与速度分别来自响应 `usage.service_tier`、`usage.speed`；Priority 不等于 Fast，
 请求 `service_tier=auto` 也不代表实际档位。响应速度优先于请求速度；普通请求缺少速度时按标准价估算，
 请求 Fast 却没有响应速度、缺少对应价格档位、Batch 或包含未计价服务端工具时保持费用未知。
-内置 Fast 价覆盖 `claude-opus-5-5`、`claude-opus-5`、`claude-opus-4-8`，全上下文同价；
+内置目录包含 `claude-fable-5-2`、`claude-mythos-5-2`：标准输入 / 输出 / 缓存读取为 8 / 40 / 0.20，
+Fast 为 16 / 80 / 0.40 USD / 百万 Token；5 分钟 / 1 小时缓存写入分别为标准 10 / 16、Fast 20 / 32。
+内置 Fast 价还覆盖 `claude-opus-5-5`、`claude-opus-5`、`claude-opus-4-8`，全上下文同价；
 五分钟与一小时缓存写入分别按当前模式输入单价的 1.25 倍、2 倍估算，人工缓存写入单价覆盖此规则。
 
 费用观测的 `pricing.serviceTier`、`pricing.speed` 保存实际响应枚举；`pricing.speedMultiplierBps`
 保存应用自定义倍率前当前模式与标准模式总费用的比值（基点），不表示 Priority 的合同倍率。
 `costBreakdown.standard` 是同一请求按标准模式计算的 USD 金额，与 `total` 应用相同的自定义倍率。
 列表及详情只展示请求当时保存的费用与价格；历史记录缺少新增字段时显示未知，不按最新目录重算。
+
+GPT-6.2 Astra / Sol 的内置目录包含标准、Fast、Ultrafast 及各自长上下文档位。
+CPRS 的 Ultrafast 内置价固定为对应标准价的 6 倍，长上下文同样按长上下文标准价的 6 倍；临时优惠不修改内置表。
+现有人工覆盖与同步价目仍按上述优先级生效。此处只决定本地估算，不改写出站请求或上游实际计价策略。
+内置价目不声明账号有权使用该模型，模型可用性仍由实际目录和权限决定。
 
 `provider` 为内置 `openai` 或 `anthropic`，对应价目由 `GET` 返回的 `defaults` 提供。
 `models` 为 1～500 个模型 ID，每个 ID 为
@@ -2716,7 +2755,7 @@ Dashboard 的 `accountUsage[]` 返回稳定指标 `metric=requests|tokens`、可
 Dashboard 默认 `period=today`，用量、诊断和错误查询默认 `period=7d`，范围参数遵循[页面时间合同](#页面时间合同)。
 Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚点
 
-请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountSearch`、`model` 和 `status`。旧参数 `accountName` 返回 `400`。
+请求明细列表接受 `currentPage`、`pageSize`、时间范围、`provider`、`clientApiKeyName`、`accountSearch`、`model`、`status` 和 `errorOrigin`。旧参数 `accountName` 返回 `400`。
 汇总和洞察接受时间范围与 `provider`；性能和成本另要求 `metric`，诊断另接受 `dimension`、`model` 和 `statusCode`。
 各接口拒绝未知参数，明细筛选不改变顶部统计范围
 
@@ -2725,6 +2764,9 @@ Dashboard 返回原始 `asOf` 及 `asOfDisplay`，作为当前数据的查询锚
 `all` 合并成功用量记录及全部非成功请求，包括执行中和已取消请求。每个请求只返回一行，
 重试中间错误不改变请求最终分类；`logicalOutcome` 保留真实结果。状态筛选只影响明细列表，
 不改变顶部统计，独立运维事件仍通过 `/api/admin/operations/errors` 查询
+
+`errorOrigin` 仅在 `status=error` 时可用，取值 `upstream`、`proxy`、`connection`、`unknown`；其他组合或未知值返回 `400`。
+来源筛选与列表投影复用同一组已保存错误事实，不从错误文案推断。
 
 请求列表的 `errorCode` / `errorMessage` 提供最终请求的错误码与错误信息，未记录时为 `null`
 

@@ -58,6 +58,7 @@ async fn service(
             .build()
             .expect("client"),
         server.uri(),
+        crate::support::runtime_policy(),
     );
     (store, service)
 }

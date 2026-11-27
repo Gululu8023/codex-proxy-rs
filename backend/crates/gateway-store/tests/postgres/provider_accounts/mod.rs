@@ -3371,6 +3371,7 @@ pub(super) fn account(id: &str, upstream_user_id: &str) -> NewProviderAccount {
 fn credential_update(account_id: &str, revision: u64, marker: &str) -> ProviderCredentialUpdate {
     ProviderCredentialUpdate {
         preserve_profile: false,
+        preserve_access_token_expiry: false,
         preserve_credential_state: false,
         account_id: account_id.to_owned(),
         expected_revision: Revision::new(revision).expect("credential revision"),

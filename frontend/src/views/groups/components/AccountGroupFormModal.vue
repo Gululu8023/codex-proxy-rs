@@ -7,6 +7,9 @@ import { normalizeRgbaHexColor, ZButton, ZColorPicker, ZDialog, ZForm, ZFormItem
 import { computed, useTemplateRef, watch } from 'vue'
 
 import { useI18n } from 'vue-i18n'
+import HelpPopover from '@/components/HelpPopover.vue'
+import AccountModelAccessField from '@/views/accounts/components/AccountModelAccessField.vue'
+import { accountModelAccessError } from '@/views/accounts/utils/modelAccess'
 import { ACCOUNT_GROUP_COLOR_PRESETS } from '../constants'
 
 const props = defineProps<{
@@ -34,6 +37,15 @@ const rules = computed<FormRules<AccountGroupFormValue>>(() => ({
     validator: (_rule, value) => !!normalizeRgbaHexColor(value),
     trigger: 'change',
     message: t('groups.actions.selectValidGroupingColor'),
+  },
+  modelAccess: {
+    trigger: [],
+    validator: () => {
+      const error = accountModelAccessError(form.value.modelAccess)
+      return error
+        ? new Error(error)
+        : true
+    },
   },
 }))
 watch(open, () => formRef.value?.clearValidate())
@@ -104,6 +116,28 @@ const description = computed(() => props.group
           />
         </ZFormItem>
       </div>
+      <ZFormItem :label="t('groups.editor.subagents')">
+        <template #label-extra>
+          <HelpPopover :label="t('groups.editor.subagents')" :content="t('groups.editor.subagentsHelp')" />
+        </template>
+        <ZSegmented
+          :model-value="form.allowSubagents ? 'enabled' : 'disabled'"
+          :aria-label="t('groups.editor.subagents')"
+          :options="[
+            { label: t('common.status.enabled'), value: 'enabled' },
+            { label: t('common.status.disabled'), value: 'disabled' },
+          ]"
+          :disabled="saving"
+          @update:model-value="form.allowSubagents = $event === 'enabled'"
+        />
+      </ZFormItem>
+      <AccountModelAccessField
+        :group-id="group?.id ?? null" :model-value="form.modelAccess" form-prop="modelAccess" :disabled="saving"
+        @update:model-value="value => { if (value) form.modelAccess = value }"
+      />
+      <p class="m-0 text-z-sm text-z-text-secondary">
+        {{ t('groups.editor.modelAccessHelp') }}
+      </p>
       <ZFormItem :label="t('groups.editor.descriptionOptional')">
         <ZTextarea
           v-model="form.description"

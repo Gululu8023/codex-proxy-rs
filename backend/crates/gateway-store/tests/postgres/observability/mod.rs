@@ -3399,10 +3399,10 @@ async fn usage_account_filter_matches_only_historical_names_and_emails() {
             }
             for (status, search, page, total, expected_id) in [
                 (Success, r"_%\", 1, 1, Some("req_observe_success")),
-                (Error, "team", 1, 1, Some("req_observe_failed")),
+                (Error(None), "team", 1, 1, Some("req_observe_failed")),
                 (All, "alice", 1, 2, Some("req_observe_failed")),
                 (All, "alice", 2, 2, Some("req_observe_success")),
-                (Error, "@example", 1, 0, None),
+                (Error(None), "@example", 1, 0, None),
                 (All, "ALICE", 1, 0, None),
                 (All, "alice%ops", 1, 0, None),
                 (All, "public-model", 1, 0, None),

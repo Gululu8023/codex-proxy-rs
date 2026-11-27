@@ -259,6 +259,7 @@ impl FakeProviderAdmin {
                 email: account.email.clone(),
                 plan_type: account.plan_type.clone(),
                 preserve_profile: false,
+                preserve_access_token_expiry: false,
                 preserve_credential_state: false,
                 provider_material: document(),
                 has_refresh_token: account.has_refresh_token,
@@ -2432,7 +2433,7 @@ async fn quota_forecast_same_window_reversal_keeps_recorded_usage_in_the_report(
 }
 
 #[tokio::test]
-async fn quota_forecast_mid_cycle_sampling_accepts_small_reset_jitter_but_not_a_changed_bucket() {
+async fn quota_forecast_accepts_reset_movement_until_an_expired_cycle_is_confirmed() {
     use gateway_admin::model::quota_forecast_sampling::QuotaForecastHistoryPoint;
     let now = Utc::now();
     let observed = now - TimeDelta::minutes(1);
@@ -2507,26 +2508,24 @@ async fn quota_forecast_mid_cycle_sampling_accepts_small_reset_jitter_but_not_a_
         .quota_forecast(&ProviderAccountId::new("acct_test").unwrap())
         .await
         .unwrap();
-    assert!(result.forecasts[0].estimated_tokens.is_none());
-    assert!(
-        result.forecasts[0]
-            .unavailable_reason
-            .unwrap()
-            .contains("不连续")
-    );
-    // 新额度段已有足够观测后恢复预测，但总量不能带回重置前的累计用量
+    // reset 时间移动本身不证明换段，未到期的连续用量仍能参与预测。
+    assert!(result.forecasts[0].unavailable_reason.is_none());
+    assert_eq!(result.forecasts[0].estimated_tokens, Some(5_000));
+    // 旧读数已到期且独立请求确认回落后，才从新额度段重建累计。
     let mut first = make_point(1, 5.0, 1_750, 0);
     first.observed_at = now - TimeDelta::minutes(45);
     first.started_at = first.observed_at - TimeDelta::seconds(10);
     let mut next = make_point(1, 20.0, 1_900, 0);
     next.observed_at = now - TimeDelta::minutes(20);
     next.started_at = next.observed_at - TimeDelta::seconds(10);
-    store
-        .quota_forecast_history
-        .lock()
-        .unwrap()
-        .points
-        .extend([first, next]);
+    let expired_delta = (now - TimeDelta::minutes(50) - reset).num_seconds();
+    store.quota_forecast_history.lock().unwrap().points = vec![
+        make_point(3, 20.0, 1_000, expired_delta),
+        make_point(2, 30.0, 1_500, expired_delta),
+        make_point(1, 35.0, 1_700, expired_delta),
+        first,
+        next,
+    ];
     let result = services
         .accounts()
         .quota_forecast(&ProviderAccountId::new("acct_test").unwrap())

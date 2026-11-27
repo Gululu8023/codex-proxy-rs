@@ -59,7 +59,7 @@ pub fn build_codex_model_headers(
     Ok(headers)
 }
 
-/// Core 默认客户端身份，用于模型接口及 OAuth refresh；raw token exchange 不使用
+/// 客户端身份头供模型接口和服务端认证请求共用，不携带账号凭据
 pub fn build_codex_profile_headers(profile: &CodexWireProfile) -> CodexClientResult<HeaderMap> {
     let mut headers = HeaderMap::new();
     headers.insert(
@@ -199,11 +199,6 @@ impl CodexBackendClient {
             ("x-codex-window-id", context.codex_window_id),
             ("x-codex-turn-state", context.turn_state),
             ("x-codex-turn-metadata", context.turn_metadata),
-            ("x-codex-beta-features", context.beta_features),
-            (
-                "x-responsesapi-include-timing-metrics",
-                context.include_timing_metrics,
-            ),
             ("x-codex-parent-thread-id", context.parent_thread_id),
             (
                 X_OPENAI_MEMGEN_REQUEST_HEADER,

@@ -651,10 +651,11 @@ pub(super) fn websocket_retry_backoff(retry_index: NonZeroU32) -> Duration {
 }
 
 pub(super) fn continuation_replay_required_error(reason: &'static str) -> ProviderError {
-    ProviderError::new(
-        ProviderErrorKind::ContinuationRecoveryRequired,
-        UpstreamSendState::NotSent,
-    )
+    continuation_replay_error(reason, UpstreamSendState::NotSent)
+}
+
+fn continuation_replay_error(reason: &'static str, send_state: UpstreamSendState) -> ProviderError {
+    ProviderError::new(ProviderErrorKind::ContinuationRecoveryRequired, send_state)
     .with_continuation_failure(ContinuationFailure::HistoryUnavailable)
     .with_continuation_recovery_disposition(
         ContinuationRecoveryDisposition::ClientReplayRequired,
@@ -951,10 +952,13 @@ pub(super) fn map_client_error(
             ))
         }
         CodexClientError::WebSocket(error) if error.continuation_unavailable_reason().is_some() => {
-            let mut failure = MappedProviderFailure::plain(continuation_replay_required_error(
+            let mut failure = MappedProviderFailure::plain(continuation_replay_error(
                 continuation_unavailable_reason.unwrap_or("scope_unavailable"),
+                websocket_send_state(error),
             ));
-            if let Some(client_visible_error) = websocket_client_visible_error(error) {
+            if !error.message_too_big_close()
+                && let Some(client_visible_error) = websocket_client_visible_error(error)
+            {
                 failure.error = failure
                     .error
                     .with_client_visible_upstream_error(client_visible_error);
@@ -970,8 +974,9 @@ pub(super) fn map_client_error(
             if matches!(
                 error.classified(),
                 CodexWebSocketExchangeError::MessageTooLarge
-            ) {
-                // 可回退请求已在 transport 内转为 HTTP，剩余预热请求不能重复发送
+            ) || error.message_too_big_close()
+            {
+                // 首条文本前可回退的 1009 已在 transport 处理；预热或已收到回复时禁止重放
                 failure.error = failure.error.with_retry_prohibited();
             }
             if let CodexWebSocketExchangeError::ConnectionLimitReached(upstream) =
@@ -1360,7 +1365,7 @@ fn websocket_diagnostic_message(error: &CodexWebSocketExchangeError) -> Provider
         CodexWebSocketExchangeError::ConnectionLimitReached(_) => {
             "OpenAI requested a new WebSocket connection".to_owned()
         }
-        CodexWebSocketExchangeError::ContinuationUnavailable { reason } => {
+        CodexWebSocketExchangeError::ContinuationUnavailable { reason, .. } => {
             format!("OpenAI connection-local previous response is unavailable: {reason}")
         }
         CodexWebSocketExchangeError::ReceiveIdleTimeout { timeout } => {
@@ -1611,11 +1616,7 @@ pub(super) fn map_upstream_failure(
     MappedProviderFailure {
         error,
         websocket_transport_retryable: false,
-        account_failure: account_failure(
-            category,
-            failure.retry_after_seconds,
-            failure.usage_limit_resets_at,
-        ),
+        account_failure: account_failure(&failure),
         error_message: failure.client_message,
         cyber_policy_failure,
         model_unsupported: category == CodexFailureCategory::ModelUnsupported,
@@ -1678,24 +1679,19 @@ pub(super) const fn upstream_send_state(phase: CodexUpstreamSendPhase) -> Upstre
     }
 }
 
-pub(super) fn account_failure(
-    category: CodexFailureCategory,
-    retry_after_seconds: Option<u64>,
-    usage_limit_resets_at: Option<i64>,
-) -> Option<CodexAccountFailure> {
-    match category {
+fn account_failure(failure: &CodexUpstreamFailure) -> Option<CodexAccountFailure> {
+    let retry_after_seconds = failure.retry_after_seconds;
+    match failure.category() {
         CodexFailureCategory::CredentialExpired => Some(CodexAccountFailure::CredentialExpired),
         CodexFailureCategory::IdentityVerificationRequired => {
             Some(CodexAccountFailure::IdentityVerificationRequired)
         }
         CodexFailureCategory::Banned => Some(CodexAccountFailure::Banned),
         CodexFailureCategory::UsageLimitExhausted => {
+            let window = failure.account_usage_limit();
             Some(CodexAccountFailure::UsageLimitExhausted {
-                reset_at: usage_limit_resets_at
-                    .and_then(|seconds| u64::try_from(seconds).ok())
-                    .and_then(|seconds| {
-                        SystemTime::UNIX_EPOCH.checked_add(Duration::from_secs(seconds))
-                    }),
+                reset_at: window.reset_at,
+                window_minutes: window.minutes,
             })
         }
         CodexFailureCategory::RateLimited => Some(CodexAccountFailure::RateLimited {
@@ -1724,6 +1720,10 @@ pub(super) fn account_failure(
 
 pub(super) fn websocket_send_state(error: &CodexWebSocketExchangeError) -> UpstreamSendState {
     match error.classified() {
+        CodexWebSocketExchangeError::ContinuationUnavailable {
+            source: Some(source),
+            ..
+        } => websocket_send_state(source),
         CodexWebSocketExchangeError::InvalidRequest(_)
         | CodexWebSocketExchangeError::Connect { .. }
         | CodexWebSocketExchangeError::ConnectTimeout { .. }
@@ -1779,10 +1779,7 @@ pub(super) fn websocket_error_kind(error: &CodexWebSocketExchangeError) -> Provi
         // live 流可能包在 PostSendAmbiguous 中；RFC 6455 close 1009 是请求过大
         CodexWebSocketExchangeError::ClosedBeforeTerminal(_)
         | CodexWebSocketExchangeError::PostSendAmbiguous { .. } => {
-            if error
-                .close_before_terminal()
-                .is_some_and(|close| close.code() == Some(WEBSOCKET_CLOSE_MESSAGE_TOO_BIG))
-            {
+            if error.message_too_big_close() {
                 ProviderErrorKind::MessageTooBig
             } else {
                 ProviderErrorKind::Transport

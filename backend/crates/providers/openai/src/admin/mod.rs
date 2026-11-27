@@ -262,6 +262,20 @@ impl ProviderAdmin for OpenAiAdminProvider {
             .map_err(map_client_profile_error)
     }
 
+    fn merge_batch_key_profile(
+        &self,
+        current: Option<&gateway_core::account::OpaqueProviderData>,
+        update: Option<&Option<gateway_core::account::OpaqueProviderData>>,
+        installation_seed: Option<uuid::Uuid>,
+    ) -> Result<Option<gateway_core::account::OpaqueProviderData>, ProviderAdminError> {
+        crate::transport::profile::identity::merge_batch_key_profile(
+            current,
+            update,
+            installation_seed,
+        )
+        .map_err(map_client_profile_error)
+    }
+
     fn provider_kind(&self) -> &ProviderKind {
         &self.provider_kind
     }
@@ -1085,11 +1099,12 @@ fn prepared_rotation(
         expected_revision,
         profile: credential_profile,
         preserve_profile,
+        preserve_access_token_expiry,
         credential,
         has_refresh_token,
         access_token_expires_at,
         next_refresh_at,
-        account_state: _account_state,
+        account_state: _,
     } = credential.into_parts();
     if profile != credential_profile || profile.account_id != account_id {
         return Err(provider_admin_error(ProviderAdminErrorKind::Internal));
@@ -1107,6 +1122,7 @@ fn prepared_rotation(
             plan_type: profile.plan_type,
             preserve_profile,
             preserve_credential_state: false,
+            preserve_access_token_expiry,
             provider_material: ProviderDocument::new(OpaqueProviderData::new(
                 credential.into_inner(),
             )),
@@ -1924,6 +1940,7 @@ fn map_oauth_error(error: CodexOAuthAdminError) -> ProviderAdminError {
             Kind::Unavailable,
             "无法连接 OpenAI 授权服务，请检查出站连接",
         ),
+        Error::Profile(_) => (Kind::Unavailable, "OpenAI 授权客户端身份暂不可用"),
         Error::Exchange(Exchange::Unavailable) => (
             Kind::Unavailable,
             "OpenAI 授权服务暂不可用，请检查出站连接后重试",
@@ -1954,6 +1971,7 @@ const fn oauth_error_code(error: &CodexOAuthAdminError) -> &'static str {
         }) => "connect_failed",
         CodexOAuthAdminError::Exchange(Exchange::Ambiguous { .. }) => "ambiguous",
         CodexOAuthAdminError::StorageUnavailable => "storage_unavailable",
+        CodexOAuthAdminError::Profile(_) => "profile_unavailable",
         CodexOAuthAdminError::Credential => "credential",
     }
 }
@@ -1964,7 +1982,7 @@ fn map_quota_error(error: CodexCredentialQuotaError) -> ProviderAdminError {
     let (kind, public_message, upstream_message) = match error {
         Error::Profile(source) => {
             return provider_admin_error(Kind::Unavailable)
-                .with_public_message("OpenAI 账号预热客户端身份不可用")
+                .with_public_message("OpenAI 账号客户端身份不可用")
                 .with_source(source);
         }
         Error::InvalidCredentialData => (
@@ -1991,8 +2009,7 @@ fn map_quota_error(error: CodexCredentialQuotaError) -> ProviderAdminError {
             code,
             detail,
         } => {
-            // 公开文案只解释已知状态和错误码；原始上游材料留在内部诊断，
-            // 额度查询拒绝不作为凭据失效证据，也不写入账号的凭据错误字段
+            // 只依据明确的 token_revoked 缩短令牌有效期；其他 401 不推造凭据状态。
             let (kind, public_message) = match (status, code.as_deref()) {
                 (Some(401), Some("token_revoked")) => (
                     Kind::BadGateway,
@@ -2129,10 +2146,24 @@ fn bounded_upstream_body(body: &str) -> String {
 }
 
 fn map_catalog_error(error: CodexCredentialCatalogError) -> ProviderAdminError {
+    use crate::credential::CredentialRepositoryError;
     use CodexCredentialCatalogError as Error;
     use ProviderAdminErrorKind as Kind;
     let (kind, message) = match error {
-        Error::InvalidCredentialData => (Kind::Invalid, "OpenAI 模型查询凭据无效，请检查账号授权"),
+        Error::Credential(source) => {
+            let (kind, message) = match &source {
+                CredentialRepositoryError::InvalidCredentialData(_) => {
+                    (Kind::Invalid, "OpenAI 模型查询凭据无效，请检查账号授权")
+                }
+                CredentialRepositoryError::RevisionConflict(_) => {
+                    (Kind::Conflict, "账号已更新，请重新查询模型")
+                }
+                CredentialRepositoryError::Store(_) => (Kind::Unavailable, "账号存储暂不可用"),
+            };
+            return provider_admin_error(kind)
+                .with_public_message(message)
+                .with_source(source);
+        }
         Error::InvalidEtag => (Kind::Invalid, "OpenAI 模型目录版本标识无效，请重新查询"),
         Error::NoEligibleCredential => (Kind::NotFound, "没有可用于查询 OpenAI 模型的账号"),
         Error::ConcurrentUpdate => (Kind::Conflict, "OpenAI 模型目录正在更新，请稍后重试"),

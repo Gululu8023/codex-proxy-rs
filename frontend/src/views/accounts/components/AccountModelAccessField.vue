@@ -6,7 +6,7 @@ import { ZButton, ZEmpty, ZFormItem, ZIconButton, ZInput, ZPopover, ZSegmented }
 import { CircleAlert, ListChecks, ListMinus, Plus, RefreshCw, Search } from '@lucide/vue'
 import { computed, ref, useTemplateRef, watch } from 'vue'
 import { useI18n } from 'vue-i18n'
-import { getAccountModels, refreshAccountModels } from '@/api'
+import { getAccountGroupModels, getAccountModels, refreshAccountModels } from '@/api'
 import { useRequestState } from '@/composables/useRequestState'
 import { accountModelAccessError, accountModelIdError } from '../utils/modelAccess'
 import AccountModelCleanupPopover from './AccountModelCleanupPopover.vue'
@@ -14,6 +14,7 @@ import AccountModelOption from './AccountModelOption.vue'
 
 const props = withDefaults(defineProps<{
   accountId?: string
+  groupId?: string | null
   disabled?: boolean
   allowPreserve?: boolean
   formProp: string
@@ -33,6 +34,8 @@ const searchInput = useTemplateRef<InstanceType<typeof ZInput>>('searchInput')
 const selectionError = ref('')
 const request = useRequestState()
 const { loading, error } = request
+const groupCatalog = computed(() => props.groupId !== undefined)
+const catalogOwner = computed(() => props.groupId ?? props.accountId)
 const modes = computed(() => [
   ...(props.allowPreserve
     ? [
@@ -182,15 +185,21 @@ function handleCatalogHelpKeydown(event: KeyboardEvent, open: boolean, close: ()
 }
 
 async function load(refresh = false) {
-  const accountId = props.accountId
-  if (!accountId || !restricted.value)
+  const owner = catalogOwner.value
+  if (!owner || !restricted.value)
     return
   const requestId = request.start()
   try {
-    const result = await (refresh ? refreshAccountModels : getAccountModels)(
-      { accountId },
-      { signal: request.signal },
-    )
+    const result = groupCatalog.value
+      ? {
+          ...await getAccountGroupModels(owner, { signal: request.signal }),
+          observedAt: null,
+          observedAtDisplay: undefined,
+        }
+      : await (refresh ? refreshAccountModels : getAccountModels)(
+          { accountId: owner },
+          { signal: request.signal },
+        )
     if (request.isCurrent(requestId)) {
       catalog.value = result.models
       catalogObservedAtDisplay.value = result.observedAt ? result.observedAtDisplay : undefined
@@ -205,7 +214,7 @@ async function load(refresh = false) {
 }
 
 watch([
-  () => props.accountId,
+  catalogOwner,
   () => model.value?.models,
 ], ([accountId, ids], [previousAccountId]) => {
   const retained = accountId === previousAccountId
@@ -220,7 +229,7 @@ watch([
 }, { immediate: true })
 
 watch([
-  () => props.accountId,
+  catalogOwner,
   restricted,
 ], () => {
   request.invalidate()
@@ -248,7 +257,7 @@ watch(search, () => {
           </span>
         </span>
       </template>
-      <template v-if="restricted" #label-extra>
+      <template v-if="restricted && !groupCatalog" #label-extra>
         <ZPopover class="-my-1 -ml-1.5 shrink-0" trigger="hover-click" placement="top-start" role="tooltip">
           <template #reference="{ open, id, close }">
             <ZIconButton
@@ -274,7 +283,7 @@ watch(search, () => {
       </template>
       <div class="flex min-w-0 items-center justify-between gap-2">
         <ZSegmented v-model="mode" class="w-80 min-w-0 max-w-full" :aria-label="t('accounts.modelAccess.modelRestrictionMode')" :options="modes" :disabled="disabled" />
-        <div v-if="restricted && accountId" class="flex shrink-0 items-center gap-1">
+        <div v-if="restricted && catalogOwner" class="flex shrink-0 items-center gap-1">
           <AccountModelCleanupPopover v-if="mode === 'allowlist'" :models="missingModels" :model-count="model?.models.length ?? 0" :disabled="disabled || !missingModels.length" @remove="removeMissingModels" @closed="restoreCleanupFocus" />
           <ZIconButton ref="refreshButton" :aria-label="t('accounts.modelAccess.refreshModel')" variant="plain" :loading="loading" :disabled="disabled" @click="load(true)">
             <template #loading>

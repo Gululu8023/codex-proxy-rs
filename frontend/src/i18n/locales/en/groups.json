@@ -27,6 +27,9 @@
       "createGroup": "Create group"
     },
     "editor": {
+      "subagents": "Collaborative subagents",
+      "subagentsHelp": "Allow Codex to start collaborative subagents. Disabling rejects identifiable collaborative subagent requests.",
+      "modelAccessHelp": "Model permissions also require an account to be allowed by an enabled group bound to the Key. Account restrictions still apply.",
       "editDescription": "Edit group details and request permissions",
       "createDescription": "After creating the group, add accounts to it in Accounts",
       "groupName": "Name",

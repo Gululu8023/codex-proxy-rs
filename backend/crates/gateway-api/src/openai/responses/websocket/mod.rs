@@ -69,13 +69,11 @@ pub(crate) async fn responses_websocket(
         &headers,
         connect_info.map(|Extension(ConnectInfo(address))| address),
     );
-    let request_headers = OpenAiRequestHeaders::from_headers(&headers);
     ResponsesWebSocketAdapter::new(service).upgrade_with_client_context(
         websocket,
         client,
         client_ip,
         user_agent,
-        request_headers,
         headers,
         lifetime.map(|Extension(lifetime)| lifetime),
     )
@@ -94,14 +92,12 @@ impl ResponsesWebSocketAdapter {
         Self { service }
     }
 
-    #[expect(clippy::too_many_arguments)]
     fn upgrade_with_client_context(
         &self,
         websocket: Upgrade,
         client: AuthenticatedClient,
         client_ip: Option<IpAddr>,
         user_agent: Option<String>,
-        request_headers: OpenAiRequestHeaders,
         raw_headers: HeaderMap,
         lifetime: Option<Arc<crate::middleware::CallLifetime>>,
     ) -> Response {
@@ -123,7 +119,6 @@ impl ResponsesWebSocketAdapter {
             connection_id,
             client_ip,
             user_agent,
-            request_headers,
             raw_headers,
             lifecycle: self.service.lifecycle(),
             connection_guard,
@@ -142,7 +137,6 @@ struct ResponsesWebSocketSession {
     connection_id: String,
     client_ip: Option<IpAddr>,
     user_agent: Option<String>,
-    request_headers: OpenAiRequestHeaders,
     raw_headers: HeaderMap,
     lifecycle: Arc<dyn ConnectionLifecycle>,
     connection_guard: Box<dyn ConnectionGuard>,
@@ -155,8 +149,7 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
         connection_id,
         client_ip,
         user_agent,
-        request_headers,
-        raw_headers,
+        mut raw_headers,
         lifecycle,
         connection_guard,
     } = session;
@@ -167,8 +160,6 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
     let _connection_guard = connection_guard;
     let cancellation = lifecycle.cancellation().child_token();
     let _connection_cancellation = connection::CancelOnDrop(Some(cancellation.clone()));
-    let request_headers =
-        request_headers.with_downstream_websocket_connection_id(connection_id.clone());
     let reconnect_for_replay = true;
     let mut connection =
         ResponsesWebSocketConnection::new(socket, connection_id, cancellation.clone());
@@ -222,8 +213,8 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
             continue;
         }
         request_count = request_count.saturating_add(1);
-        // 准入前校验协议，避免无效正文占用执行容量。
-        match decode_response_create_with_context(&payload, &request_headers) {
+        // 这里只校验帧正文，实际执行按本轮生效的头重新解码。
+        match decode_response_create_with_context(&payload, &OpenAiRequestHeaders::default()) {
             Ok(_) => (),
             Err(error) => {
                 trace_rejected_request(
@@ -308,6 +299,9 @@ async fn serve_responses_websocket(socket: Socket, session: ResponsesWebSocketSe
             headers: encode_headers(&raw_headers),
             body: Bytes::from(payload),
         };
+        // 握手的轮次头只属于首次执行，复用连接时由各 response.create 携带本轮数据
+        raw_headers.remove("x-codex-turn-state");
+        raw_headers.remove("x-codex-turn-metadata");
         let service_for_terminal = service.clone();
         let replay_for_terminal = replay.clone();
         let connection_id_for_terminal = connection.id().to_owned();

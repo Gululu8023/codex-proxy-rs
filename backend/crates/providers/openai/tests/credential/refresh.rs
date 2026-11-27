@@ -572,6 +572,7 @@ async fn scheduled_refresh_persists_retryable_message_inside_the_two_hour_window
                 token_endpoint: format!("{}/oauth/token", server.uri()),
             },
             provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
+            crate::support::runtime_policy(),
         )),
         Arc::new(RefreshLeases),
         Arc::new(RefreshCredentialState),
@@ -888,11 +889,7 @@ impl TokenRefresher for QuotaRejectionDuringRefresh {
         // 模拟 RT 请求在途时，手动或周期额度查询先收到 401
         if self.background_quota {
             assert_eq!(
-                self.quota
-                    .synchronize()
-                    .await
-                    .expect("quota cycle")
-                    .transient,
+                self.quota.synchronize().await.expect("quota cycle").revoked,
                 1
             );
         } else {

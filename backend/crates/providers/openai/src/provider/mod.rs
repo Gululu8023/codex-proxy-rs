@@ -4,7 +4,7 @@ use std::collections::BTreeSet;
 use std::fmt;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use bytes::Bytes;
@@ -84,7 +84,7 @@ use crate::transport::protocol::responses::{
 };
 use crate::transport::request::{
     CodexRequestEncodeError, RequestAccountScope, align_structured_location_fields,
-    clear_request_turn_state, encode_generate_request, scope_request_to_account,
+    encode_generate_request, scope_request_to_account,
 };
 use crate::transport::session::CodexSessionIdentity;
 use crate::transport::usage::normalize_service_tier;
@@ -235,19 +235,6 @@ impl CodexProvider {
         }
         if let Some(identity) = &self.session_identity {
             identity.prepare_local_conversation(&mut upstream);
-        }
-        if let Some(previous_session) = previous_session.as_ref() {
-            if same_client_turn(
-                previous_session.client_turn_id.as_deref(),
-                upstream.client_turn_id.as_deref(),
-            ) {
-                upstream.turn_state = upstream
-                    .turn_state
-                    .take()
-                    .or_else(|| previous_session.turn_state.clone());
-            } else {
-                clear_request_turn_state(&mut upstream);
-            }
         }
         let session_affinity =
             derive_codex_session_affinity(&upstream, context.client_api_key_ref());
@@ -921,17 +908,13 @@ impl CodexProvider {
         {
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
-        if upstream_request
-            .downstream_websocket_connection_id
-            .is_some()
-            && upstream_request.previous_response_id().is_some()
+        if upstream_request.previous_response_id().is_some()
             && upstream_request.generate()
             && previous_session.as_ref().is_some_and(|state| {
                 state.continuation_scope == OpenAiContinuationScope::ReplayRequired
             })
         {
-            // HTTP store=false 没有原生续链，完整历史仍由客户端持有；不能把 delta
-            // 当作独立新请求发送，也不能用 previous_response_id 猜测上游存储状态
+            // 上一轮已确认需要重放，只有客户端持有完整历史
             return Err(continuation_replay_required_error("scope_unavailable"));
         }
         let trace = context.trace();
@@ -1060,8 +1043,6 @@ impl CodexProvider {
                 )
                 .then_some(lease.account().revision().get()),
                 conversation_id: upstream_request.local_conversation_id.clone(),
-                turn_state: upstream_request.turn_state.clone(),
-                client_turn_id: upstream_request.client_turn_id.clone(),
                 reasoning_effort_override: upstream_request
                     .semantics(
                         previous_session

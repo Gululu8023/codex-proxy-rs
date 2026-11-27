@@ -111,6 +111,37 @@
         "confirm": "Allow access",
         "description": "After saving, this includes ungrouped and future accounts"
       }
+    },
+    "statistics": {
+      "title": "Usage statistics",
+      "heading": "Usage statistics · {name}",
+      "metric": "Metric",
+      "period": "Period",
+      "days": "Last {days} days",
+      "showingPrevious": "Showing the last {days} days of data.",
+      "costUsd": "Cost",
+      "tokens": "Usage",
+      "requests": "Requests",
+      "trend": "Daily usage",
+      "model": "Model",
+      "other": "Other models ({count})",
+      "unknownModel": "Unspecified model",
+      "knownCost": "Known USD costs only",
+      "costShare": "Cost share",
+      "peakRequests": "Peak daily requests",
+      "activeDays": "Active days",
+      "includesEstimate": "Includes estimated costs",
+      "empty": "No usage in this period",
+      "missing": "No known values for this metric"
+    },
+    "batch": {
+      "enabledState": "Enabled state",
+      "edit": "Bulk edit",
+      "updated": "Updated {count} API keys",
+      "description": "{count} key selected | {count} keys selected",
+      "partiallyEnabled": "Some keys are enabled",
+      "mixed": "Multiple values",
+      "clearLimit": "Set unlimited"
     }
   }
 }

@@ -42,39 +42,8 @@ export function useApiKeyEditor(options: {
 
   function openEdit(key: ApiKey) {
     editingKey.value = key
-    const profiles = cloneDeep(key.providerRequestProfileOverrides)
-    const installationSeed = ['openai', 'anthropic'].map((provider) => {
-      const profile = profiles[provider]
-      const identity = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
-      return typeof identity?.installationSeed === 'string'
-        ? identity.installationSeed
-        : ''
-    }).find(Boolean) ?? ''
-    initialInstallationSeed.value = installationSeed
-    for (const provider of ['openai', 'anthropic']) {
-      const profile = profiles[provider]
-      const fields = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
-      // A manually distinct provider seed stays in that provider's profile.
-      if (fields?.installationSeed === installationSeed) {
-        if (profile?.inherit)
-          delete profiles[provider]
-        else if (profile)
-          delete profile.installationSeed
-      }
-    }
-    form.value = {
-      peerSharing: { ...key.peerSharing },
-      providerRequestProfileOverrides: profiles,
-      installationSeed,
-      customKey: '',
-      name: key.name,
-      label: key.label ?? '',
-      groupIds: key.groups.map(group => group.id),
-      maxConcurrency: limitInputValue(key.maxConcurrency),
-      requestsPerMinute: limitInputValue(key.requestsPerMinute),
-      dailyLimitUsd: limitInputValue(key.dailyLimitUsd),
-      weeklyLimitUsd: limitInputValue(key.weeklyLimitUsd),
-    }
+    form.value = apiKeyFormValue(key)
+    initialInstallationSeed.value = form.value.installationSeed
     showFormModal.value = true
   }
 
@@ -227,4 +196,39 @@ function limitInputValue(limit: string | number) {
   return Number(limit) === 0
     ? ''
     : String(limit)
+}
+
+export function apiKeyFormValue(key: ApiKey): ApiKeyFormValue {
+  const profiles = cloneDeep(key.providerRequestProfileOverrides)
+  const installationSeed = ['openai', 'anthropic'].map((provider) => {
+    const profile = profiles[provider]
+    const identity = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
+    return typeof identity?.installationSeed === 'string'
+      ? identity.installationSeed
+      : ''
+  }).find(Boolean) ?? ''
+  for (const provider of ['openai', 'anthropic']) {
+    const profile = profiles[provider]
+    const fields = (profile?.inherit as Record<string, unknown> | undefined) ?? profile
+    // A manually distinct provider seed stays in that provider's profile.
+    if (fields?.installationSeed === installationSeed) {
+      if (profile?.inherit)
+        delete profiles[provider]
+      else if (profile)
+        delete profile.installationSeed
+    }
+  }
+  return {
+    peerSharing: { ...key.peerSharing },
+    providerRequestProfileOverrides: profiles,
+    installationSeed,
+    customKey: '',
+    name: key.name,
+    label: key.label ?? '',
+    groupIds: key.groups.map(group => group.id),
+    maxConcurrency: limitInputValue(key.maxConcurrency),
+    requestsPerMinute: limitInputValue(key.requestsPerMinute),
+    dailyLimitUsd: limitInputValue(key.dailyLimitUsd),
+    weeklyLimitUsd: limitInputValue(key.weeklyLimitUsd),
+  }
 }

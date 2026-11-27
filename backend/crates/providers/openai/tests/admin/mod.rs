@@ -24,8 +24,10 @@ use gateway_admin::model::provider_credentials::{
 use gateway_admin::model::{MutationActor, MutationContext, Revision};
 use gateway_admin::ports::provider::ProviderAdminErrorKind;
 use gateway_core::account::{
-    CredentialRevision, CredentialState, OpaqueProviderData, ProviderAccount, ProviderAccountId,
-    ProviderAccountStore, QuotaAccessChange, QuotaEvidence, QuotaObservation, QuotaState,
+    CredentialCasOutcome, CredentialCasUpdate, CredentialRevision, CredentialState,
+    OpaqueProviderData, PlaintextCredential, ProviderAccount, ProviderAccountId,
+    ProviderAccountStore, ProviderAccountUpdate, QuotaAccessChange, QuotaEvidence,
+    QuotaObservation, QuotaState,
 };
 use gateway_core::engine::provider::ProviderRequest;
 use gateway_core::engine::{
@@ -2605,20 +2607,15 @@ mod errors {
         let server = MockServer::start().await;
         let mut config = valid_config();
         config.config.api.base_url = server.uri();
+        config.config.auth.oauth_token_endpoint = format!("{}/oauth/token", server.uri());
         let bundle = provider_openai::initialize(
             config.config,
-            provider_ports_with(store.clone(), Arc::new(TestOAuthPending::default())),
+            refresh_ports(store.clone(), false),
             Arc::new(gateway_core::account::UpstreamInfoReader::default()),
         )
         .await
         .expect("OpenAI bundle");
         for (status, code, expected_kind, expected_message) in [
-            (
-                401,
-                "token_revoked",
-                Kind::BadGateway,
-                "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
-            ),
             (
                 401,
                 "unknown_code",
@@ -2649,6 +2646,12 @@ mod errors {
                 Kind::Unavailable,
                 "OpenAI 额度查询失败，请检查出站连接与上游服务",
             ),
+            (
+                401,
+                "token_revoked",
+                Kind::BadGateway,
+                "OpenAI 拒绝了额度查询（HTTP 401，token_revoked）：访问令牌已被撤销，请刷新令牌或重新授权",
+            ),
         ] {
             server.reset().await;
             Mock::given(method("GET"))
@@ -2658,6 +2661,7 @@ mod errors {
                 })))
                 .mount(&server)
                 .await;
+            let previous = store.account(account_id).expect("account before rejection");
             let error = bundle
                 .admin_provider()
                 .quota(ProviderQuotaRequest {
@@ -2667,15 +2671,71 @@ mod errors {
                 })
                 .await
                 .expect_err("quota rejection");
-            assert_eq!(error.kind(), expected_kind);
+            assert_eq!(error.kind(), expected_kind, "HTTP {status} {code}");
             assert_eq!(error.public_message(), Some(expected_message));
             assert!(!format!("{error:?} {error}").contains("raw-secret-marker"));
-            assert_eq!(
-                store.account(account_id).expect("account after rejection"),
-                before
-            );
+            let current = store.account(account_id).expect("account after rejection");
+            if code == "token_revoked" {
+                assert!(
+                    current
+                        .access_token_expires_at()
+                        .is_some_and(|at| at <= std::time::SystemTime::now())
+                );
+                assert_eq!(current.revision(), previous.revision());
+                assert_eq!(current.credential_state(), previous.credential_state());
+                assert_eq!(current.quota(), previous.quota());
+                assert_eq!(current.next_refresh_at(), previous.next_refresh_at());
+                assert_eq!(current.last_error_message(), previous.last_error_message());
+            } else {
+                assert_eq!(current, previous);
+            }
         }
         server.reset().await;
+        // 额度查询不刷新 OAuth；撤销访问令牌后先完成令牌轮换，再验证额度恢复。
+        Mock::given(method("POST"))
+            .and(path("/oauth/token"))
+            .respond_with(ResponseTemplate::new(200).set_body_json(json!({
+                "access_token": "recovered-access-token", "expires_in": 3600
+            })))
+            .expect(1)
+            .mount(&server)
+            .await;
+        let current = store.account(account_id).expect("account before refresh");
+        let (refreshed, _guard) = bundle
+            .admin_provider()
+            .prepare_refresh(PrepareCredentialRefresh {
+                account: account_record(&current),
+            })
+            .await
+            .expect("refresh revoked access token")
+            .into_parts();
+        assert!(refreshed.preserve_profile);
+        let update = CredentialCasUpdate::new(
+            refreshed.account_id.clone(),
+            CredentialRevision::new(refreshed.expected_credential_revision.get()).unwrap(),
+            ProviderAccountUpdate {
+                account_id: refreshed.account_id,
+                name: refreshed.name,
+                email: refreshed.email,
+                plan_type: refreshed.plan_type,
+            },
+            PlaintextCredential::new(
+                refreshed
+                    .provider_material
+                    .expose_to_provider()
+                    .expose_to_provider()
+                    .clone(),
+            ),
+            refreshed.has_refresh_token,
+            refreshed.access_token_expires_at.map(SystemTime::from),
+            refreshed.next_refresh_at.map(SystemTime::from),
+        )
+        .expect("refreshed credential CAS")
+        .preserving_profile();
+        assert!(matches!(
+            store.compare_and_swap_credential(update).await.unwrap(),
+            CredentialCasOutcome::Updated(_)
+        ));
         Mock::given(method("GET"))
             .and(path("/api/codex/usage"))
             .respond_with(ResponseTemplate::new(200).set_body_json(json!({

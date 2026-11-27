@@ -22,10 +22,10 @@ use crate::model::{
     },
     auth::{AdminAuditEvent, AuthSession},
     client_keys::{
-        ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod, ClientKeyListQuery, ClientKeyPage,
-        ClientKeyRecord, ClientKeySecret, DeleteClientKey, NewClientKey, ResetClientKeyBudget,
-        SetClientKeyBudgetWindow, SetClientKeyEnabled, UpdateClientKey,
-        UpdateClientKeyBudgetLimits,
+        BatchUpdateClientKeys, ClientKeyBudgetWindow, ClientKeyBudgetWindowPeriod,
+        ClientKeyListQuery, ClientKeyPage, ClientKeyRecord, ClientKeySecret, DeleteClientKey,
+        NewClientKey, ResetClientKeyBudget, SetClientKeyBudgetWindow, SetClientKeyEnabled,
+        UpdateClientKey, UpdateClientKeyBudgetLimits,
     },
     observability::{
         DashboardObservation, DashboardQuery, DiagnosticDimension, DiagnosticsObservation,
@@ -107,6 +107,13 @@ impl AdminStoreError {
 }
 
 pub type AdminStoreResult<T> = Result<T, AdminStoreError>;
+
+/// 在持有密钥行锁时用 Provider 准备好的纯合并操作更新原有画像
+pub type BatchClientKeyProfileMerger = Box<
+    dyn Fn(&mut crate::model::client_keys::ProviderRequestProfileOverrides) -> AdminStoreResult<()>
+        + Send
+        + Sync,
+>;
 
 /// 账号目录与公共账号写操作
 #[async_trait]
@@ -342,6 +349,11 @@ pub trait AuthStore: Send + Sync {
 /// Client API Key 资料读取与管理写入
 #[async_trait]
 pub trait ClientKeyStore: Send + Sync {
+    async fn client_key_budget(
+        &self,
+        id: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Option<gateway_core::engine::budget::ClientBudgetStatus>>;
+
     async fn client_key_budget_window(
         &self,
         id: &gateway_core::policy::ClientApiKeyId,
@@ -378,6 +390,13 @@ pub trait ClientKeyStore: Send + Sync {
         command: UpdateClientKey,
         context: &MutationContext,
     ) -> AdminStoreResult<(Revision, ClientKeyRecord)>;
+
+    async fn batch_update_client_keys(
+        &self,
+        command: BatchUpdateClientKeys,
+        merge_profiles: BatchClientKeyProfileMerger,
+        context: &MutationContext,
+    ) -> AdminStoreResult<Revision>;
 
     async fn set_client_key_enabled(
         &self,
@@ -488,6 +507,19 @@ pub trait ObservabilityStore: Send + Sync {
         range: TimeRange,
         granularity: Granularity,
     ) -> AdminStoreResult<Vec<RequestMetricPoint>>;
+
+    async fn client_key_statistics(
+        &self,
+        range: TimeRange,
+        id: &gateway_core::policy::ClientApiKeyId,
+        query: crate::model::observability::KeyUsageMetric,
+    ) -> AdminStoreResult<crate::model::observability::KeyStatisticsOverview>;
+
+    async fn client_key_models(
+        &self,
+        range: TimeRange,
+        id: &gateway_core::policy::ClientApiKeyId,
+    ) -> AdminStoreResult<Vec<crate::model::observability::KeyModelRow>>;
 
     async fn usage_trend(
         &self,

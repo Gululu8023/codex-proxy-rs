@@ -47,6 +47,7 @@ pub async fn run() -> Result<(), BootstrapError> {
                 ),
             )),
         gateway_admin::AdminRuntimePorts {
+            published_snapshot: core.snapshots(),
             upstream_info: Some(providers.peer.service()),
             timezone,
             providers: providers.admin,

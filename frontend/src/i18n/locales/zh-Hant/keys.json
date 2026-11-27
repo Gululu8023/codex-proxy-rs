@@ -111,6 +111,37 @@
         "confirm": "允許訪問",
         "description": "保存後也可訪問未分組和以後新增的賬號"
       }
+    },
+    "statistics": {
+      "title": "用量統計",
+      "heading": "用量統計 · {name}",
+      "metric": "統計指標",
+      "period": "統計期間",
+      "days": "近 {days} 天",
+      "showingPrevious": "目前顯示近 {days} 天的資料",
+      "costUsd": "費用",
+      "tokens": "用量",
+      "requests": "請求數",
+      "trend": "每日用量趨勢",
+      "model": "模型",
+      "other": "其他 {count} 個模型",
+      "unknownModel": "未記錄模型",
+      "knownCost": "僅含已知美元費用",
+      "costShare": "費用佔比",
+      "peakRequests": "單日最高請求數",
+      "activeDays": "活躍天數",
+      "includesEstimate": "含本機估算",
+      "empty": "此期間沒有用量記錄",
+      "missing": "此指標暫無已知數值"
+    },
+    "batch": {
+      "enabledState": "啟用狀態",
+      "edit": "批次編輯",
+      "updated": "已更新 {count} 個金鑰",
+      "description": "已選 {count} 個密鑰",
+      "partiallyEnabled": "部分密鑰已啟用",
+      "mixed": "多個值",
+      "clearLimit": "設為不限"
     }
   }
 }

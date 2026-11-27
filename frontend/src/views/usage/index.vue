@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { TableColumn } from '@codex-proxy/ui'
 
-import type { UsageListRecord, UsageRecordStatus } from '@/api'
-import { useTableColumns, ZCard, ZDatePicker, ZIconButton, ZPageHeader, ZPagination, ZTableColumnSettings } from '@codex-proxy/ui'
+import type { UsageErrorOrigin, UsageListRecord, UsageRecordStatus } from '@/api'
+import { useTableColumns, ZCard, ZDatePicker, ZIconButton, ZPageHeader, ZPagination, ZSelect, ZTableColumnSettings } from '@codex-proxy/ui'
 import { Eye } from '@lucide/vue'
 
 import { computed, shallowRef, watch } from 'vue'
@@ -27,6 +27,25 @@ const { timezone } = defineProps<{ timezone: string }>()
 const { t } = useI18n({ useScope: 'global' })
 
 const recordView = shallowRef<UsageRecordStatus>('success')
+const errorOrigin = shallowRef<UsageErrorOrigin | 'all'>('all')
+const sourceOptions = computed(() => [
+  {
+    value: 'all',
+    label: t('usage.filters.allSources'),
+  },
+  ...([
+    'upstream',
+    'proxy',
+    'connection',
+    'unknown',
+  ] as const).map(value => ({
+    value,
+    label: t(`usage.error.origin.${value}`),
+  })),
+])
+watch(recordView, () => {
+  errorOrigin.value = 'all'
+}, { flush: 'sync' })
 const recordColumns = computed<TableColumn<UsageListRecord>[]>(() => recordView.value === 'error'
   ? usageRecordColumns.value.flatMap(column => column.key === 'route'
       ? [
@@ -69,6 +88,7 @@ const {
   timeRangeParams,
   latestTimeRangeParams,
   status: recordView,
+  errorOrigin,
 })
 
 const { showDetailModal, selectedUsageRecord, detailIsError, detailLoading, detailError, handleViewDetail, reloadDetail, openRequest } = useUsageRecordDetail()
@@ -145,6 +165,7 @@ watch(timeRange, () => {
           >
             <template #actions>
               <UsageRecordStatusFilter v-model="recordView" />
+              <ZSelect v-if="recordView === 'error'" v-model="errorOrigin" :options="sourceOptions" :aria-label="t('usage.filters.errorSource')" class="w-38" />
               <ZTableColumnSettings
                 :options="columnOptions"
                 @change="setColumnVisible"

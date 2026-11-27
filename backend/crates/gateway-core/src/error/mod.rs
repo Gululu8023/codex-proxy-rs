@@ -1254,6 +1254,28 @@ impl GatewayErrorKind {
     }
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum DeniedGroupFeature {
+    ImageGeneration,
+    CollaborativeSubagents,
+}
+
+impl From<DeniedGroupFeature> for GatewayError {
+    fn from(feature: DeniedGroupFeature) -> Self {
+        let (code, message) = match feature {
+            DeniedGroupFeature::ImageGeneration => (
+                "image_generation_disabled",
+                "Image generation is not allowed by the API key's account groups.",
+            ),
+            DeniedGroupFeature::CollaborativeSubagents => (
+                "subagents_disabled",
+                "Collaborative subagents are not allowed by the API key's account groups.",
+            ),
+        };
+        Self::new(GatewayErrorKind::PolicyDenied, message).with_client_code(code)
+    }
+}
+
 /// 协议无关、可安全暴露的网关错误
 #[derive(Clone, Error)]
 #[error("{message}")]

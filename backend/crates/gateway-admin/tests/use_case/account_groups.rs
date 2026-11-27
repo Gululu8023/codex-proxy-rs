@@ -327,6 +327,8 @@ impl AccountRuntimeStore for FakeRuntimeStore {
 fn group_record() -> AccountGroupRecord {
     let now = Utc::now();
     AccountGroupRecord {
+        model_access: Default::default(),
+        allow_subagents: true,
         allow_image_generation: true,
         fast_mode: FastMode::Default,
         id: group_id(),
@@ -403,6 +405,8 @@ async fn invalid_group_fields_are_rejected_before_store_mutations() {
         .create(
             &context,
             CreateAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: true,
                 fast_mode: FastMode::Default,
                 name: " invalid".to_owned(),
@@ -417,6 +421,8 @@ async fn invalid_group_fields_are_rejected_before_store_mutations() {
         .update(
             &context,
             UpdateAccountGroup {
+                model_access: None,
+                allow_subagents: None,
                 allow_image_generation: None,
                 fast_mode: None,
                 id: record.id,

@@ -6027,7 +6027,7 @@ async fn missing_affinity_full_request_should_preserve_client_turn_state() {
 }
 
 #[tokio::test]
-async fn matching_turn_id_should_restore_previous_turn_state() {
+async fn matching_turn_id_should_not_restore_saved_provider_turn_state() {
     let request = capture_turn_state_request(
         "req_restore_same_turn_state",
         Some("turn-same"),
@@ -6036,10 +6036,7 @@ async fn matching_turn_id_should_restore_previous_turn_state() {
     )
     .await;
 
-    assert_eq!(
-        captured_header_values(&request, "x-codex-turn-state"),
-        vec![b"previous-turn-state".to_vec()]
-    );
+    assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
 }
 
 #[tokio::test]
@@ -6064,7 +6061,7 @@ async fn matching_turn_id_should_prefer_an_explicit_client_echo_over_saved_provi
 }
 
 #[tokio::test]
-async fn new_or_unidentified_turn_should_not_restore_previous_turn_state() {
+async fn new_or_unidentified_turn_should_preserve_explicit_client_turn_state() {
     for (request_id, previous_turn_id, current_turn_id, client_turn_state) in [
         (
             "req_new_turn_state",
@@ -6092,14 +6089,15 @@ async fn new_or_unidentified_turn_should_not_restore_previous_turn_state() {
             client_turn_state,
         )
         .await;
-        assert!(captured_header_values(&request, "x-codex-turn-state").is_empty());
+        // 客户端显式回传的 opaque token 不依赖 CPRS 保存的轮次状态。
+        assert_eq!(
+            captured_header_values(&request, "x-codex-turn-state"),
+            vec![b"stale-client-turn-state".to_vec()]
+        );
         let body = captured_request_body(&request);
         for key in ["turnState", "turn_state", "x-codex-turn-state"] {
-            assert!(body.get(key).is_none(), "stale body state: {key}");
-            assert!(
-                body["client_metadata"].get(key).is_none(),
-                "stale metadata state: {key}"
-            );
+            assert_eq!(body[key], "stale-client-turn-state");
+            assert_eq!(body["client_metadata"][key], "stale-client-turn-state");
         }
         assert_eq!(body["input"][0]["content"][0]["text"], "current input");
         assert_eq!(body["client_metadata"]["custom"], "preserved");

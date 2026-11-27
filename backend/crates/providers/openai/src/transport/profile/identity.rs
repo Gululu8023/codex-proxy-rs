@@ -15,7 +15,7 @@ use super::selection::{
 use super::{CodexWireProfile, CodexWireProfileState};
 
 impl CodexWireProfileState {
-    /// 后台模型操作没有 Client Key，按当前全局选择冻结整套身份
+    /// 账号后台操作没有 Client Key，按当前全局选择冻结整套身份
     pub(crate) async fn resolve_global_request_profile(
         &self,
         policy: &dyn ProviderRuntimePolicyPort,
@@ -96,6 +96,20 @@ pub(crate) fn inherited_identity_fields(
         return Err(ClientProfileError::Invalid);
     }
     Ok(inherited)
+}
+
+/// 切换画像仅修改客户端选择，未指定的种子仍取自这一把 Key
+pub fn merge_batch_key_profile(
+    current: Option<&OpaqueProviderData>,
+    update: Option<&Option<OpaqueProviderData>>,
+    installation_seed: Option<uuid::Uuid>,
+) -> Result<Option<OpaqueProviderData>, ClientProfileError> {
+    gateway_core::settings::request_profiles::merge_batch_key_profile(
+        current,
+        update,
+        installation_seed,
+    )
+    .map_err(|_| ClientProfileError::Invalid)
 }
 
 impl RequestProfileSelection {

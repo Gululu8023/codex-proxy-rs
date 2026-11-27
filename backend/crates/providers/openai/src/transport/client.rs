@@ -394,7 +394,7 @@ impl CodexClientError {
                     &upstream.diagnostics,
                     upstream.client_response.as_deref(),
                     &upstream.set_cookie_headers,
-                    &[],
+                    &upstream.rate_limit_headers,
                     upstream.send_phase,
                 ))
             }
@@ -475,10 +475,6 @@ pub struct CodexRequestContext<'a> {
     pub turn_state: Option<&'a str>,
     /// 客户端 turn metadata；其中 installation ID 已按当前账号处理
     pub turn_metadata: Option<&'a str>,
-    /// x-codex-beta-features 头值
-    pub beta_features: Option<&'a str>,
-    /// x-responsesapi-include-timing-metrics 头值
-    pub include_timing_metrics: Option<&'a str>,
     /// 下游 `version` 扩展头；存在时上游值由 Desktop 版本画像统一生成
     pub version: Option<&'a str>,
     /// 客户端 window ID
@@ -495,8 +491,6 @@ pub struct CodexRequestContext<'a> {
     pub thread_id: Option<&'a str>,
     /// 客户端逻辑 request ID；缺失时使用代理请求 ID
     pub client_request_id: Option<&'a str>,
-    /// 客户端 turn ID
-    pub turn_id: Option<&'a str>,
     /// 账号亲和选择结果；仅用于结构化遥测，不参与 transport 决策
     pub account_selection: CodexAccountSelectionTelemetry<'a>,
 }
@@ -517,8 +511,6 @@ impl<'a> CodexRequestContext<'a> {
             request_id,
             turn_state: None,
             turn_metadata: None,
-            beta_features: None,
-            include_timing_metrics: None,
             version: None,
             codex_window_id: None,
             parent_thread_id: None,
@@ -527,7 +519,6 @@ impl<'a> CodexRequestContext<'a> {
             session_id: None,
             thread_id: None,
             client_request_id: None,
-            turn_id: None,
             account_selection: CodexAccountSelectionTelemetry::NONE,
         }
     }

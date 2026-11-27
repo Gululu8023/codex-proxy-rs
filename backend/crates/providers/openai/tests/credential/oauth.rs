@@ -171,6 +171,7 @@ async fn complete_with_name(
         Arc::new(MemoryAccountStore::default()),
         CodexCredentialAdmin,
         profile(),
+        crate::support::runtime_policy(),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {
@@ -226,6 +227,7 @@ async fn authorize_url_matches_the_official_desktop_parameter_contract() {
         Arc::new(MemoryAccountStore::default()),
         CodexCredentialAdmin,
         profile(),
+        crate::support::runtime_policy(),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {
@@ -393,6 +395,7 @@ async fn separate_new_authorizations_use_distinct_surface_stable_ids() {
             Arc::new(MemoryAccountStore::default()),
             CodexCredentialAdmin,
             profile(),
+            crate::support::runtime_policy(),
         );
         let started = service
             .start_authorization(StartCodexOAuthAuthorization {
@@ -450,6 +453,7 @@ async fn repeated_reauthorization_preserves_surface_id_with_a_cleared_name() {
             store.clone(),
             CodexCredentialAdmin,
             profile(),
+            crate::support::runtime_policy(),
         );
         let started = service
             .start_authorization(StartCodexOAuthAuthorization {
@@ -508,6 +512,7 @@ async fn reauthorization_binds_the_selected_slot_to_the_new_oauth_account() {
         store,
         CodexCredentialAdmin,
         profile(),
+        crate::support::runtime_policy(),
     );
     let started = service
         .start_authorization(StartCodexOAuthAuthorization {

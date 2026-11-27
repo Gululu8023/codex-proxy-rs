@@ -97,7 +97,7 @@ impl AnthropicProvider {
         let accounts = self
             .ports
             .accounts()
-            .list_for_provider(&self.credentials.kind())
+            .list_for_provider(&self.credentials.kind(), false)
             .await
             .map_err(|_| infra())?;
         let mut accounts: Vec<_> = accounts
@@ -144,7 +144,7 @@ impl AnthropicProvider {
         let current = self
             .ports
             .accounts()
-            .list_for_provider(&self.credentials.kind())
+            .list_for_provider(&self.credentials.kind(), false)
             .await
             .map_err(|_| infra())?;
         let current: BTreeMap<_, _> = current
@@ -241,7 +241,7 @@ impl AnthropicProvider {
             let mut accounts = self
                 .ports
                 .accounts()
-                .list_for_provider(&kind)
+                .list_for_provider(&kind, false)
                 .await
                 .map_err(|_| infra())?;
             // Key 的模型并集只用于发现，不能让没有该模型的账号参与实际选号。

@@ -355,9 +355,11 @@ fn default_prices() -> &'static gateway_admin::model::pricing::ProviderPricingCa
             cache_read: read.to_owned().try_into().expect("fixed price"),
             cache_write: write.to_owned().try_into().expect("fixed price"),
         };
-        // 2026-11-12 核对官方价目 https://platform.claude.com/docs/en/about-claude/pricing 。
+        // 2026-11-26 核对官方价目 https://platform.claude.com/docs/en/about-claude/pricing 。
         // 这是费用估算目录；账号可用模型仍由原生 /v1/models 与 Key 权限决定。
         [
+            ("claude-fable-5-2", None, rates("8", "40", "0.2", "10")),
+            ("claude-mythos-5-2", None, rates("8", "40", "0.2", "10")),
             ("claude-fable-5-1", None, rates("10", "50", "0.25", "12.5")),
             ("claude-mythos-5-1", None, rates("10", "50", "0.25", "12.5")),
             ("claude-fable-5", None, rates("10", "50", "1", "12.5")),
@@ -409,8 +411,9 @@ fn default_prices() -> &'static gateway_admin::model::pricing::ProviderPricingCa
             if let Some(long) = long {
                 bands.insert("long_standard".into(), long);
             }
-            // 2026-11-19 核对官方 Fast 价；全上下文同价，不能把 Priority 当作 Fast。
+            // 2026-11-26 核对官方 Fast 价；全上下文同价，不能把 Priority 当作 Fast。
             let fast = match model {
+                "claude-fable-5-2" | "claude-mythos-5-2" => Some(rates("16", "80", "0.4", "20")),
                 "claude-opus-5-5" => Some(rates("8", "40", "0.4", "10")),
                 "claude-opus-5" | "claude-opus-4-8" => Some(rates("10", "50", "1", "12.5")),
                 _ => None,

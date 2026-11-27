@@ -10,13 +10,25 @@ import { recordedBillingItems } from './shared/billing'
 import { usageBillingText } from './shared/presenter'
 
 const props = defineProps<{
-  record: Pick<UsageListRecord, 'billing'>
+  record: Pick<UsageListRecord, 'billing'> & Partial<Pick<UsageListRecord, 'serviceTier' | 'provider'>>
 }>()
 
 const { t } = useI18n({ useScope: 'global' })
 
 const billing = computed(() => props.record.billing)
 const recordedItems = computed(() => recordedBillingItems(billing.value, t))
+const speedMode = computed(() => {
+  // Claude 的 Priority 与 Fast 分属容量和速度，沿用请求时记录的速度事实。
+  if (billing.value?.recorded?.kind === 'api_equivalent_estimate')
+    return recordedItems.value?.fastMode ? 'Fast' : null
+  const tier = props.record.serviceTier ?? billing.value?.serviceTierDisplay.toLowerCase()
+  if (tier === 'ultrafast')
+    return 'Ultrafast'
+  if (tier === 'fast' || (tier === 'priority' && props.record.provider === 'openai'))
+    return 'Fast'
+  return null
+})
+const speedModeLabel = computed(() => t('usage.billing.speedModeBadge', { mode: speedMode.value }))
 const longContextBillingApplied = computed(() => recordedItems.value?.longContextBillingApplied ?? billing.value?.longContextBillingApplied)
 const billingItems = computed(() => {
   if (recordedItems.value)
@@ -144,17 +156,19 @@ function itemValueClass(tone?: string, accent?: boolean) {
       {{ usageBillingText(record) }}
     </span>
 
-    <div v-if="billing" class="flex items-center gap-1">
+    <div v-if="billing || speedMode" class="flex items-center gap-1">
       <span
-        v-if="recordedItems ? recordedItems.fastMode : billing.serviceTierDisplay === 'Fast'"
+        v-if="speedMode"
         class="inline-flex size-4 items-center justify-center rounded-full bg-z-warning-container text-z-warning-on-container"
-        :title="t('usage.billing.fastMode')"
+        :title="speedModeLabel"
         role="img"
-        :aria-label="t('usage.billing.fastMode')"
+        :aria-label="speedModeLabel"
       >
         <Zap class="size-3" stroke-width="2.2" aria-hidden="true" />
+        <Zap v-if="speedMode === 'Ultrafast'" class="size-3" stroke-width="2.2" aria-hidden="true" />
       </span>
       <UsageDetailPopover
+        v-if="billing"
         :title="longContextBillingApplied ? t('usage.billing.longContextBillingDetails') : t('usage.billing.billingDetails')"
         :trigger-label="longContextBillingApplied ? t('usage.billing.viewLongContextBillingDetails') : t('usage.billing.viewCostDetails')"
         :tone="longContextBillingApplied ? 'warning' : 'primary'"

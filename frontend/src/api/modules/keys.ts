@@ -1,6 +1,6 @@
 import type { RequestOptions } from '../request'
 import type { AccountGroupRef } from './groups'
-import type { ClientProfileSelection, ProviderRequestProfile, ProviderRequestProfiles } from './settings/profiles'
+import type { ClientProfileSelection, ProviderRequestProfile, ProviderRequestProfiles, ProviderRequestProfileUpdates } from './settings/profiles'
 import request from '../request'
 
 export type ApiKeyRoutingScope = 'all' | 'groups'
@@ -121,6 +121,21 @@ export function createApiKey(data: ApiKeyCreateParam) {
   })
 }
 
+export interface ApiKeyBatchChanges extends Partial<Omit<ApiKeyWriteParam, 'name' | 'label' | 'peerSharing'>> {
+  enabled?: boolean
+  peerSharing?: Partial<ApiKeyPeerSharing>
+  providerRequestProfileOverrides?: ProviderRequestProfileUpdates
+  installationSeed?: string
+}
+
+export function batchUpdateApiKeys(data: ApiKeyBatchChanges & { ids: string[] }) {
+  return request<{ updated: number, configRevision: number }>({
+    url: '/api/admin/client-keys/batch-update',
+    method: 'POST',
+    data,
+  })
+}
+
 export function updateApiKey(data: ApiKeyUpdateParam) {
   return request<ApiKeyMutationResponse>({
     url: '/api/admin/client-keys/update',
@@ -167,5 +182,44 @@ export function enableApiKey(data: ApiKeyIdParam) {
     url: '/api/admin/client-keys/enable',
     method: 'POST',
     data,
+  })
+}
+export type KeyUsageMetric = 'costUsd' | 'tokens' | 'requests'
+export type KeyStatisticsPeriod = '7d' | '30d'
+export interface KeyUsageTotals {
+  requests: number
+  tokens: number | null
+  costUsd: string | null
+  hasMissingCost: boolean
+  hasEstimatedCost: boolean
+}
+export interface KeyModelRow {
+  model: string
+  totals: KeyUsageTotals
+  activeDays: number
+  peakRequests: number
+}
+export interface KeyStatistics {
+  budget: Pick<ApiKey, 'dailyLimitUsd' | 'weeklyLimitUsd' | 'dailyUsedUsd' | 'weeklyUsedUsd' | 'dailyResetsAt' | 'weeklyResetsAt' | 'dailyResetsAtDisplay' | 'weeklyResetsAtDisplay'>
+  dates: string[]
+  asOf: number
+  totals: KeyUsageTotals
+  modelCount: number
+  series: { model: string | null, points: { date: string, value: string | null }[] }[]
+}
+export function getKeyStatistics(id: string, period: KeyStatisticsPeriod, metric: KeyUsageMetric, asOf: number | undefined, options: RequestOptions) {
+  return request<KeyStatistics>({
+    url: '/api/admin/client-keys/statistics',
+    method: 'GET',
+    params: { id, period, metric, asOf },
+    ...options,
+  })
+}
+export function getKeyModelTotals(id: string, period: KeyStatisticsPeriod, asOf: number, options: RequestOptions) {
+  return request<KeyModelRow[]>({
+    url: '/api/admin/client-keys/statistics/models',
+    method: 'GET',
+    params: { id, period, asOf },
+    ...options,
   })
 }

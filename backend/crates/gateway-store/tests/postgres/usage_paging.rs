@@ -460,7 +460,7 @@ async fn all_status_counts_keep_filters_delivery_rules_and_time_boundaries() {
             vec![],
         ),
     ] {
-        for status in [UsageRecordStatus::All, UsageRecordStatus::Error] {
+        for status in [UsageRecordStatus::All, UsageRecordStatus::Error(None)] {
             let expected = expected
                 .iter()
                 .copied()
@@ -584,7 +584,7 @@ async fn request_status_pages_share_one_request_timeline() {
             .unwrap();
     for (status, expected) in [
         (UsageRecordStatus::Success, vec!["status_f", "status_a"]),
-        (UsageRecordStatus::Error, vec!["status_c", "status_b"]),
+        (UsageRecordStatus::Error(None), vec!["status_c", "status_b"]),
         (
             UsageRecordStatus::All,
             vec![
@@ -619,7 +619,7 @@ async fn request_status_pages_share_one_request_timeline() {
     }
     let page = repo
         .list_usage_records(UsageRecordQuery {
-            status: UsageRecordStatus::Error,
+            status: UsageRecordStatus::Error(None),
             range,
             filter: UsageRecordFilter {
                 search: Some("model_status_b".into()),

@@ -8,7 +8,7 @@ use gateway_protocol::openai::events;
 use tokio::{io::BufWriter, time::timeout};
 use tokio_tungstenite::{Connector, MaybeTlsStream, client_async_tls_with_config};
 use tungstenite::{
-    self, Message,
+    self,
     extensions::{ExtensionsConfig, compression::deflate::DeflateConfig},
     handshake::client::Request as WsRequest,
     http::Response as WsResponse,
@@ -26,13 +26,11 @@ use crate::{
 };
 
 use super::{
-    error::CodexWebSocketExchangeError,
+    error::{CodexWebSocketExchangeError, CodexWebSocketUpstreamError},
     model::{CodexWebSocketConnection, CodexWebSocketRequest, WebSocketContinuationRequirement},
     pool::CodexWebSocketConnectionMetadata,
     pump::{PumpLogContext, PumpedWebSocket, RawWsStream},
 };
-
-use super::control::WEBSOCKET_SEND_TIMEOUT;
 
 const WEBSOCKET_EXTENSIONS: &str = "permessage-deflate; client_max_window_bits";
 const WEBSOCKET_CONNECT_TIMEOUT: Duration = Duration::from_secs(15);
@@ -134,21 +132,6 @@ pub(super) async fn connect_pumped_websocket(
 ) -> Result<(PumpedWebSocket, WsResponse<Option<Vec<u8>>>), CodexWebSocketExchangeError> {
     let (raw, response) = connect_websocket(connection, fast_path).await?;
     Ok((PumpedWebSocket::new(raw, context, proxy_permit), response))
-}
-
-pub(super) async fn send_websocket_request(
-    websocket: &PumpedWebSocket,
-    payload_text: &str,
-) -> Result<(), CodexWebSocketExchangeError> {
-    timeout(
-        WEBSOCKET_SEND_TIMEOUT,
-        websocket.send(Message::Text(payload_text.to_string().into())),
-    )
-    .await
-    .map_err(|_| CodexWebSocketExchangeError::SendTimeout {
-        timeout: WEBSOCKET_SEND_TIMEOUT,
-    })??;
-    Ok(())
 }
 
 pub(super) fn websocket_connection_metadata(
@@ -403,11 +386,11 @@ fn websocket_opening_error(
         .and_then(|value| value.to_str().ok())
         .and_then(gateway_protocol::openai::parse_retry_after_seconds)
         .or_else(|| events::retry_after_seconds_from_body(&body));
-    CodexWebSocketExchangeError::upstream(
+    CodexWebSocketExchangeError::Upstream(Box::new(CodexWebSocketUpstreamError {
         status_code,
         retry_after_seconds,
         body,
-        reqwest::StatusCode::from_u16(status_code)
+        client_response: reqwest::StatusCode::from_u16(status_code)
             .ok()
             .map(|status| {
                 Box::new(CodexClientVisibleUpstreamResponse::new(
@@ -417,11 +400,12 @@ fn websocket_opening_error(
                     raw_body,
                 ))
             }),
-        response_meta::set_cookie_headers(response.headers()),
-        response_meta::diagnostics(Some(status_code), response.headers())
+        set_cookie_headers: response_meta::set_cookie_headers(response.headers()),
+        rate_limit_headers: response_meta::rate_limit_headers(response.headers()),
+        diagnostics: response_meta::diagnostics(Some(status_code), response.headers())
             .with_response_origin(websocket_response_origin(connection)),
-        CodexUpstreamSendPhase::BeforePayload,
-    )
+        send_phase: CodexUpstreamSendPhase::BeforePayload,
+    }))
 }
 
 fn websocket_response_origin(connection: &CodexWebSocketConnection) -> Option<reqwest::Url> {

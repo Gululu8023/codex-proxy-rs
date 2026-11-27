@@ -32,6 +32,7 @@ pub enum MutationAuditOperation {
     ProviderAccountDelete,
     ProviderAccountExportCredentials,
     ClientApiKeyUpdateBudgetLimits,
+    ClientApiKeyBatchUpdate,
     ClientApiKeyCreate,
     ClientApiKeyUpdate,
     ClientApiKeyEnabled { enabled: bool },
@@ -87,6 +88,7 @@ impl MutationAuditOperation {
             Self::ProviderAccountDelete => ("delete", "provider_account"),
             Self::ProviderAccountExportCredentials => ("export_credentials", "provider_account"),
             Self::ClientApiKeyUpdateBudgetLimits => ("update_budget_limits", "client_api_key"),
+            Self::ClientApiKeyBatchUpdate => ("batch_update", "client_api_key"),
             Self::ClientApiKeyCreate => ("create", "client_api_key"),
             Self::ClientApiKeyUpdate => ("update", "client_api_key"),
             Self::ClientApiKeyEnabled { enabled } => {

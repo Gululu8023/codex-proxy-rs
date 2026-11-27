@@ -315,6 +315,7 @@ pub use use_case::peer_link::upstream::{
 
 /// 组合根提供给控制面的运行能力；与配置和存储端口分别传入
 pub struct AdminRuntimePorts {
+    pub published_snapshot: gateway_core::runtime::RuntimeSnapshotHandle,
     pub upstream_info: Option<Arc<dyn ports::peer::PeerUpstreamService>>,
     pub timezone: gateway_core::time::DeploymentTimeZone,
     pub pricing_source: Arc<dyn ports::pricing::PricingSource>,

@@ -27,6 +27,9 @@
       "createGroup": "創建分組"
     },
     "editor": {
+      "subagents": "協作子代理",
+      "subagentsHelp": "允許 Codex 啟動協作子代理；關閉後拒絕可識別的協作子代理請求。主會話、審查及內容壓縮不受影響。",
+      "modelAccessHelp": "模型須由 Key 綁定的啟用分組授權，且帳號自身允許；多個分組按模型合併合格帳號。",
       "editDescription": "修改分組信息和請求權限",
       "createDescription": "創建後，可在賬號管理中將賬號加入這個分組",
       "groupName": "分組名稱",

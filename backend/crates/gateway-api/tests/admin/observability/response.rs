@@ -1855,7 +1855,7 @@ async fn usage_status_query_accepts_three_modes_and_rejects_unknown_values() {
             use gateway_admin::model::observability::UsageRecordStatus;
             let status_value = match status {
                 "success" => UsageRecordStatus::Success,
-                "error" => UsageRecordStatus::Error,
+                "error" => UsageRecordStatus::Error(None),
                 _ => UsageRecordStatus::All,
             };
             assert_eq!(

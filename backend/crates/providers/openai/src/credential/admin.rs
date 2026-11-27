@@ -511,7 +511,8 @@ impl CodexCredentialAdmin {
             current.account.next_refresh_at(),
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?
-        .preserving_profile();
+        .preserving_profile()
+        .preserving_access_token_expiry();
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential,
@@ -749,6 +750,7 @@ impl CodexCredentialAdmin {
             profile.email = metadata.email;
             profile.plan_type = metadata.chatgpt_plan_type;
         }
+        let same_access_token = oauth.access_token == *secret.access_token.expose_secret();
         oauth.access_token = secret.access_token.expose_secret().to_owned();
         oauth.refresh_token = secret
             .refresh_token
@@ -770,6 +772,11 @@ impl CodexCredentialAdmin {
             optional_time(next_refresh_at),
         )
         .map_err(|_| CodexCredentialAdminError::InvalidCredential)?;
+        let credential = if same_access_token {
+            credential.preserving_access_token_expiry()
+        } else {
+            credential
+        };
         Ok(PreparedCodexCredentialRotation {
             profile,
             credential: if reauthorization {

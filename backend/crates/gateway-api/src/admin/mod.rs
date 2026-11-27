@@ -16,6 +16,7 @@ pub mod accounts;
 pub mod auth;
 pub mod backups;
 mod claude;
+mod client_key_usage;
 pub mod client_keys;
 mod compression;
 pub(crate) mod diagnostics;

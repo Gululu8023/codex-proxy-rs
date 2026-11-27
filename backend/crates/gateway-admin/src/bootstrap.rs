@@ -35,6 +35,7 @@ pub async fn initialize(
     runtime: AdminRuntimePorts,
 ) -> Result<AdminBundle, AdminError> {
     let AdminRuntimePorts {
+        published_snapshot,
         upstream_info,
         timezone,
         pricing_source,
@@ -139,6 +140,7 @@ pub async fn initialize(
             store.account_groups(),
             store.account_runtime(),
             snapshot.clone(),
+            published_snapshot,
         )),
         client_keys: Arc::new(DefaultClientKeyService::new(
             store.client_keys(),

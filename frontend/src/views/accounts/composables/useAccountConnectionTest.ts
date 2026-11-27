@@ -552,14 +552,16 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
     connectionTestStartedAt.value = ''
     connectionTestFinishedAt.value = ''
     testingConnections.add(account.id)
+    let run: ConnectionTestRun | undefined
     try {
       await withMinimumDuration(
         () =>
           new Promise<void>((resolve) => {
-            connectionTestRun = {
+            run = {
               accountId: account.id,
               resolve,
             }
+            connectionTestRun = run
             const params = new URLSearchParams({
               accountId: account.id,
               modelId: connectionTestSelectedModel.value,
@@ -571,15 +573,18 @@ export function useAccountConnectionTest(options: { reload: () => Promise<unknow
               failConnectionTest(t('accounts.connectionTest.errors.browserUnsupported'))
           }),
       )
-      if (connectionTestStatus.value === 'running') {
+      if (connectionTestRun === run && connectionTestStatus.value === 'running') {
         recordConnectionTestFailure('failure', t('accounts.connectionTest.failed'), t('accounts.connectionTest.errors.missingCompletion'))
       }
     }
     catch (error: unknown) {
-      recordConnectionTestFailure('failure', t('accounts.connectionTest.failed'), errorMessage(error, t('accounts.connectionTest.errors.failed')))
+      if (connectionTestRun === run)
+        recordConnectionTestFailure('failure', t('accounts.connectionTest.failed'), errorMessage(error, t('accounts.connectionTest.errors.failed')))
     }
     finally {
-      clearConnectionTestRun()
+      // 最短展示时间结束后，旧任务不能关闭后来新建的流。
+      if (connectionTestRun === run)
+        clearConnectionTestRun()
     }
   }
 

@@ -63,6 +63,8 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: true,
                 fast_mode: FastMode::Default,
                 id: mixed_group.clone(),
@@ -77,6 +79,8 @@ async fn groups_aggregate_cross_provider_members_and_key_bindings_without_multip
     groups
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: true,
                 fast_mode: FastMode::Default,
                 id: empty_group.clone(),
@@ -380,6 +384,8 @@ async fn group_costs_should_include_statusless_websocket_but_reject_statusless_h
     groups
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: true,
                 fast_mode: FastMode::Default,
                 id: group_id(EMPTY_GROUP),
@@ -580,6 +586,8 @@ async fn fast_mode_group_updates_preserve_omitted_values_and_publish_snapshot_fa
     repository
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: true,
                 id: id.clone(),
                 name: "Fast policy".to_owned(),
@@ -601,6 +609,8 @@ async fn fast_mode_group_updates_preserve_omitted_values_and_publish_snapshot_fa
         let mutation = repository
             .update_account_group(
                 UpdateAccountGroup {
+                    model_access: None,
+                    allow_subagents: None,
                     allow_image_generation: None,
                     id: id.clone(),
                     name: "Renamed policy".to_owned(),
@@ -654,6 +664,8 @@ async fn group_costs_follow_current_members_and_pending_source_replacements() {
         groups
             .create_account_group(
                 NewAccountGroup {
+                    model_access: Default::default(),
+                    allow_subagents: true,
                     allow_image_generation: true,
                     fast_mode: FastMode::Default,
                     id: group_id(id),
@@ -759,6 +771,8 @@ async fn image_generation_group_updates_preserve_omitted_values_and_publish_snap
     repository
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 allow_image_generation: false,
                 id: id.clone(),
                 name: "Fast policy".to_owned(),
@@ -779,6 +793,8 @@ async fn image_generation_group_updates_preserve_omitted_values_and_publish_snap
         let mutation = repository
             .update_account_group(
                 UpdateAccountGroup {
+                    model_access: None,
+                    allow_subagents: None,
                     allow_image_generation: value,
                     id: id.clone(),
                     name: "Renamed policy".to_owned(),
@@ -863,6 +879,8 @@ async fn committed_group_mutations_succeed_when_the_usage_query_budget_is_exhaus
     let created = groups
         .create_account_group(
             NewAccountGroup {
+                model_access: Default::default(),
+                allow_subagents: true,
                 id: id.clone(),
                 name: "Committed".to_owned(),
                 description: None,
@@ -878,6 +896,8 @@ async fn committed_group_mutations_succeed_when_the_usage_query_budget_is_exhaus
     let updated = groups
         .update_account_group(
             gateway_admin::model::account_groups::UpdateAccountGroup {
+                model_access: None,
+                allow_subagents: None,
                 id: id.clone(),
                 name: "Updated".to_owned(),
                 description: None,

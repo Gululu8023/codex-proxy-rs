@@ -752,7 +752,8 @@ async fn concurrent_same_handle_should_allow_one_claim_and_advance_the_live_sock
     std::assert_matches!(
         concurrent_error,
         CodexClientError::WebSocket(CodexWebSocketExchangeError::ContinuationUnavailable {
-            reason: PreviousResponseUnavailableReason::ConnectionBusy
+            reason: PreviousResponseUnavailableReason::ConnectionBusy,
+            ..
         })
     );
 
@@ -769,7 +770,8 @@ async fn concurrent_same_handle_should_allow_one_claim_and_advance_the_live_sock
     std::assert_matches!(
         stale_error,
         CodexClientError::WebSocket(CodexWebSocketExchangeError::ContinuationUnavailable {
-            reason: PreviousResponseUnavailableReason::FreshConnectionRequired
+            reason: PreviousResponseUnavailableReason::FreshConnectionRequired,
+            ..
         })
     );
     let latest = backend
@@ -941,7 +943,8 @@ async fn missing_exact_socket_should_fail_without_opening_a_connection() {
     std::assert_matches!(
         error,
         CodexClientError::WebSocket(CodexWebSocketExchangeError::ContinuationUnavailable {
-            reason: PreviousResponseUnavailableReason::FreshConnectionRequired
+            reason: PreviousResponseUnavailableReason::FreshConnectionRequired,
+            ..
         })
     );
     assert!(
@@ -975,7 +978,8 @@ async fn connection_local_continuation_without_a_pool_should_not_open_http_or_we
     std::assert_matches!(
         error,
         CodexClientError::WebSocket(CodexWebSocketExchangeError::ContinuationUnavailable {
-            reason: PreviousResponseUnavailableReason::PoolUnavailable
+            reason: PreviousResponseUnavailableReason::PoolUnavailable,
+            ..
         })
     );
     assert!(

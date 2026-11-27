@@ -47,7 +47,7 @@
       "cacheReadCost": "缓存读取费用",
       "cacheWriteCost": "缓存写入费用",
       "cacheWriteUnitPrice": "缓存写入单价",
-      "fastMode": "Fast 模式",
+      "speedModeBadge": "{mode} 模式",
       "longContextBillingDetails": "长上下文计费明细",
       "billingDetails": "计费明细",
       "viewLongContextBillingDetails": "查看长上下文计费明细",
@@ -93,6 +93,8 @@
     "filters": {
       "modelPlaceholder": "按模型筛选",
       "error": "错误",
+      "errorSource": "错误来源",
+      "allSources": "全部来源",
       "requestDetailType": "请求明细类型",
       "label": "使用记录筛选与操作",
       "refreshUsageHistory": "刷新使用记录",

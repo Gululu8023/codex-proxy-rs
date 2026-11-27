@@ -542,7 +542,10 @@ fn encoder_should_extract_websocket_context_from_client_metadata() {
     );
     assert_eq!(encoded.client_thread_id.as_deref(), Some("metadata-thread"));
     assert_eq!(encoded.turn_state.as_deref(), Some("metadata-turn-state"));
-    assert_eq!(encoded.client_turn_id.as_deref(), Some("metadata-turn-id"));
+    assert_eq!(
+        encoded.body()["client_metadata"]["turn_id"],
+        "metadata-turn-id"
+    );
     assert_eq!(encoded.body().get("client_metadata"), Some(&metadata));
 }
 
@@ -588,7 +591,11 @@ fn header_context_should_win_over_body_topline_aliases() {
         encoded.turn_metadata.as_deref(),
         Some("header-turn-metadata")
     );
-    assert_eq!(encoded.client_turn_id.as_deref(), Some("header-turn-id"));
+    // 旧 turn_id 上下文不再投影到上游正文，客户端原始元数据仍保留。
+    assert_eq!(
+        encoded.body()["client_metadata"]["turn_id"],
+        "metadata-turn-id"
+    );
 }
 
 #[test]

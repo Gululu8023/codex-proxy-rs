@@ -242,13 +242,17 @@ const MAX_NATIVE_RESPONSE_EVENTS_PER_INPUT: usize = 64;
 /// 这样 Coordinator 可以先持久化 attempt，再越过发送屏障
 pub struct ProviderStream {
     metadata: ProviderCallMetadata,
-    events: EventStream,
-    _lease: Box<dyn ResourceLease>,
+    source: Option<ProviderStreamSource>,
     native_response_translator: Option<Box<dyn NativeResponseTranslator>>,
     account_feedback: Option<ProviderStreamAccountFeedback>,
     validator: Result<EventSequenceValidator, EventSequenceError>,
     strict_canonical_seen: bool,
-    terminated: bool,
+}
+
+// 事件源也可能持有租约；停止读取时一起释放，避免结算 I/O 占用账号槽位。
+struct ProviderStreamSource {
+    events: EventStream,
+    _lease: Box<dyn ResourceLease>,
 }
 
 struct ProviderStreamAccountFeedback {
@@ -349,14 +353,19 @@ impl ProviderStream {
     {
         Self {
             metadata,
-            events: Box::pin(events),
-            _lease: Box::new(lease),
+            source: Some(ProviderStreamSource {
+                events: Box::pin(events),
+                _lease: Box::new(lease),
+            }),
             native_response_translator: None,
             account_feedback: None,
             validator: Ok(EventSequenceValidator::new()),
             strict_canonical_seen: false,
-            terminated: false,
         }
+    }
+
+    pub(super) fn abort(&mut self) {
+        self.source.take();
     }
 
     /// 让公共 stream 边界统一回灌账号成功率与首个有效输出延迟
@@ -394,6 +403,15 @@ impl ProviderStream {
     /// source/target 格式不一致、单事件展开越界、终态被丢弃或 Provider 转换失败时
     /// 返回错误
     pub fn translate_native_response(
+        &mut self,
+        event: ProviderEvent,
+        terminal: bool,
+    ) -> Result<Vec<ProviderEvent>, ProviderError> {
+        self.translate_event(event, terminal)
+            .inspect_err(|_| self.abort())
+    }
+
+    fn translate_event(
         &mut self,
         mut event: ProviderEvent,
         terminal: bool,
@@ -474,7 +492,12 @@ impl Stream for ProviderStream {
     type Item = Result<ProviderEvent, ProviderError>;
 
     fn poll_next(self: Pin<&mut Self>, context: &mut Context<'_>) -> Poll<Option<Self::Item>> {
-        self.get_mut().poll_event(context)
+        let this = self.get_mut();
+        let result = this.poll_event(context);
+        if matches!(&result, Poll::Ready(Some(Err(_)) | None)) {
+            this.abort();
+        }
+        result
     }
 }
 
@@ -484,14 +507,14 @@ impl ProviderStream {
         context: &mut Context<'_>,
     ) -> Poll<Option<Result<ProviderEvent, ProviderError>>> {
         let this = self;
-        if this.terminated {
+        let Some(source) = this.source.as_mut() else {
             return Poll::Ready(None);
-        }
+        };
         if let Some(feedback) = this.account_feedback.as_mut() {
             feedback.start();
         }
 
-        match this.events.as_mut().poll_next(context) {
+        match source.events.as_mut().poll_next(context) {
             Poll::Pending => Poll::Pending,
             Poll::Ready(Some(Ok(event))) => {
                 // 纯 wire 流的 facts 仍只是旁路观测；一旦交付 canonical-only
@@ -506,7 +529,6 @@ impl ProviderStream {
                     }
                 }
                 if this.strict_canonical_seen && this.validator.is_err() {
-                    this.terminated = true;
                     let error =
                         ProviderError::new(ProviderErrorKind::Protocol, UpstreamSendState::Sent);
                     if let Some(feedback) = this.account_feedback.as_mut() {
@@ -520,14 +542,12 @@ impl ProviderStream {
                 Poll::Ready(Some(Ok(event)))
             }
             Poll::Ready(Some(Err(error))) => {
-                this.terminated = true;
                 if let Some(feedback) = this.account_feedback.as_mut() {
                     feedback.report_failure(&error);
                 }
                 Poll::Ready(Some(Err(error)))
             }
             Poll::Ready(None) => {
-                this.terminated = true;
                 let validation = if this.strict_canonical_seen {
                     this.validator
                         .as_ref()

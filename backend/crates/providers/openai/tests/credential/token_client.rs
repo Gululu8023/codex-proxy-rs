@@ -49,7 +49,7 @@ async fn refresh_and_code_exchange_use_the_selected_account_proxy() {
 }
 
 #[tokio::test]
-async fn refresh_tracks_the_online_profile_without_contaminating_code_exchange() {
+async fn refresh_and_code_exchange_follow_the_online_global_profile() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
         .and(path("/oauth/token"))
@@ -67,6 +67,7 @@ async fn refresh_tracks_the_online_profile_without_contaminating_code_exchange()
             token_endpoint: format!("{}/oauth/token", server.uri()),
         },
         profile.clone(),
+        crate::support::runtime_policy(),
     )
     .expect("production auth transport");
     for (core, desktop, build) in [
@@ -108,10 +109,15 @@ async fn refresh_tracks_the_online_profile_without_contaminating_code_exchange()
             "version",
             "x-openai-internal-codex-residency",
         ] {
-            assert!(!exchange.headers.contains_key(name), "raw exchange: {name}");
+            assert_eq!(
+                exchange.headers.get(name),
+                refresh.headers.get(name),
+                "global profile: {name}"
+            );
         }
         for name in ["authorization", "chatgpt-account-id", "version"] {
             assert!(!refresh.headers.contains_key(name), "refresh: {name}");
+            assert!(!exchange.headers.contains_key(name), "exchange: {name}");
         }
     }
 }
@@ -127,6 +133,7 @@ fn client(server: &MockServer) -> OpenAiTokenClient {
             token_endpoint: format!("{}/oauth/token", server.uri()),
         },
         provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
+        crate::support::runtime_policy(),
     )
 }
 
@@ -395,6 +402,7 @@ async fn authorization_code_response_timeouts_remain_ambiguous_without_exposing_
                 token_endpoint: format!("http://{address}/oauth/token?PRIVATE_URL_MARKER"),
             },
             provider_openai::transport::profile::CodexWireProfileState::new(Default::default()),
+            crate::support::runtime_policy(),
         );
         let error = client
             .exchange_authorization_code(AuthorizationCodeGrant {
